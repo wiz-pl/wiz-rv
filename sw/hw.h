@@ -14,9 +14,10 @@
 #define UART_DATA     IO(0x00)             /* read: the next byte, or -1; write: send a byte */
 #define CYCLES_LO     IO(0x10)             /* a free-running cycle counter (HW_CLOCK_HZ) */
 #define CYCLES_HI     IO(0x14)
-#define JOY_X         IO(0x20)             /* the thumbstick (XADC), 12 bits, centre ~2048 */
-#define JOY_Y         IO(0x24)
-#define JOY_BUTTONS   IO(0x28)             /* bit 0: the stick's button, bits 4..7: BTN0..BTN3 */
+#define SND_DATA      IO(0x30)             /* write: one 8-bit unsigned sample into the FIFO */
+#define SND_FREE      IO(0x34)             /* read: free places in the FIFO */
+#define SND_RATE      11025u               /* the FIFO is played at this rate (PWM on JB1) */
+#define SND_FIFO      4096u
 
 #define OLED_FB       ((volatile uint16_t *)0x81000000u)   /* 96 x 64 RGB565, row-major */
 #define OLED_W        96

@@ -99,6 +99,7 @@ structure Out (r : HwTy → Type) where
   we : r Bit
   wdata : r B32
   wstrb : r B4
+  pend : r Bit    -- a bus access is in progress (phase P)
   deriving Bundle
 
 -- what the core sees: an I/O store may go ahead (it waits in E until it may); the value
@@ -371,7 +372,7 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : St ab wb 
       (Hw.mux enterP (Hw.mux busWr (Hw.lit 4 Ph.f) nphB) s.bret)
       (Hw.mux inP (Hw.or s.bsent x.ready) (Hw.lit 1 0))))
     (Out.pack (Out.mk s.trap (gate goE (gate d.store io)) (Hw.slice 0 8 rs2v) (gate goE (gate d.load io)) sum rs2v
-      (gate inP (Hw.not s.bsent)) s.badr s.bwe s.bwd s.bst))
+      (gate inP (Hw.not s.bsent)) s.badr s.bwe s.bwd s.bst inP))
 
 ------------------------------------------------------------------------------------
 -- The core as a circuit, with a program in memory from address 0

@@ -53,3 +53,10 @@ def mulI : String := report 5 Prog.muldivShort 400
 #eval mulI
 def mulIM : String := reportM 5 .true Prog.muldivShort 3000
 #eval mulIM
+-- the Doom machine's boot loader (on-chip RAM, 16 KB), loading a program into DDR over
+-- the UART and running it there
+def bootE : String := (fun (r : Ls.Result) => Nat.repr r.instrs ++ " instructions, out " ++ showBytes r.out
+    ++ (match r.problems with
+      | .nil => "agrees"
+      | ps => "DISAGREES" ++ lines ps)) (Ls.runIn 4 12 .false (Asm.assemble Prog.boot) (Boot.session (Asm.assemble Prog.hello)) 6000)
+#eval bootE

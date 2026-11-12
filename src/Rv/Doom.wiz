@@ -1,0 +1,248 @@
+import Rv.Oled
+import Rv.Board
+-- The Doom machine on the Arty A7 (README.md, "Doom"): the RV32IM core with 16 KB of
+-- on-chip RAM (the boot loader, `Prog.boot`) and a bus to DDR (through the 8 KB
+-- write-back cache of wiz-ddr3), and its I/O:
+--
+--   0x80000000  UART data      read: the next byte or -1; write: send (1 Mbaud, 8N1)
+--   0x80000010  cycles, low    a 64-bit counter at the core's rate (50 MHz)
+--   0x80000014  cycles, high
+--   0x80000030  sound data     write: an 8-bit unsigned sample into the FIFO (4096)
+--   0x80000034  sound free     read: free places in the FIFO
+--   0x81000000  framebuffer    96 × 64 RGB 565, halfword stores (sw/hw.h)
+--
+-- The sound FIFO is played at 11025 Hz (a sample every 4535 cycles) as 8-bit PWM on
+-- JB pin 1; the framebuffer is sent to the PmodOLEDrgb on JA continuously.
+--
+-- `doomSys` is the part at the core's rate (under `Circuit.half` on the board); the bus
+-- adapter (`busStep`) and the cache run at the full 100 MHz.
+
+def B13 : HwTy := HwTy.bits 13
+def B64 : HwTy := HwTy.bits 64
+
+-- the OLED controller at a 3.125 MHz SPI clock: steps at 50 MHz / 8 (6.25 MHz): 20 ms,
+-- 1 ms, 100 ms, a frame every 2^18 steps (42 ms)
+def Doom.oled : RgbCfg := RgbCfg.mk 125000 6250 625000 18 0 1
+-- 1 Mbaud at 50 MHz (the FT2232: 3 MHz / 3, exact)
+def Doom.baud : Nat := 50
+-- 11025 Hz at 50 MHz
+def Doom.sndDiv : Nat := 4535
+
+structure DIn (r : HwTy → Type) where
+  uart_rx : r Bit
+  btn : r B4
+  ready : r Bit
+  rvalid : r Bit
+  rdata : r B32
+  deriving Bundle
+
+structure DOut (r : HwTy → Type) where
+  uart_tx : r Bit
+  led : r B4
+  ja : r B8
+  jb : r B8
+  valid : r Bit
+  addr : r B32
+  we : r Bit
+  wdata : r B32
+  wstrb : r B4
+  pend : r Bit
+  deriving Bundle
+
+structure Snd (r : HwTy → Type) where
+  fifo : r (HwTy.mem 12 8)
+  wp : r B13
+  rp : r B13
+  smp : r B8      -- the FIFO's read register (at rp)
+  cur : r B8      -- the sample playing
+  div : r B13
+  pwm : r B8
+  deriving Bundle
+
+structure Fb (r : HwTy → Type) where
+  pix : r (HwTy.mem 13 16)
+  q : r B16       -- the read register (the pixel the OLED controller is at)
+  pre : r B3      -- the controller's clock enable: every 8th cycle
+  deriving Bundle
+
+structure DSys (r : HwTy → Type) where
+  cpu : St 5 12 r
+  sync : Sync r
+  rx : Rx r
+  tx : Tx r
+  full : r Bit
+  byte : r B8
+  cyc : r B64
+  snd : Snd r
+  fb : Fb r
+  oled : RCtl 18 r
+  deriving Bundle
+
+def dSys {r : HwTy → Type} [Hw r] (s : DSys r) (x : DIn r) : r (HwTy.prod DSys.code DOut.code) :=
+  let rr := rxStep Doom.baud s.rx s.sync.ff2;
+  let ω got := Byte.unpack (Hw.snd rr);
+  let ω o0 := Out.unpack (Hw.snd (coreStep 5 12 .true s.cpu In.quiet));
+  let off : r B8 := Hw.slice 0 8 o0.ioa;
+  let fbA := bitOf 24 o0.ioa;
+  let uartA := Hw.and (isK off 0) (Hw.not fbA);
+  let ω sn := s.snd;
+  let count : r B13 := Hw.sub sn.wp sn.rp;
+  let free : r B32 := Hw.sub (Hw.lit 32 4096) (Hw.cat (Hw.lit 19 0) count);
+  let ioIn : r B32 := Hw.mux uartA (Hw.mux s.full (Hw.cat (Hw.lit 24 0) s.byte) (Hw.lit 32 4294967295))
+    (Hw.mux (isK off 16) (Hw.slice 0 32 s.cyc) (Hw.mux (isK off 20) (Hw.slice 32 32 s.cyc)
+    (Hw.mux (isK off 52) free (Hw.lit 32 0))));
+  let cr := coreStep 5 12 .true s.cpu (In.mk (Hw.mux uartA (txIdle s.tx) (Hw.lit 1 1)) ioIn x.ready x.rvalid x.rdata);
+  let ω o := Out.unpack (Hw.snd cr);
+  let rst := bitOf 0 x.btn;
+  let ω c := St.unpack 5 12 (Hw.fst cr);
+  let c2 := St.mk (Hw.mux rst (Hw.lit 4 Ph.f) c.ph) (Hw.mux rst (Hw.lit 32 0) c.pc) c.q0 c.q1 c.q2 c.q3
+    c.m0 c.m1 c.m2 c.m3 c.rfa c.rfb c.x1 c.x2 c.acc c.dv c.rm c.cnt c.srd c.sf3 c.slo c.sio (Hw.mux rst (Hw.lit 3 0) c.trap)
+    c.busq c.fromBus c.badr c.bwe c.bwd c.bst c.bret c.bsent;
+  -- sound: a write at 0x30 while there is room; a sample every `sndDiv` cycles
+  let sw := Hw.and o.wr (Hw.and (isK off 48) (Hw.and (Hw.not fbA) (Hw.ult count (Hw.lit 13 4096))));
+  let tick := isK sn.div (Doom.sndDiv - 1);
+  let have := Hw.not (isK count 0);
+  -- the OLED: the pixel at the controller's (x, y), read every cycle
+  let ω ol := s.oled;
+  let y13 : r B13 := Hw.cat (Hw.lit 7 0) ol.gen.y;
+  let idx : r B13 := Hw.add (Hw.add (Hw.shl y13 6) (Hw.shl y13 5)) (Hw.cat (Hw.lit 6 0) ol.gen.x);
+  let fw := Hw.and o.wr fbA;
+  let en := isK s.fb.pre 0;
+  let oledNext := rctlStep Doom.oled RProg.tree ol s.fb.q;
+  Hw.pair
+    (DSys.pack (DSys.mk
+      c2
+      (Sync.unpack (syncStep s.sync x.uart_rx))
+      (Rx.unpack (Hw.fst rr))
+      (Tx.unpack (txStep Doom.baud s.tx (Hw.and o.wr uartA) o.byte))
+      (Hw.mux got.valid hi (Hw.mux (Hw.and o.rd uartA) lo s.full))
+      (Hw.mux got.valid got.data s.byte)
+      (inc s.cyc)
+      (Snd.mk
+        (Hw.memWrite sn.fifo sw (Hw.slice 0 12 sn.wp) (Hw.slice 0 8 o.iod))
+        (Hw.mux sw (inc sn.wp) sn.wp)
+        (Hw.mux (Hw.and tick have) (inc sn.rp) sn.rp)
+        (Hw.memRead sn.fifo (Hw.slice 0 12 sn.rp))
+        (Hw.mux tick (Hw.mux have sn.smp (Hw.lit 8 128)) sn.cur)
+        (Hw.mux tick (Hw.lit 13 0) (inc sn.div))
+        (inc sn.pwm))
+      (Fb.mk
+        (Hw.memWrite s.fb.pix fw (Hw.slice 1 13 o.ioa) (Hw.slice 0 16 o.iod))
+        (Hw.memRead s.fb.pix idx)
+        (inc s.fb.pre))
+      (RCtl.unpack 18 (Hw.mux en oledNext (RCtl.pack 18 ol)))))
+    (DOut.pack (DOut.mk s.tx.line
+      -- LD4: a byte was … (heartbeat: bit 25 of the cycle counter), LD5 … LD7: the trap code
+      (Hw.cat s.cpu.trap (bitOf 25 s.cyc))
+      (Hw.cat ol.pins.pmoden (Hw.cat ol.pins.vccen (Hw.cat ol.pins.res (Hw.cat ol.pins.dc
+        (Hw.cat ol.spi.sclk (Hw.cat (Hw.lit 1 0) (Hw.cat ol.spi.mosi ol.pins.cs)))))))
+      (Hw.cat (Hw.lit 7 0) (Hw.ult sn.pwm sn.cur))
+      o.valid o.addr o.we o.wdata o.wstrb o.pend))
+
+def DSys.init (prog : List Nat) : DSys HwTy.El :=
+  DSys.mk (St.init 5 12 prog) Sync.init Rx.init Tx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 64 0)
+    (Snd.mk (fun (a : BitVec 12) => BitVec.ofNat 8 128) (BitVec.ofNat 13 0) (BitVec.ofNat 13 0) (BitVec.ofNat 8 128)
+      (BitVec.ofNat 8 128) (BitVec.ofNat 13 0) (BitVec.ofNat 8 0))
+    (Fb.mk (fun (a : BitVec 13) => BitVec.ofNat 16 0) (BitVec.ofNat 16 0) (BitVec.ofNat 3 0))
+    (RCtl.init Doom.oled)
+
+def doomSys (prog : List Nat) : Circuit DIn.code DOut.code :=
+  Circuit.bundled DSys.bundle DIn.bundle DOut.bundle (DSys.init prog) dSys
+
+------------------------------------------------------------------------------------
+-- The bus adapter, at the full rate, between the core (at half rate: it sees the bus
+-- only every other cycle, and holds its request) and the cache (whose `ready` and
+-- `rvalid` last one cycle): the request goes to the cache until it is taken (`acc`);
+-- `ready`, `rvalid` and the data are kept until the core has left its bus phase.
+
+structure BusA (r : HwTy → Type) where
+  acc : r Bit
+  gotR : r Bit
+  gotV : r Bit
+  data : r B32
+  deriving Bundle
+
+-- the cache's side (wiz-ddr3 CReq / CResp)
+structure CacheReq (r : HwTy → Type) where
+  valid : r Bit
+  addr : r (HwTy.bits 28)
+  we : r Bit
+  wdata : r B32
+  wstrb : r B4
+  deriving Bundle
+structure CacheResp (r : HwTy → Type) where
+  ready : r Bit
+  rvalid : r Bit
+  rdata : r B32
+  deriving Bundle
+
+-- core request (from DOut) and the cache's answer → the adapter's next state, the
+-- request to the cache, the answer to the core (ready, rvalid, rdata)
+def busStep {r : HwTy → Type} [Hw r] (s : BusA r) (valid pend we : r Bit) (addr wdata : r B32) (wstrb : r B4)
+    (c : CacheResp r) : r (HwTy.prod BusA.code (HwTy.prod CacheReq.code CacheResp.code)) :=
+  Hw.pair
+    (BusA.pack (BusA.mk
+      (gate pend (Hw.or s.acc c.ready))
+      (gate pend (Hw.or s.gotR c.ready))
+      (gate pend (Hw.or s.gotV c.rvalid))
+      (Hw.mux c.rvalid c.rdata s.data)))
+    (Hw.pair
+      (CacheReq.pack (CacheReq.mk (Hw.and valid (Hw.not s.acc)) (Hw.slice 0 28 addr) we wdata wstrb))
+      (CacheResp.pack (CacheResp.mk (Hw.or s.gotR c.ready) (Hw.or s.gotV c.rvalid) (Hw.mux c.rvalid c.rdata s.data))))
+
+def BusA.init : BusA HwTy.El := BusA.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0)
+
+------------------------------------------------------------------------------------
+-- For simulation: the machine at half rate, the adapter, and in place of the cache and
+-- DDR a memory that answers a request two cycles after it is made (a word memory of
+-- 2^ab words; addresses wrap).
+
+structure SimDdr (ab : Nat) (r : HwTy → Type) where
+  m : r (HwTy.mem ab 32)
+  wait : r B2
+  deriving Bundle
+
+structure SimIn (r : HwTy → Type) where
+  uart_rx : r Bit
+  deriving Bundle
+
+def ddrModel {r : HwTy → Type} [Hw r] (ab : Nat) (s : SimDdr ab r) (q : CacheReq r) : r (HwTy.prod (SimDdr.code ab) CacheResp.code) :=
+  let go := Hw.and q.valid (isK s.wait 2);
+  let ix : r (HwTy.bits ab) := Hw.slice 2 ab q.addr;
+  let old := Hw.memRead s.m ix;
+  let ml := fun (l : Nat) => Hw.mux (bitOf l q.wstrb) (Hw.slice (8 * l) 8 q.wdata) (Hw.slice (8 * l) 8 old : r B8);
+  let nw : r B32 := Hw.cat (ml 3) (Hw.cat (ml 2) (Hw.cat (ml 1) (ml 0)));
+  Hw.pair
+    (SimDdr.pack ab (SimDdr.mk (Hw.memWrite s.m (Hw.and go q.we) ix nw)
+      (Hw.mux q.valid (Hw.mux go (Hw.lit 2 0) (inc s.wait)) (Hw.lit 2 0))))
+    (CacheResp.pack (CacheResp.mk go (Hw.and go (Hw.not q.we)) old))
+
+structure SimOut (r : HwTy → Type) where
+  uart_tx : r Bit
+  led : r B4
+  ja : r B8
+  jb : r B8
+  deriving Bundle
+
+def simTop (ab : Nat) (prog : List Nat) : Circuit SimIn.code SimOut.code :=
+  let ω h := Circuit.half (doomSys prog);
+  Circuit.mk (HwTy.prod h.st (HwTy.prod BusA.code (SimDdr.code ab)))
+    (h.init, (Bundle.toEl BusA.bundle BusA.init, Bundle.toEl (SimDdr.bundle ab)
+      (SimDdr.mk (fun (a : BitVec ab) => BitVec.ofNat 32 0) (BitVec.ofNat 2 0))))
+    (fun s x =>
+      let hs := Hw.fst s;
+      let ω bs := BusA.unpack (Hw.fst (Hw.snd s));
+      let ω ds := SimDdr.unpack ab (Hw.snd (Hw.snd s));
+      let rx := (SimIn.unpack x).uart_rx;
+      let quiet := DIn.pack (DIn.mk rx (Hw.lit 4 0) (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 32 0));
+      let ω o0 := DOut.unpack (Hw.snd (Circuit.inst h hs quiet));
+      let ω q := CacheReq.unpack (Hw.fst (Hw.snd (busStep bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb
+        (CacheResp.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 32 0)))));
+      let dr := ddrModel ab ds q;
+      let ω resp := CacheResp.unpack (Hw.snd dr);
+      let br := busStep bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb resp;
+      let ω toCore := CacheResp.unpack (Hw.snd (Hw.snd br));
+      let hr := Circuit.inst h hs (DIn.pack (DIn.mk rx (Hw.lit 4 0) toCore.ready toCore.rvalid toCore.rdata));
+      let ω o := DOut.unpack (Hw.snd hr);
+      Hw.pair (Hw.pair (Hw.fst hr) (Hw.pair (Hw.fst br) (Hw.fst dr)))
+        (SimOut.pack (SimOut.mk o.uart_tx o.led o.ja o.jb)))

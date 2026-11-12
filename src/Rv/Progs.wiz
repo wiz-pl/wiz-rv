@@ -210,3 +210,43 @@ def Prog.ddr : List Asm :=
     A.li 5 10 :: .nil)
   (List.append (D.copyWords 0 D.routine)
   (A.addi 6 1 256 :: A.jalr 1 6 0 :: P.out 5 :: A.ebreak :: .nil))
+
+------------------------------------------------------------------------------------
+-- The boot loader for the Doom machine (on-chip RAM at 0): it prints "wiz-rv boot",
+-- then reads records from the UART:
+--   'L' addr len bytes…   store len bytes from addr (addr, len: 4 bytes each, little-
+--                         endian); answers '.'
+--   'G' addr              answers '!' and jumps to addr
+-- getb (x5: return address): the next byte in x10, waiting for it.
+
+def Boot.getb : List Asm :=
+  A.label "getb" :: A.lw 10 0 15 :: A.blt 10 0 "getb" :: A.jalr 0 5 0 :: .nil
+-- get32 (x1: return address): four bytes into x11, little-endian (uses x10, x14)
+def Boot.get32 : List Asm :=
+  A.label "get32" :: A.li 11 0 :: A.li 14 0 ::
+  A.label "get32.l" :: A.jal 5 "getb" :: A.sll 10 10 14 :: A.or 11 11 10 :: A.addi 14 14 8 :: A.li 10 32 :: A.blt 14 10 "get32.l" ::
+  A.ret :: .nil
+def Prog.boot : List Asm :=
+  List.append (P.port :: A.la 12 "boot.banner" ::
+    A.label "boot.puts" :: A.lbu 10 0 12 :: A.beqz 10 "boot.loop" :: A.sb 10 0 15 :: A.addi 12 12 1 :: A.j "boot.puts" ::
+    A.label "boot.loop" :: A.jal 5 "getb" :: A.li 13 76 :: A.beq 10 13 "boot.load" :: A.li 13 71 :: A.beq 10 13 "boot.go" ::
+      A.j "boot.loop" ::
+    A.label "boot.load" :: A.call "get32" :: A.mv 12 11 :: A.call "get32" :: A.mv 13 11 ::
+    A.label "boot.copy" :: A.beqz 13 "boot.ack" :: A.jal 5 "getb" :: A.sb 10 0 12 :: A.addi 12 12 1 :: A.addi 13 13 (-1) ::
+      A.j "boot.copy" ::
+    A.label "boot.ack" :: A.li 10 46 :: A.sb 10 0 15 :: A.j "boot.loop" ::
+    A.label "boot.go" :: A.call "get32" :: A.li 10 33 :: A.sb 10 0 15 :: A.jalr 0 11 0 :: .nil)
+  (List.append Boot.getb (List.append Boot.get32 (A.string "boot.banner" "wiz-rv boot\n")))
+
+-- a boot loader session: load `prog` (position-independent) at 0x40000000 and run it
+def Boot.le32 (v : Nat) : List Nat := Rv.bits v 0 8 :: Rv.bits v 8 8 :: Rv.bits v 16 8 :: Rv.bits v 24 8 :: .nil
+def Boot.bytes : List Nat → List Nat
+  | .nil => .nil
+  | .cons w ws => List.append (Boot.le32 w) (Boot.bytes ws)
+def Boot.session (prog : List Nat) : List Nat :=
+  List.append (76 :: Boot.le32 1073741824) (List.append (Boot.le32 (4 * List.length prog))
+  (List.append (Boot.bytes prog) (71 :: Boot.le32 1073741824)))
+-- the program loaded: prints "ok" from DDR
+def Prog.hello : List Asm :=
+  P.port :: A.la 10 "hello.s" :: A.label "hello.l" :: A.lbu 5 0 10 :: A.beqz 5 "hello.e" :: A.sb 5 0 15 :: A.addi 10 10 1 :: A.j "hello.l" ::
+  A.label "hello.e" :: A.ebreak :: A.string "hello.s" "ok"

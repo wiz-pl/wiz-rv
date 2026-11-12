@@ -2,9 +2,8 @@
    - the 320 x 200 frame, downscaled to the PmodOLEDrgb's 96 x 64 (RGB565), each OLED
      pixel the average of a block of the frame;
    - time from the cycle counter;
-   - keys from the thumbstick (directions: arrows, its button: fire), the board's
-     buttons (BTN1: use, BTN2: enter, BTN3: escape) and the UART (w a s d, space: use,
-     f: fire, enter, escape, y, n, digits). */
+   - keys from the UART (optional: without them Doom plays its demo loop);
+   - sound: sw/sound_wizrv.c. */
 #include <stdio.h>
 #include "doomgeneric.h"
 #include "doomkeys.h"
@@ -42,14 +41,11 @@ void DG_SleepMs(uint32_t ms) {
 
 void DG_SetWindowTitle(const char *title) { (void)title; }
 
-/* Keys: the held state of each source is compared with what Doom was last told; a
-   change becomes one event. UART keys are "pressed" for a few frames. */
-enum { K_UP, K_DOWN, K_LEFT, K_RIGHT, K_FIRE, K_USE, K_ENTER, K_ESC, K_UART, K_N };
-static const unsigned char keycode[K_N] = { KEY_UPARROW, KEY_DOWNARROW, KEY_LEFTARROW, KEY_RIGHTARROW,
-  KEY_FIRE, KEY_USE, KEY_ENTER, KEY_ESCAPE, 0 };
-static int told[K_N];
+/* Keys: from the UART only (w a s d: arrows, f: fire, space: use, enter, escape, y, n,
+   digits); a key is held for 150 ms. With nothing typed Doom plays its demos. */
 static unsigned char uart_key;
 static uint32_t uart_until;
+static int told;
 
 static unsigned char from_uart(int c) {
   switch (c) {
@@ -63,28 +59,14 @@ static unsigned char from_uart(int c) {
 }
 
 int DG_GetKey(int *pressed, unsigned char *key) {
-  int held[K_N];
-  int x = (int)JOY_X - 2048, y = (int)JOY_Y - 2048;
-  uint32_t btn = JOY_BUTTONS;
-  held[K_UP] = y < -700; held[K_DOWN] = y > 700;
-  held[K_LEFT] = x < -700; held[K_RIGHT] = x > 700;
-  held[K_FIRE] = btn & 1; held[K_USE] = (btn >> 5) & 1;
-  held[K_ENTER] = (btn >> 6) & 1; held[K_ESC] = (btn >> 7) & 1;
   uint32_t now = DG_GetTicksMs();
-  if (!told[K_UART]) {
+  if (!told) {
     int c = (int)UART_DATA;
     unsigned char k = c < 0 ? 0 : from_uart(c);
-    if (k) { uart_key = k; uart_until = now + 150; }
+    if (k) { uart_key = k; uart_until = now + 150; *pressed = 1; *key = k; told = 1; return 1; }
+    return 0;
   }
-  held[K_UART] = uart_key && now < uart_until;
-  for (int i = 0; i < K_N; i++) {
-    if (held[i] != told[i]) {
-      told[i] = held[i];
-      *pressed = held[i];
-      *key = i == K_UART ? uart_key : keycode[i];
-      return 1;
-    }
-  }
+  if (now >= uart_until) { told = 0; *pressed = 0; *key = uart_key; return 1; }
   return 0;
 }
 
