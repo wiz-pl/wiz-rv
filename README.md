@@ -34,6 +34,25 @@ read ports). Two cycles per instruction (decode, execute), three for loads and s
 three plus the shift amount for shifts (a one-place-per-cycle shifter in place of a
 barrel shifter). `src/Rv/Core.wiz` has the phase diagram.
 
+Optionally (`mx`) the M extension: a one-cycle 64-bit multiplier (DSP blocks on a
+Xilinx part) and a 32-cycle restoring divider.
+
+## Results
+
+| design | part | logic | block RAM | Fmax (nextpnr) |
+|---|---|---|---|---|
+| RV32E, 2 KB | iCE40-HX1K (tq144) | 1020 / 1280 LCs (79 %) | 8 / 16 | 40 MHz |
+
+Lockstep (`tests/lockstep.wiz`): the core and the specification agree, instruction by
+instruction (PC and every register at each instruction boundary, all memory and the
+output at the end), on programs exercising every RV32I instruction, the traps, RV32E's
+register limit, and (RV32IM) every M instruction on the edge cases.
+
+Proofs (`src/Rv/Proofs.wiz`, kernel-checked): from the decode phase, two cycles of the
+RV32E core give the specification's PC and rd for XOR, OR, AND, XORI, ORI, ANDI, LUI and
+AUIPC, for every PC, register file, memory (holding the instruction at PC) and every
+value of the core's other registers. FINDINGS.md, H2, says why not the others.
+
 ## Toolchain
 
 The HDL memories are Wiz PR #166 and the fast netlist simulator PR #199, both unmerged

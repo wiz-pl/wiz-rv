@@ -1,0 +1,34 @@
+import Rv.Core
+-- The core on a board: the output port drives LEDs (the low bits of the last byte
+-- written), the trap code is shown too. iCEstick: five LEDs, the 12 MHz clock.
+
+structure Pins (r : HwTy → Type) where
+  uart_rx : r Bit       -- unused (an input so that the design has one)
+  deriving Bundle
+
+structure Leds (r : HwTy → Type) where
+  leds : r B5
+  deriving Bundle
+
+structure Sys (ab wb : Nat) (r : HwTy → Type) where
+  cpu : St ab wb r
+  latch : r B5
+  deriving Bundle
+
+-- LED1 … LED4: the low four bits of the last byte written; LED5 (green): stopped
+def sysStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : Sys ab wb r) (x : Pins r) :
+    r (HwTy.prod (Sys.code ab wb) Leds.code) :=
+  let cr := coreStep ab wb mx s.cpu x.uart_rx;
+  let ω o := Out.unpack (Hw.snd cr);
+  let latch := Hw.mux o.wr (Hw.slice 0 5 o.byte) s.latch;
+  Hw.pair (Sys.pack ab wb (Sys.mk (St.unpack ab wb (Hw.fst cr)) latch))
+    (Leds.pack (Leds.mk (Hw.cat (Hw.not (isK s.cpu.trap 0)) (Hw.slice 0 4 s.latch : r (HwTy.bits 4)))))
+
+def board (ab wb : Nat) (mx : Bool) (prog : List Nat) : Circuit Pins.code Leds.code :=
+  Circuit.bundled (Sys.bundle ab wb) Pins.bundle Leds.bundle (Sys.mk (St.init ab wb prog) (BitVec.ofNat 5 0))
+    (sysStep ab wb mx)
+
+-- iCEstick pins (icestorm's examples/icestick/icestick.pcf)
+def Icestick.clk : Nat := 21
+def Icestick.pins : List Pin :=
+  .cons (Pin.one "uart_rx" 9) (.cons (Pin.bus "leds" (.cons 99 (.cons 98 (.cons 97 (.cons 96 (.cons 95 .nil)))))) .nil)

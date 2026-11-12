@@ -1,0 +1,33 @@
+-- test: run
+import Rv.Lockstep
+import Rv.Progs
+import Hdl.Sim
+import IO
+-- Long runs: the core's netlist in the fast simulator (Hdl.Sim, `Circuit.simFast`), the
+-- bytes on its output port and its trap code against the specification's, compiled.
+-- (The full lockstep, every register at every instruction, is tests/lockstep.wiz.)
+
+def showBytes : List Nat → String
+  | .nil => ""
+  | .cons x xs => Nat.repr x ++ " " ++ showBytes xs
+
+-- the bytes written (outputs per cycle: trap, wr, byte) and the trap code at the end
+def L.bytes : List (List Nat) → List Nat → Nat → List Nat × Nat
+  | .nil, acc, t => (List.reverse acc, t)
+  | .cons o os, acc, t =>
+    L.bytes os (if Nat.beq (Hdl.nthD 0 o 1) 1 then .cons (Hdl.nthD 0 o 2) acc else acc) (Hdl.nthD 0 o 0)
+
+def L.idle : Nat → List (HwTy.El Bit) → List (HwTy.El Bit)
+  | .zero, acc => acc
+  | .succ k, acc => L.idle k (.cons (BitVec.ofNat 1 0) acc)
+
+def L.check (name : String) (ab wb : Nat) (mx : Bool) (p : List Asm) (cycles steps : Nat) : IO Unit :=
+  let prog := Asm.assemble p;
+  let hw := L.bytes (Circuit.simFast (core ab wb mx prog) (L.idle cycles .nil)) .nil 0;
+  let sp := Rv.run (Cfg.mk ab (wb + 2) mx) steps (Arch.start (Cfg.mk ab (wb + 2) mx) prog);
+  IO.println (name ++ ": core " ++ showBytes hw.1 ++ "trap " ++ Nat.repr hw.2 ++ "; spec " ++ showBytes (List.reverse sp.out)
+    ++ "trap " ++ Nat.repr sp.trap ++ (if Bool.and (Ls.natsEq hw.1 (List.reverse sp.out)) (Nat.beq hw.2 sp.trap) then ": agree" else ": DISAGREE"))
+
+def main : IO Unit := do
+  L.check "sieve rv32e" 4 9 .false Prog.sieve 60000 30000;
+  L.check "muldiv rv32im" 5 9 .true Prog.muldiv 20000 5000

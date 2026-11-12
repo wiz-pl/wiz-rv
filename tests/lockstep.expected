@@ -1,9 +1,31 @@
-tests/lockstep.wiz:26:1: info: "37 instructions, 76 cycles, trap 2, out 55 agrees"
-tests/lockstep.wiz:28:1: info: "62 instructions, 217 cycles, trap 2, out 252 246 10 128 1 0 0 1 1 0 250 251 1 149 1 0 1 0 6 4 249 69 35 0 agrees"
-tests/lockstep.wiz:30:1: info: "49 instructions, 456 cycles, trap 2, out 137 222 8 248 255 1 128 240 8 120 230 196 239 128 agrees"
-tests/lockstep.wiz:32:1: info: "47 instructions, 244 cycles, trap 2, out 33 67 255 255 135 171 171 254 254 254 7 135 agrees"
-tests/lockstep.wiz:34:1: info: "40 instructions, 101 cycles, trap 2, out 7 23 104 1 2 1 0 agrees"
-tests/lockstep.wiz:36:1: info: "300 instructions, 705 cycles, trap 2, out 156 253 0 2 5 9 9 77 agrees"
-tests/lockstep.wiz:40:1: info: .cons "3 instructions, 7 cycles, trap 5, out agrees" (.cons "3 instructions, 7 cycles, trap 6, out agrees" (.cons "3 instructions, 7 cycles, trap 4, out agrees" (.cons "2 instructions, 5 cycles, trap 3, out agrees" (.cons "2 instructions, 5 cycles, trap 1, out agrees" (.cons "1 instructions, 3 cycles, trap 3, out agrees" .nil)))))
-tests/lockstep.wiz:43:1: info: "3 instructions, 7 cycles, trap 2, out agrees"
-tests/lockstep.wiz:45:1: info: "62 instructions, 217 cycles, trap 2, out 252 246 10 128 1 0 0 1 1 0 250 251 1 149 1 0 1 0 6 4 249 69 35 0 agrees"
+tests/lockstep.wiz:2:1: error: module Rv.Lockstep has errors: [1:1: error: module Rv.Core has errors: [146:48: error: type mismatch
+  expected: ?m120 r inst✝ ab w
+  inferred: ?m121 r inst✝ ab mx w x✝ (.bits 1)
+  (a variable escapes the scope of the hole being solved), 186:42: error: type mismatch
+  expected: ?m26 r inst✝ ab wb s x ph inF inD inE inM inS
+  inferred: ?m27 r inst✝ ab wb mx s x ph inF inD inE inM inS x✝ (.bits 1)
+  (a variable escapes the scope of the hole being solved), 325:17: error: unknown identifier 'coreStep'], 84:20: error: unknown identifier 'coreStep', 92:3: error: unknown identifier 'Ls']
+tests/lockstep.wiz:23:42: error: unknown identifier 'Ls'
+tests/lockstep.wiz:24:63: error: unknown identifier 'reportM'
+tests/lockstep.wiz:26:22: error: unknown identifier 'report'
+tests/lockstep.wiz:27:7: error: unknown identifier 'sumE'
+tests/lockstep.wiz:28:22: error: unknown identifier 'report'
+tests/lockstep.wiz:29:7: error: unknown identifier 'aluE'
+tests/lockstep.wiz:30:24: error: unknown identifier 'report'
+tests/lockstep.wiz:31:7: error: unknown identifier 'shiftE'
+tests/lockstep.wiz:32:22: error: unknown identifier 'report'
+tests/lockstep.wiz:33:7: error: unknown identifier 'memE'
+tests/lockstep.wiz:34:25: error: unknown identifier 'report'
+tests/lockstep.wiz:35:7: error: unknown identifier 'branchE'
+tests/lockstep.wiz:36:23: error: unknown identifier 'report'
+tests/lockstep.wiz:37:7: error: unknown identifier 'sortE'
+tests/lockstep.wiz:39:10: error: unknown identifier 'report'
+tests/lockstep.wiz:41:7: error: unknown identifier 'trapsE'
+tests/lockstep.wiz:43:22: error: unknown identifier 'report'
+tests/lockstep.wiz:44:7: error: unknown identifier 'x16I'
+tests/lockstep.wiz:45:22: error: unknown identifier 'report'
+tests/lockstep.wiz:46:7: error: unknown identifier 'aluI'
+tests/lockstep.wiz:48:22: error: unknown identifier 'report'
+tests/lockstep.wiz:49:7: error: unknown identifier 'mulI'
+tests/lockstep.wiz:50:23: error: unknown identifier 'reportM'
+tests/lockstep.wiz:51:7: error: unknown identifier 'mulIM'

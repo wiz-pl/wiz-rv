@@ -93,6 +93,26 @@ check` (one run): the conversion check unfolds two cycles of the core with an un
 instruction on both sides. Each instruction's `rfl` on the execute cycle takes about
 5 s. The same glue written for one fixed instruction took 110 s.
 
+### H4. A memory at values grows a closure per cycle, written or not (slow; routed to the memories owner)
+
+`HwTy.El (HwTy.mem aw dw)` is a function, and `Hw.memWrite` at values is
+`fun b => memUpd we (a == b) d (m b)` whatever `we` is, so a memory that is part of a
+circuit's state is a chain of one closure per cycle, and a read walks all of it: a run
+of n cycles is O(n^2). Minimal:
+
+```
+import Hdl.Core
+def zeros : HwTy.El (HwTy.mem 4 8) := fun (a : BitVec 4) => BitVec.ofNat 8 0
+-- never writes; reads cell 0
+def c : Circuit (HwTy.bits 1) (HwTy.bits 8) := Circuit.mk (HwTy.mem 4 8) zeros (fun m x =>
+  Hw.pair (Hw.memWrite m (Hw.lit 1 0) (Hw.lit 4 0) (Hw.lit 8 0)) (Hw.memRead m (Hw.lit 4 0)))
+```
+
+The core has six memories (four byte lanes, two register file copies). Compiled, a
+loop of `coreStep` (after #207): 100 cycles 0.04 s, 1 000 cycles 0.53 s, 4 000 cycles
+3.7 s (one run each), although the program stops after 76 cycles. Long runs here use
+the netlist in `Circuit.simFast` (#228) instead.
+
 ## Compiler and run time
 
 ### S1. A program that imports the core takes 12 to 15 minutes to compile (slow)
@@ -110,10 +130,25 @@ emit a chain of lets). `decode` (22 fields) is 2 300 lines, `St.pack` 1 900.
 
 The same lockstep run of `Prog.sum` (76 cycles): under `#eval` in `wiz check` it is
 part of a 23 s check of six programs (about 1 100 cycles in all); compiled
-(`-- test: run`) it did not finish in grail's 300 s test limit. Main's diagnosis:
-closed top-level constants rebuilt every cycle (#207, closed-constants) and the boxed
-value simulation (use `simFast`, #228). The tests run under `-- test: check` (by
-`#eval`) meanwhile.
+(`-- test: run`) it did not finish in grail's 300 s test limit. Cause: closed top-level
+constants rebuilt every cycle; with #207 (closed-constants) the compiled loop runs 100
+cycles in 0.04 s, and what remains is H4. `wiz build` of that loop still took 15:04
+(900 s CPU) after #207, so compile time (S1) is what limits compiled tests.
+
+### L4. A meta-level `if` that picks a signal needs a type ascription (papercut; routed to dogfood-fixes)
+
+```
+import Hdl.Core
+def f {r : HwTy → Type} [Hw r] (mx : Bool) (x : r HwTy.bit) : r HwTy.bit :=
+  let y := if mx then Hw.not x else Hw.lit 1 0;
+  Hw.and y x
+-- 3:37: error: type mismatch  expected: ?m0 r inst✝ x
+--   inferred: ?m1 r inst✝ mx x x✝ (.bits 1)
+--   (a variable escapes the scope of the hole being solved)
+```
+
+`let y : r HwTy.bit := if mx then …` works. This is how a configuration flag (here
+`mx`, the M extension) leaves hardware out, so it comes up for every optional unit.
 
 ## grail
 

@@ -15,12 +15,13 @@ def lines : List String → String
   | .nil => ""
   | .cons s ss => "; " ++ s ++ lines ss
 
-def report (ab : Nat) (p : List Asm) (fuel : Nat) : String :=
+def reportM (ab : Nat) (mx : Bool) (p : List Asm) (fuel : Nat) : String :=
   (fun (r : Ls.Result) => Nat.repr r.instrs ++ " instructions, " ++ Nat.repr r.cycles ++ " cycles, trap "
     ++ Nat.repr r.trap ++ ", out " ++ showBytes r.out
     ++ (match r.problems with
       | .nil => "agrees"
-      | ps => "DISAGREES" ++ lines ps)) (Ls.run ab 8 (Asm.assemble p) fuel)
+      | ps => "DISAGREES" ++ lines ps)) (Ls.run ab 8 mx (Asm.assemble p) fuel)
+def report (ab : Nat) (p : List Asm) (fuel : Nat) : String := reportM ab .false p fuel
 
 def sumE : String := report 4 Prog.sum 400
 #eval sumE
@@ -43,3 +44,8 @@ def x16I : String := report 5 Prog.x16 50
 #eval x16I
 def aluI : String := report 5 Prog.alu 400
 #eval aluI
+-- RV32IM: the M extension (and without it, MUL is illegal)
+def mulI : String := report 5 Prog.muldivShort 400
+#eval mulI
+def mulIM : String := reportM 5 .true Prog.muldivShort 3000
+#eval mulIM

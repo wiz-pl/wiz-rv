@@ -8,7 +8,8 @@ import Text
 -- code and PC; at the end, the bytes written to the output port and every byte of
 -- memory.
 
-def Ls.cfg (ab wb : Nat) : Cfg := Cfg.mk ab (wb + 2)
+def Ls.cfg (ab wb : Nat) : Cfg := Cfg.mk ab (wb + 2) .false
+def Ls.cfgM (ab wb : Nat) (mx : Bool) : Cfg := Cfg.mk ab (wb + 2) mx
 
 def Ls.hw {ω ab wb : Nat} (v : HwTy.El (St.code ab wb)) : St ab wb HwTy.El := Bundle.ofEl (St.bundle ab wb) v
 
@@ -68,7 +69,7 @@ def Ls.finish (ab wb : Nat) (s : St ab wb HwTy.El) (a : Arch) (cyc ins : Nat) (o
 
 -- `fuel` cycles at most; `a` is the specification's state for the instruction the core
 -- is on (or will decode next)
-def Ls.go (ab wb : Nat) (prog : List Nat) :
+def Ls.go (ab wb : Nat) (mx : Bool) (prog : List Nat) :
     Nat → Nat → List Nat → Nat → HwTy.El (St.code ab wb) → Arch → Ls.Result
   | cyc, ins, out, .zero, v, a => Ls.finish ab wb (Ls.hw (ab := ab) (wb := wb) v) a cyc ins out (.cons "out of cycles" .nil)
   | cyc, ins, out, .succ fuel, v, a =>
@@ -80,12 +81,12 @@ def Ls.go (ab wb : Nat) (prog : List Nat) :
       match bad with
       | .cons p ps => Ls.finish ab wb s a cyc ins out (.cons ("after " ++ Nat.repr ins ++ " instructions") bad)
       | .nil =>
-        let ω r := coreStep (r := HwTy.El) ab wb (Ls.hw (ab := ab) (wb := wb) v) (BitVec.ofNat 1 0);
+        let ω r := coreStep (r := HwTy.El) ab wb mx (Ls.hw (ab := ab) (wb := wb) v) (BitVec.ofNat 1 0);
         let ω o := Bundle.ofEl Out.bundle r.2;
         let ω out2 : List Nat := if BitVec.isTrue o.wr then .cons o.byte.toNat out else out;
-        let ω a2 := if Nat.beq ph Ph.d then Rv.step (Ls.cfg ab wb) a else a;
+        let ω a2 := if Nat.beq ph Ph.d then Rv.step (Ls.cfgM ab wb mx) a else a;
         let ω ins2 := if Nat.beq ph Ph.d then Nat.succ ins else ins;
-        Ls.go ab wb prog (Nat.succ cyc) ins2 out2 fuel r.1 a2
+        Ls.go ab wb mx prog (Nat.succ cyc) ins2 out2 fuel r.1 a2
 
-def Ls.run (ab wb : Nat) (prog : List Nat) (fuel : Nat) : Ls.Result :=
-  Ls.go ab wb prog 0 0 .nil fuel (Bundle.toEl (St.bundle ab wb) (St.init ab wb prog)) (Arch.start (Ls.cfg ab wb) prog)
+def Ls.run (ab wb : Nat) (mx : Bool) (prog : List Nat) (fuel : Nat) : Ls.Result :=
+  Ls.go ab wb mx prog 0 0 .nil fuel (Bundle.toEl (St.bundle ab wb) (St.init ab wb prog)) (Arch.start (Ls.cfgM ab wb mx) prog)

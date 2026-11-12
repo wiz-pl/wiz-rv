@@ -99,3 +99,38 @@ def Prog.blink : List Asm :=
   P.port :: A.li 1 0 ::
   A.label "top" :: P.out 1 :: A.addi 1 1 1 :: A.li 2 1000000 ::
   A.label "wait" :: A.addi 2 2 (-1) :: A.bnez 2 "wait" :: A.j "top" :: .nil
+
+-- the M extension: every operation on signed and unsigned edge cases (division by
+-- zero, -2^31 / -1); each result's four bytes are folded into one (xor) and output
+def P.out4 (r : Nat) : List Asm :=
+  A.srli 13 r 8 :: A.xor 13 13 r :: A.srli 14 r 16 :: A.xor 13 13 14 :: A.srli 14 r 24 :: A.xor 13 13 14 :: P.out 13 :: .nil
+def P.all8 (a b : Nat) : List Asm :=
+  List.append (A.mul 12 a b :: P.out4 12) (List.append (A.mulh 12 a b :: P.out4 12) (List.append (A.mulhsu 12 a b :: P.out4 12)
+  (List.append (A.mulhu 12 a b :: P.out4 12) (List.append (A.div 12 a b :: P.out4 12) (List.append (A.divu 12 a b :: P.out4 12)
+  (List.append (A.rem 12 a b :: P.out4 12) (A.remu 12 a b :: P.out4 12)))))))
+def Prog.muldiv : List Asm :=
+  P.port :: A.li 1 (-7) :: A.li 2 3 :: A.li 3 (-2147483648) :: A.li 4 (-1) :: A.li 5 0 :: A.li 6 123456789 :: A.li 7 (-98765) ::
+  List.append (P.all8 1 2) (List.append (P.all8 2 1) (List.append (P.all8 3 4) (List.append (P.all8 6 5)
+  (List.append (P.all8 6 7) (List.append (P.all8 7 6) (List.append (P.all8 4 4) (A.ebreak :: .nil)))))))
+
+-- the sieve of Eratosthenes below 1000 (a byte per number, from address 1024): the
+-- number of primes (168, as two bytes) and the last one (997, as two bytes)
+def Prog.sieve : List Asm :=
+  P.port :: A.li 1 1024 :: A.li 2 1000 :: A.li 3 2 ::
+  -- clear
+  A.li 4 0 :: A.label "clr" :: A.add 5 1 4 :: A.sb 0 0 5 :: A.addi 4 4 1 :: A.blt 4 2 "clr" ::
+  -- for p = 2 …: if not marked, mark 2p, 3p, …
+  A.label "outer" :: A.add 5 1 3 :: A.lbu 6 0 5 :: A.bnez 6 "next" ::
+  A.add 7 3 3 :: A.li 8 1 ::
+  A.label "mark" :: A.bge 7 2 "next" :: A.add 5 1 7 :: A.sb 8 0 5 :: A.add 7 7 3 :: A.j "mark" ::
+  A.label "next" :: A.addi 3 3 1 :: A.blt 3 2 "outer" ::
+  -- count and remember the last
+  A.li 3 2 :: A.li 9 0 :: A.li 10 0 ::
+  A.label "count" :: A.add 5 1 3 :: A.lbu 6 0 5 :: A.bnez 6 "skip" :: A.addi 9 9 1 :: A.mv 10 3 ::
+  A.label "skip" :: A.addi 3 3 1 :: A.blt 3 2 "count" ::
+  P.out 9 :: A.srli 9 9 8 :: P.out 9 :: P.out 10 :: A.srli 10 10 8 :: P.out 10 :: A.ebreak :: .nil
+-- the same on three operand pairs (division by zero, the signed overflow, mixed signs),
+-- short enough for the full lockstep
+def Prog.muldivShort : List Asm :=
+  P.port :: A.li 1 (-7) :: A.li 2 3 :: A.li 3 (-2147483648) :: A.li 4 (-1) :: A.li 5 0 :: A.li 6 123456789 ::
+  List.append (P.all8 1 2) (List.append (P.all8 3 4) (List.append (P.all8 6 5) (A.ebreak :: .nil)))

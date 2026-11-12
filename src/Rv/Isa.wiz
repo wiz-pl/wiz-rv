@@ -1,5 +1,6 @@
 import BitVec
 import Logic
+import Int
 -- The executable ISA specification: RV32I and RV32E (the unprivileged base integer
 -- instruction sets, version 2.1) as a pure step function on an architectural state.
 --
@@ -19,9 +20,11 @@ import Logic
 structure Cfg where
   rbits : Nat
   mbits : Nat
+  m : Bool        -- the M extension (multiplication and division)
 
-def Cfg.rv32i (mbits : Nat) : Cfg := Cfg.mk 5 mbits
-def Cfg.rv32e (mbits : Nat) : Cfg := Cfg.mk 4 mbits
+def Cfg.rv32i (mbits : Nat) : Cfg := Cfg.mk 5 mbits .false
+def Cfg.rv32e (mbits : Nat) : Cfg := Cfg.mk 4 mbits .false
+def Cfg.rv32im (mbits : Nat) : Cfg := Cfg.mk 5 mbits .true
 
 -- trap codes
 def Trap.none : Nat := 0
@@ -132,6 +135,28 @@ def Rv.alu (f3 : Nat) (alt : Bool) (a b : BitVec 32) : BitVec 32 :=
   else if Nat.beq f3 6 then BitVec.or a b
   else BitVec.and a b
 
+-- The M extension: funct3 0 MUL, 1 MULH, 2 MULHSU, 3 MULHU, 4 DIV, 5 DIVU, 6 REM, 7 REMU.
+-- Division truncates; by zero: the quotient is all ones, the remainder the dividend;
+-- the signed overflow (-2^31 / -1) gives -2^31 and remainder 0, as `Int.div`/`Int.mod`
+-- modulo 2^32 do by themselves.
+def Rv.sval (a : BitVec 32) : Int :=
+  if Nat.lt a.toNat (Rv.pow2 31) then Int.ofNat a.toNat else Int.subNatNat a.toNat (Rv.pow2 32)
+def Rv.uval (a : BitVec 32) : Int := Int.ofNat a.toNat
+-- an integer modulo 2^n
+def Rv.tc (n : Nat) (i : Int) : Nat := match i with
+  | .ofNat k => Nat.mod k (Rv.pow2 n)
+  | .negSucc k => Rv.pow2 n - 1 - Nat.mod k (Rv.pow2 n)
+def Rv.hi (i : Int) : BitVec 32 := Rv.w32 (Nat.div (Rv.tc 64 i) (Rv.pow2 32))
+def Rv.muldiv (f3 : Nat) (a b : BitVec 32) : BitVec 32 :=
+  if Nat.beq f3 0 then BitVec.mul a b
+  else if Nat.beq f3 1 then Rv.hi (Int.mul (Rv.sval a) (Rv.sval b))
+  else if Nat.beq f3 2 then Rv.hi (Int.mul (Rv.sval a) (Rv.uval b))
+  else if Nat.beq f3 3 then Rv.hi (Int.mul (Rv.uval a) (Rv.uval b))
+  else if Nat.beq f3 4 then (if Nat.beq b.toNat 0 then Rv.w32 (Rv.pow2 32 - 1) else Rv.w32 (Rv.tc 32 (Int.div (Rv.sval a) (Rv.sval b))))
+  else if Nat.beq f3 5 then (if Nat.beq b.toNat 0 then Rv.w32 (Rv.pow2 32 - 1) else Rv.w32 (Nat.div a.toNat b.toNat))
+  else if Nat.beq f3 6 then Rv.w32 (Rv.tc 32 (Int.mod (Rv.sval a) (Rv.sval b)))
+  else Rv.w32 (Nat.mod a.toNat b.toNat)
+
 -- a branch condition (funct3 2 and 3 are not branches)
 def Rv.cond (f3 : Nat) (a b : BitVec 32) : Bool :=
   if Nat.beq f3 0 then BitVec.beq a b
@@ -219,6 +244,8 @@ def Rv.exec (c : Cfg) (s : Arch) (w : Nat) : Arch :=
   else if Nat.beq op Op.op then
     (if Bool.and (Rv.okOp f3 f7) (Rv.ok3 c rd r1 r2)
      then Rv.write s rd (Rv.alu f3 (Nat.beq f7 32) a b) (Rv.next s)
+     else if Bool.and c.m (Bool.and (Nat.beq f7 1) (Rv.ok3 c rd r1 r2))
+     then Rv.write s rd (Rv.muldiv f3 a b) (Rv.next s)
      else Rv.illegal s)
   else if Nat.beq op Op.fence then Rv.write s 0 (Rv.w32 0) (Rv.next s)
   else if Nat.beq op Op.system then
