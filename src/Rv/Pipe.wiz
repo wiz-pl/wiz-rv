@@ -6,8 +6,10 @@ import Rv.Core
 --   D   the word is out of block RAM (`fe.pc`, `fe.v`): I-cache hit check, decode, the
 --       register file (two LUT-RAM copies, read asynchronously) with a bypass of the
 --       write in R
---   E   ALU, barrel shifter, branch / jump (resolved here: predicted not taken, a taken
---       one redirects F and flushes D), address, traps; the multiplier's partial
+--   E   ALU, barrel shifter, branch / jump (resolved here: predicted not taken; a taken
+--       one is registered (`fe.rdr`) and redirects F in the next cycle, squashing the two
+--       instructions after it, so that the compare does not reach the fetch address or
+--       the stage registers' enables in one cycle), address, traps; the multiplier's partial
 --       products (four 16 × 16 products, DSP48); the iterative divider (33 cycles, E
 --       stalls); the D-side memories are read at the address
 --   M   the read data (on-chip RAM's data copy, D-cache, I/O), store merge, the
@@ -18,7 +20,9 @@ import Rv.Core
 --
 -- Hazards: forwarding from M and R into E (E's operands are refreshed from them while E
 -- is held, so a value that retires during a stall is not lost); a load or a product in M
--- whose result E needs stalls E one cycle (the interlock is in E, from registers only).
+-- whose result E needs stalls E one cycle. The forwarding selects and the interlock are
+-- decided a cycle ahead, into E's registers (`f1M` … `lu`), so that neither a compare nor
+-- a forwarding decision is on the paths through the ALU or to the stall enables.
 --
 -- Every block RAM and LUT-RAM write port is driven from registers (FINDINGS.md, H7):
 -- a store's write is registered when the store leaves M (`wr`) and done at the next edge;
@@ -45,6 +49,8 @@ structure PpFe (r : HwTy → Type) where
   v : r W1
   fz : r B2       -- 0 running; 1 waiting for a fill; 2 a fill's write; 3 fetch `rpc` again
   rpc : r B32
+  rdr : r W1      -- a taken branch or jump left E last cycle: fetch `rtgt`; E holds the
+  rtgt : r B32    -- instruction after it, which is squashed
   deriving Bundle
 
 structure PpMem (ab wb : Nat) (r : HwTy → Type) where
@@ -124,6 +130,11 @@ structure PpE (r : HwTy → Type) where
   ebreak : r W1
   u1 : r W1       -- reads rs1, rs2
   u2 : r W1
+  f1M : r W1      -- forwarding, decided a cycle ahead: rs1 / rs2 from M, from R
+  f1R : r W1
+  f2M : r W1
+  f2R : r W1
+  lu : r W1       -- M will hold a load or product that E needs: E waits a cycle
   deriving Bundle
 
 structure PpM (r : HwTy → Type) where
@@ -308,11 +319,11 @@ def pipeStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : PpSt ab w
   let rdE : r B5 := Hw.slice 7 5 e.ins;
   let f3 : r B3 := Hw.slice 12 3 e.ins;
   let alt := bitOf 30 e.ins;
-  let fwd := fun (rs : r B5) (v : r B32) => (Hw.mux (Hw.and m.we (Hw.eq m.rd rs)) m.res
-    (Hw.mux (Hw.and rr.we (Hw.eq rr.rd rs)) rr.val v) : r B32);
-  let a := fwd r1 e.a;
-  let rs2v := fwd r2 e.b;
-  let loadUse := gate e.v (gate m.late (gate m.we (Hw.or (gate e.u1 (Hw.eq m.rd r1)) (gate e.u2 (Hw.eq m.rd r2)))));
+  let eV := gate e.v (Hw.not fe.rdr);
+  let eIm := gate e.imiss (Hw.not fe.rdr);
+  let a : r B32 := Hw.mux e.f1M m.res (Hw.mux e.f1R rr.val e.a);
+  let rs2v : r B32 := Hw.mux e.f2M m.res (Hw.mux e.f2R rr.val e.b);
+  let loadUse := gate eV e.lu;
   let regB := Hw.or e.op e.branch;
   let b := Hw.mux regB rs2v e.imm;
   let cmpOp := Hw.and e.arith (Hw.or (isK f3 2) (isK f3 3));
@@ -339,7 +350,7 @@ def pipeStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : PpSt ab w
   let code : r B3 := Hw.mux (Hw.not e.legal) (Hw.lit 3 Trap.illegal) (Hw.mux e.ecall (Hw.lit 3 Trap.ecall)
     (Hw.mux e.ebreak (Hw.lit 3 Trap.ebreak) (Hw.mux misJ (Hw.lit 3 Trap.jump)
     (Hw.mux (gate e.load mis) (Hw.lit 3 Trap.load) (Hw.mux (gate e.store mis) (Hw.lit 3 Trap.store) (Hw.lit 3 0))))));
-  let eOk := gate e.v (isK code 0);
+  let eOk := gate eV (isK code 0);
   let resE := Hw.mux e.lui e.imm (Hw.mux e.auipc pcImm (Hw.mux (Hw.or e.jal e.jalr) pcInc aluRes));
   -- M: the partial products (unsigned 16 × 16), the sign correction of the high word
   let aL : r B32 := Hw.cat (Hw.lit 16 0) (Hw.slice 0 16 a : r B16);
@@ -362,7 +373,9 @@ def pipeStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : PpSt ab w
   let accN : r B32 := Hw.cat (Hw.slice 0 31 dv.acc : r (HwTy.bits 31)) ge;
   let dres := Hw.mux (bitOf 1 f3) (Hw.mux negA (Hw.sub (Hw.lit 32 0) rmN) rmN)
     (Hw.mux negQ (Hw.sub (Hw.lit 32 0) accN) accN);
-  let isDiv : r W1 := if mx then gate eOk (gate e.md (bitOf 2 f3)) else Hw.lit 1 0;
+  -- (not gated by the trap code: an instruction that traps is killed in R; nothing here
+  -- may wait for the misalignment checks)
+  let isDiv : r W1 := if mx then gate eV (gate e.legal (gate e.md (bitOf 2 f3))) else Hw.lit 1 0;
   let isMul : r W1 := if mx then gate e.md (Hw.not (bitOf 2 f3)) else Hw.lit 1 0;
   let dDone := gate dv.on (isK dv.cnt 0);
   let stallE := Hw.or loadUse (gate isDiv (Hw.not dDone));
@@ -372,7 +385,7 @@ def pipeStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : PpSt ab w
   let advE := Hw.and (Hw.not kill) (Hw.not hold);
   let redirect := gate advE (gate eOk jump);
   let rdNZ := Hw.not (isK rdE 0);
-  let weE := gate eOk (gate rdNZ (Hw.or (Hw.or (Hw.or e.lui e.auipc) (Hw.or e.jal e.jalr)) (Hw.or (Hw.or e.arith e.load) e.md)));
+  let weE := gate eV (gate rdNZ (Hw.or (Hw.or (Hw.or e.lui e.auipc) (Hw.or e.jal e.jalr)) (Hw.or (Hw.or e.arith e.load) e.md)));
   let eRes := Hw.mux isDiv dres resE;
   let io := bitOf 31 sum;
   ----------------------------------------------------------------- D
@@ -390,12 +403,13 @@ def pipeStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : PpSt ab w
   let u1 := Hw.not (Hw.or (Hw.or d.lui d.auipc) d.jal);
   let u2 := Hw.or (Hw.or d.branch d.store) (Hw.or d.op d.md);
   -- the next fetch address
-  let nf := Hw.mux (isK fz 3) fe.rpc (Hw.mux hold fe.pc (Hw.mux redirect target (Hw.add fe.pc (Hw.lit 32 4))));
-  let vDn := Hw.mux kill (Hw.lit 1 0) (Hw.mux (isK fz 3) (Hw.lit 1 1) (Hw.mux run (Hw.mux hold fe.v (Hw.lit 1 1)) (Hw.lit 1 0)));
+  let nf := Hw.mux (isK fz 3) fe.rpc (Hw.mux fe.rdr fe.rtgt (Hw.mux hold fe.pc (Hw.add fe.pc (Hw.lit 32 4))));
+  let vDn := Hw.mux kill (Hw.lit 1 0) (Hw.mux (isK fz 3) (Hw.lit 1 1)
+    (Hw.mux run (Hw.mux fe.rdr (Hw.lit 1 1) (Hw.mux hold fe.v (Hw.lit 1 1))) (Hw.lit 1 0)));
   let fzN : r B2 := Hw.mux kill (Hw.mux killSmc (Hw.lit 2 2) (Hw.lit 2 1))
     (Hw.mux (isK fz 1) (Hw.mux fillDone (Hw.lit 2 2) fz) (Hw.mux (isK fz 2) (Hw.lit 2 3) (Hw.lit 2 0)));
   -- (a trap leaves fz at 1 with no fill wanted: stopped)
-  let fD := gate fe.v (gate run (Hw.not redirect));
+  let fD := gate fe.v (gate run (Hw.not fe.rdr));
   -- the D-side read address: the instruction entering M, or the one staying there
   let rdA := Hw.mux advE sum m.addr;
   let ixF : r (HwTy.bits wb) := Hw.slice 2 wb nf;
@@ -405,6 +419,17 @@ def pipeStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : PpSt ab w
   let mHold := gate (Hw.not kill) stallM;
   let rTake := Hw.and (Hw.not kill) (Hw.not stallM);
   let ek := fun (o n : r W1) => (Hw.mux eHold o n : r W1);
+  -- forwarding for the instruction in E next cycle (E's, held, or D's): from what M and R
+  -- will hold then
+  let nMwe := Hw.mux mHold m.we (gate advE weE);
+  let nMrd : r B5 := Hw.mux mHold m.rd rdE;
+  let nMlate := Hw.mux mHold m.late (gate advE (Hw.or e.load isMul));
+  let nRwe := gate rTake m.we;
+  let rs1n : r B5 := Hw.mux eHold r1 d.r1;
+  let rs2n : r B5 := Hw.mux eHold r2 d.r2;
+  let f1Mn := gate nMwe (Hw.eq nMrd rs1n);
+  let f2Mn := gate nMwe (Hw.eq nMrd rs2n);
+  let luN := gate nMlate (Hw.or (gate (ek e.u1 u1) f1Mn) (gate (ek e.u2 u2) f2Mn));
   let ω eN := PpE.mk
     (Hw.mux eHold e.v (gate advE (gate fD ihit)))
     (Hw.mux eHold e.imiss (gate advE (gate fD (Hw.not ihit))))
@@ -412,11 +437,12 @@ def pipeStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : PpSt ab w
     (Hw.mux eHold a rv1) (Hw.mux eHold rs2v rv2)
     (ek e.lui d.lui) (ek e.auipc d.auipc) (ek e.jal d.jal) (ek e.jalr d.jalr) (ek e.branch d.branch)
     (ek e.load d.load) (ek e.store d.store) (ek e.arith (Hw.or d.op d.opimm)) (ek e.op d.op) (ek e.md d.md)
-    (ek e.legal d.legal) (ek e.ecall d.ecall) (ek e.ebreak d.ebreak) (ek e.u1 u1) (ek e.u2 u2);
+    (ek e.legal d.legal) (ek e.ecall d.ecall) (ek e.ebreak d.ebreak) (ek e.u1 u1) (ek e.u2 u2)
+    f1Mn (gate nRwe (Hw.eq m.rd rs1n)) f2Mn (gate nRwe (Hw.eq m.rd rs2n)) luN;
   let mk1 := fun (o n : r W1) => (Hw.mux mHold o n : r W1);
   let mk32 := fun (o n : r B32) => (Hw.mux mHold o n : r B32);
   let ω mN := PpM.mk
-    (Hw.mux mHold m.v (gate advE e.v)) (Hw.mux mHold m.imiss (gate advE e.imiss))
+    (Hw.mux mHold m.v (gate advE eV)) (Hw.mux mHold m.imiss (gate advE eIm))
     (mk32 m.pc e.pc) (Hw.mux mHold m.rd rdE)
     (Hw.mux mHold m.we (gate advE weE)) (Hw.mux mHold m.late (gate advE (Hw.or e.load isMul)))
     (mk32 m.res eRes) (mk32 m.addr sum) (mk32 m.sd rs2v) (Hw.mux mHold m.f3 f3)
@@ -425,7 +451,7 @@ def pipeStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : PpSt ab w
     (mk32 m.p0 (Hw.mul aL bL)) (mk32 m.p1 (Hw.mul aL bH)) (mk32 m.p2 (Hw.mul aH bL)) (mk32 m.p3 (Hw.mul aH bH))
     (mk32 m.corr corr);
   let ω rN := PpR.mk (gate rTake m.v) (gate rTake m.imiss) (gate rTake dmiss) smc m.pc m.rd
-    (gate rTake (gate m.we (Hw.not dmiss))) mval m.trap m.addr;
+    (gate rTake (gate m.we (gate (isK m.trap 0) (Hw.not dmiss)))) mval m.trap m.addr;
   let ω dvN := PpDiv.mk
     (Hw.mux kill (Hw.lit 1 0) (Hw.mux dStart (Hw.lit 1 1) (Hw.mux (gate dDone advE) (Hw.lit 1 0) dv.on)))
     (Hw.mux dStart (Hw.lit 5 31) (Hw.mux dStep (Hw.sub dv.cnt (Hw.lit 5 1)) dv.cnt))
@@ -469,7 +495,7 @@ def pipeStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : PpSt ab w
     (Hw.memRead ms.ic ixFL) (Hw.memRead ms.it ixFL) (Hw.memRead ms.itd ixDL)
     (Hw.memWrite ms.dc wr.dWe wr.dIx wr.dLine) (Hw.memWrite ms.dt wr.dTwe wr.dIx wr.dTag)
     (Hw.memRead ms.dc ixDL) (Hw.memRead ms.dt ixDL);
-  let ω feN := PpFe.mk nf vDn fzN (Hw.mux kill (Hw.mux killSmc (Hw.add rr.pc (Hw.lit 32 4)) rr.pc) fe.rpc);
+  let ω feN := PpFe.mk nf vDn fzN (Hw.mux kill (Hw.mux killSmc (Hw.add rr.pc (Hw.lit 32 4)) rr.pc) fe.rpc) redirect target;
   Hw.pair
     (PpSt.pack ab wb (PpSt.mk feN msN wrN eN mN rN dvN buN (Hw.mux killTrap rr.trap s.trap)))
     (Out.pack (Out.mk s.trap (gate goSt m.io) (Hw.slice 0 8 m.sd) (gate goM (gate m.load m.io)) m.addr m.sd
@@ -486,10 +512,10 @@ def Pp.reset {r : HwTy → Type} [Hw r] (ab wb : Nat) (rst : r W1) (c : PpSt ab 
   let ω bu := c.bus;
   let z := fun (x : r W1) => (Hw.mux rst (Hw.lit 1 0) x : r W1);
   PpSt.mk
-    (PpFe.mk fe.pc (z fe.v) (Hw.mux rst (Hw.lit 2 3) fe.fz) (Hw.mux rst (Hw.lit 32 0) fe.rpc))
+    (PpFe.mk fe.pc (z fe.v) (Hw.mux rst (Hw.lit 2 3) fe.fz) (Hw.mux rst (Hw.lit 32 0) fe.rpc) (z fe.rdr) fe.rtgt)
     c.ms c.wr
     (PpE.mk (z e.v) (z e.imiss) e.pc e.ins e.imm e.a e.b e.lui e.auipc e.jal e.jalr e.branch e.load e.store e.arith e.op e.md
-      e.legal e.ecall e.ebreak e.u1 e.u2)
+      e.legal e.ecall e.ebreak e.u1 e.u2 e.f1M e.f1R e.f2M e.f2R e.lu)
     (PpM.mk (z m.v) (z m.imiss) m.pc m.rd (z m.we) (z m.late) m.res m.addr m.sd m.f3 m.load m.store m.io m.ddr m.trap m.mul
       m.p0 m.p1 m.p2 m.p3 m.corr)
     (PpR.mk (z rr.v) (z rr.imiss) (z rr.miss) (z rr.smc) rr.pc rr.rd (z rr.we) rr.val rr.trap rr.addr)
@@ -505,7 +531,7 @@ def Pp.z (n : Nat) : BitVec n := BitVec.ofNat n 0
 
 def PpSt.init (ab wb : Nat) (prog : List Nat) : PpSt ab wb HwTy.El :=
   PpSt.mk
-    (PpFe.mk (Pp.z 32) (Pp.z 1) (BitVec.ofNat 2 3) (Pp.z 32))
+    (PpFe.mk (Pp.z 32) (Pp.z 1) (BitVec.ofNat 2 3) (Pp.z 32) (Pp.z 1) (Pp.z 32))
     (PpMem.mk (Core.lane prog wb 0) (Core.lane prog wb 1) (Core.lane prog wb 2) (Core.lane prog wb 3)
       (Core.lane prog wb 0) (Core.lane prog wb 1) (Core.lane prog wb 2) (Core.lane prog wb 3)
       (Pp.z 8) (Pp.z 8) (Pp.z 8) (Pp.z 8) (Pp.z 8) (Pp.z 8) (Pp.z 8) (Pp.z 8)
@@ -520,7 +546,7 @@ def PpSt.init (ab wb : Nat) (prog : List Nat) : PpSt ab wb HwTy.El :=
       (Pp.z 1) (Pp.z 1) (Pp.z (L1.bits wb)) (Pp.z 128) (Pp.z (L1.tagW wb)))
     (PpE.mk (Pp.z 1) (Pp.z 1) (Pp.z 32) (Pp.z 32) (Pp.z 32) (Pp.z 32) (Pp.z 32)
       (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1)
-      (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1))
+      (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1))
     (PpM.mk (Pp.z 1) (Pp.z 1) (Pp.z 32) (Pp.z 5) (Pp.z 1) (Pp.z 1) (Pp.z 32) (Pp.z 32) (Pp.z 32) (Pp.z 3)
       (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 3) (Pp.z 1) (Pp.z 32) (Pp.z 32) (Pp.z 32) (Pp.z 32) (Pp.z 32))
     (PpR.mk (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 32) (Pp.z 5) (Pp.z 1) (Pp.z 32) (Pp.z 3) (Pp.z 32))

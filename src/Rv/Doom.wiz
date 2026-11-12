@@ -85,8 +85,7 @@ def Doom.pipeStep {r : HwTy → Type} [Hw r] (s : PpSt 5 12 r) (x : CIn r) : r (
   let cr := pipeStep 5 12 .true s x.i;
   let ω e := s.e;
   let ω m := s.m;
-  let wait := gate e.v (gate m.late (gate m.we (Hw.or (gate e.u1 (Hw.eq m.rd (Hw.slice 15 5 e.ins : r B5)))
-    (gate e.u2 (Hw.eq m.rd (Hw.slice 20 5 e.ins : r B5))))));
+  let wait := gate e.v (gate (Hw.not s.fe.rdr) e.lu);
   Hw.pair (PpSt.pack 5 12 (Pp.reset 5 12 x.rst (PpSt.unpack 5 12 (Hw.fst cr))))
     (COut.pack (COut.mk (Out.unpack (Hw.snd cr)) (CEv.mk (Hw.and s.rr.v (Hw.not s.rr.miss)) s.bus.act wait s.dv.on
       (Hw.not (isK s.fe.fz 0)))))
