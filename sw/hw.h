@@ -27,6 +27,9 @@
 #define CACHE_HITS    IO(0x64)
 #define CACHE_MISSES  IO(0x68)
 #define PERF_FBW      IO(0x6c)             /* framebuffer writes */
+#define PERF_REFRESH  IO(0x70)             /* OLED refreshes */
+#define PERF_ODD      IO(0x74)             /* refreshes whose pixel checksum changed with no write */
+#define PERF_SUM      IO(0x78)             /* the last refresh's checksum */
 
 #define OLED_FB       ((volatile uint16_t *)0x81000000u)   /* 96 x 64 RGB565, row-major */
 #define OLED_W        96

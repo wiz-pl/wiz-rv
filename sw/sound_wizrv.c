@@ -47,6 +47,9 @@ static uint8_t mix1(void) {
 }
 
 static void snd_update(void) {
+#ifdef NO_SOUND_OUT
+  return;   /* (a build without sound output, for testing: nix-build nix/doom.nix --arg sound false) */
+#endif
   uint32_t n = SND_FREE;
   while (n--) SND_DATA = mix1();
 }

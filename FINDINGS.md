@@ -190,6 +190,23 @@ found from their enable's connection to the toggle, which misses flip-flops whos
 enable yosys folded into the D logic. Wanted: multicycle constraints that work, or more
 than one clock domain in the HDL (H5), so that the tools check this.
 
+### H7. A half-rate block RAM wrote garbage with an enable gated by the phase (bug class, fixed)
+
+Under `Circuit.half` a memory's write port becomes `if (half & we) mem[a] <= d` on the
+full-rate clock. The phase gate makes the enable 0 at the off-phase edge in steady state,
+but `we`, `a` and `d` come from half-rate logic that is still settling at that edge (paths
+up to 17 ns of the 20 ns budget), and the AND sits in the same LUT cone. On the board the
+OLED framebuffer gained wrong-colour pixels between Doom frames: a hardware count of
+decoded framebuffer writes matched what Doom drew exactly, yet the streamer's per-refresh
+pixel checksum changed in about 85 of about 100 write-free refreshes per 5 s. Driving the
+write port straight from registers (`Fb.we/wa/wd`: the store registered one gated cycle
+earlier) took that to about 5 (perhaps an artefact of the checksum at a refresh boundary).
+The library could do this itself: `Circuit.half` could register every memory's write
+port, or `Hw.memWrite` could take a flag. The regfile (RAM32M), the L1 arrays and the
+sound FIFO still have combinational write ports. Moving them needs forwarding, so it
+comes with the single-rate pipeline. Repro: `git show` the commit before this entry, on
+the board; perf line "oled: refreshes R, odd K".
+
 ## Compiler and run time
 
 ### S1. A program that imports the core takes 12 to 15 minutes to compile (slow)

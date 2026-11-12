@@ -31,6 +31,7 @@ static void perf_report(void) {
          (unsigned)frames, (unsigned)cyc, (unsigned)(i - l_i), (unsigned)(i - l_i ? (uint64_t)cyc * 100 / (i - l_i) : 0),
          (unsigned)(b - l_b), (unsigned)(m - l_m), (unsigned)(l - l_l), (unsigned)(f - l_f), (unsigned)(h - l_h), (unsigned)(x - l_x), (unsigned)(w - l_w), (unsigned)sw_w);
   l_w = w; sw_w = 0;
+  printf("oled: refreshes %u, odd %u, last sum %08x\n", (unsigned)PERF_REFRESH, (unsigned)PERF_ODD, (unsigned)PERF_SUM);
   last = now; frames = 0; l_i = i; l_b = b; l_m = m; l_l = l; l_f = f; l_h = h; l_x = x;
 }
 

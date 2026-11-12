@@ -2,7 +2,7 @@
 # the platform layer and newlib's system calls in sw/, the RV32IM toolchain of
 # riscv.nix. Produces doom.elf and doom.bin (the image for DDR at 0x40000000).
 #   nix-build nix/doom.nix
-{ nixpkgs ? <nixpkgs> }:
+{ nixpkgs ? <nixpkgs>, sound ? true }:
 let
   pkgs = import nixpkgs {};
   rv = import ./riscv.nix { inherit nixpkgs; };
@@ -20,7 +20,7 @@ in pkgs.stdenvNoCC.mkDerivation {
   nativeBuildInputs = [ rv.gcc ];
   buildPhase = ''
     CC=riscv32-none-elf-gcc
-    FLAGS="-march=rv32im -mabi=ilp32 -O2 -ffunction-sections -fdata-sections -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 -DNORMALUNIX -D_DEFAULT_SOURCE -DFEATURE_SOUND -w"
+    FLAGS="-march=rv32im -mabi=ilp32 -O2 -ffunction-sections -fdata-sections -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 -DNORMALUNIX -D_DEFAULT_SOURCE -DFEATURE_SOUND ${if sound then "" else "-DNO_SOUND_OUT"} -w"
     mkdir obj
     for f in ${doomSrc}; do $CC $FLAGS -Idoomgeneric -I$sw/stub -c doomgeneric/$f.c -o obj/$f.o; done
     $CC $FLAGS -Idoomgeneric -I$sw -c $sw/doomgeneric_wizrv.c -o obj/platform.o
