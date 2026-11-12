@@ -1,33 +1,68 @@
 -- test: run
 import Rv.Lockstep
 import Rv.Progs
+import Rv.Board
 import Hdl.Sim
 import IO
--- Long runs: the core's netlist in the fast simulator (Hdl.Sim, `Circuit.simFast`), the
--- bytes on its output port and its trap code against the specification's, compiled.
+-- Long runs, compiled, on netlists in the fast simulator (Hdl.Sim, `Circuit.simFast`):
+-- the bytes on the output port and the trap code against the specification's.
 -- (The full lockstep, every register at every instruction, is tests/lockstep.wiz.)
+--
+-- * the core alone, its output always ready: the sieve (RV32E) and the M test (RV32IM)
+-- * the Arty board design (`arty`: core, UART transmitter and receiver) with the demo
+--   program, at 4 clock cycles per bit: the bytes decoded from its TX line
 
 def showBytes : List Nat → String
   | .nil => ""
   | .cons x xs => Nat.repr x ++ " " ++ showBytes xs
 
--- the bytes written (outputs per cycle: trap, wr, byte) and the trap code at the end
+-- the bytes written (core outputs per cycle: trap, wr, byte, take) and the final trap
 def L.bytes : List (List Nat) → List Nat → Nat → List Nat × Nat
   | .nil, acc, t => (List.reverse acc, t)
   | .cons o os, acc, t =>
     L.bytes os (if Nat.beq (Hdl.nthD 0 o 1) 1 then .cons (Hdl.nthD 0 o 2) acc else acc) (Hdl.nthD 0 o 0)
 
-def L.idle : Nat → List (HwTy.El Bit) → List (HwTy.El Bit)
+def L.rep {A : Type} (x : A) : Nat → List A → List A
   | .zero, acc => acc
-  | .succ k, acc => L.idle k (.cons (BitVec.ofNat 1 0) acc)
+  | .succ k, acc => L.rep x k (.cons x acc)
+
+def L.verdict (b : Bool) : String := if b then ": agree" else ": DISAGREE"
 
 def L.check (name : String) (ab wb : Nat) (mx : Bool) (p : List Asm) (cycles steps : Nat) : IO Unit :=
   let prog := Asm.assemble p;
-  let hw := L.bytes (Circuit.simFast (core ab wb mx prog) (L.idle cycles .nil)) .nil 0;
+  let hw := L.bytes (Circuit.simFast (core ab wb mx prog) (L.rep (Bundle.toEl In.bundle In.idle) cycles .nil)) .nil 0;
   let sp := Rv.run (Cfg.mk ab (wb + 2) mx) steps (Arch.start (Cfg.mk ab (wb + 2) mx) prog);
   IO.println (name ++ ": core " ++ showBytes hw.1 ++ "trap " ++ Nat.repr hw.2 ++ "; spec " ++ showBytes (List.reverse sp.out)
-    ++ "trap " ++ Nat.repr sp.trap ++ (if Bool.and (Ls.natsEq hw.1 (List.reverse sp.out)) (Nat.beq hw.2 sp.trap) then ": agree" else ": DISAGREE"))
+    ++ "trap " ++ Nat.repr sp.trap ++ L.verdict (Bool.and (Ls.natsEq hw.1 (List.reverse sp.out)) (Nat.beq hw.2 sp.trap)))
+
+-- 8N1 from a line sampled every cycle, `n` cycles per bit
+def L.drop {A : Type} : Nat → List A → List A
+  | .zero, xs => xs
+  | .succ k, .nil => .nil
+  | .succ k, .cons x xs => L.drop k xs
+def L.sample (n : Nat) : Nat → List Nat → Nat → Nat × List Nat
+  | .zero, xs, acc => (acc, xs)
+  | .succ k, xs, acc => match L.drop n xs with
+    | .nil => (acc, .nil)
+    | .cons b rest => L.sample n k (.cons b rest) (Nat.div acc 2 + 128 * b)
+def L.uart (n : Nat) : Nat → List Nat → List Nat
+  | .zero, _ => .nil
+  | .succ f, .nil => .nil
+  | .succ f, .cons b rest => if Nat.beq b 1 then L.uart n f rest
+    else (let r := L.sample n 8 (L.drop (Nat.div n 2) (.cons b rest)) 0;
+          .cons r.1 (L.uart n f (L.drop n r.2)))
+
+def L.board (n cycles steps : Nat) : IO Unit :=
+  let prog := Asm.assemble (Prog.demo 16368);
+  let ins := L.rep (Bundle.toEl APins.bundle (APins.mk (BitVec.ofNat 1 1) (BitVec.ofNat 4 0))) cycles .nil;
+  let tx := Hdl.map (fun (o : List Nat) => Hdl.nthD 1 o 0) (Circuit.simFast (arty 5 12 .true n prog) ins);
+  let got := L.uart n cycles tx;
+  let sp := List.reverse (Rv.run (Cfg.rv32im 14) steps (Arch.start (Cfg.rv32im 14) prog)).out;
+  IO.println ("demo on the Arty design (" ++ Nat.repr (List.length got) ++ " bytes): \""
+    ++ String.mk (List.map Char.mk (List.filter (fun (c : Nat) => Bool.not (Nat.beq c 13)) got)) ++ "\""
+    ++ L.verdict (Ls.natsEq got sp))
 
 def main : IO Unit := do
   L.check "sieve rv32e" 4 9 .false Prog.sieve 60000 30000;
-  L.check "muldiv rv32im" 5 9 .true Prog.muldiv 20000 5000
+  L.check "muldiv rv32im" 5 9 .true Prog.muldiv 20000 5000;
+  L.board 4 600000 100000

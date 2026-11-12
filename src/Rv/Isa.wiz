@@ -15,7 +15,9 @@ import Int
 -- Misaligned loads and stores trap (the ISA allows it).
 --
 -- Output: a store to an address with bit 31 set writes nothing to memory; the low byte
--- of the stored value goes to the output port (`out`). Loads ignore bit 31.
+-- of the stored value goes to the output port (`out`). Input: a load (of any size)
+-- from an address with bit 31 set takes the next byte of the input (`inp`) and gives
+-- it zero-extended, or all ones (-1) if there is none; it reads no memory.
 
 structure Cfg where
   rbits : Nat
@@ -41,6 +43,7 @@ structure Arch where
   mem : BitVec 32 → BitVec 8
   trap : Nat
   out : List Nat                -- the bytes written to the output port, newest first
+  inp : List Nat                -- the bytes still to come on the input port
 
 ------------------------------------------------------------------------------------
 -- Bits of a number
@@ -105,10 +108,16 @@ def Rv.next (s : Arch) : BitVec 32 := Rv.plus s.pc 4
 
 -- PC := pc, x[rd] := v (unless rd is x0)
 def Rv.write (s : Arch) (rd : Nat) (v : BitVec 32) (pc : BitVec 32) : Arch :=
-  if Nat.beq rd 0 then Arch.mk pc s.regs s.mem s.trap s.out
-  else Arch.mk pc (fun (j : BitVec 5) => if BitVec.beq j (BitVec.ofNat 5 rd) then v else s.regs j) s.mem s.trap s.out
+  if Nat.beq rd 0 then Arch.mk pc s.regs s.mem s.trap s.out s.inp
+  else Arch.mk pc (fun (j : BitVec 5) => if BitVec.beq j (BitVec.ofNat 5 rd) then v else s.regs j) s.mem s.trap s.out s.inp
 
-def Rv.stop (s : Arch) (t : Nat) : Arch := Arch.mk s.pc s.regs s.mem t s.out
+def Rv.stop (s : Arch) (t : Nat) : Arch := Arch.mk s.pc s.regs s.mem t s.out s.inp
+
+-- a load from the input port into rd
+def Rv.setInp (s : Arch) (i : List Nat) : Arch := Arch.mk s.pc s.regs s.mem s.trap s.out i
+def Rv.input (s : Arch) (rd : Nat) : Arch := match s.inp with
+  | .nil => Rv.write s rd (Rv.w32 (Rv.pow2 32 - 1)) (Rv.next s)
+  | .cons b bs => Rv.setInp (Rv.write s rd (Rv.w32 b) (Rv.next s)) bs
 
 -- the `n` low bytes of `v` stored from `a`
 def Rv.storeB (c : Cfg) (m : BitVec 32 → BitVec 8) (a : BitVec 32) (v : Nat) : BitVec 32 → BitVec 8 :=
@@ -227,15 +236,16 @@ def Rv.exec (c : Cfg) (s : Arch) (w : Nat) : Arch :=
   else if Nat.beq op Op.load then
     (if Bool.and (Rv.okLoad f3) (Rv.ok2 c rd r1)
      then (let ω ad := BitVec.add a (Ins.immI w);
-           if Rv.aligned f3 ad then Rv.write s rd (Rv.extend f3 (Rv.load (Rv.size f3) c s ad)) (Rv.next s)
-           else Rv.stop s Trap.load)
+           if Bool.not (Rv.aligned f3 ad) then Rv.stop s Trap.load
+           else if Rv.bit ad.toNat 31 then Rv.input s rd
+           else Rv.write s rd (Rv.extend f3 (Rv.load (Rv.size f3) c s ad)) (Rv.next s))
      else Rv.illegal s)
   else if Nat.beq op Op.store then
     (if Bool.and (Rv.okStore f3) (Rv.ok2 c r1 r2)
      then (let ω ad := BitVec.add a (Ins.immS w);
            if Bool.not (Rv.aligned f3 ad) then Rv.stop s Trap.store
-           else if Rv.bit ad.toNat 31 then Arch.mk (Rv.next s) s.regs s.mem s.trap (.cons (Rv.bits b.toNat 0 8) s.out)
-           else Arch.mk (Rv.next s) s.regs (Rv.store (Rv.size f3) c s.mem ad b.toNat) s.trap s.out)
+           else if Rv.bit ad.toNat 31 then Arch.mk (Rv.next s) s.regs s.mem s.trap (.cons (Rv.bits b.toNat 0 8) s.out) s.inp
+           else Arch.mk (Rv.next s) s.regs (Rv.store (Rv.size f3) c s.mem ad b.toNat) s.trap s.out s.inp)
      else Rv.illegal s)
   else if Nat.beq op Op.opimm then
     (if Bool.and (Rv.okOpImm f3 f7) (Rv.ok2 c rd r1)
@@ -270,4 +280,4 @@ def Rv.wordAt : List Nat → Nat → Nat
 def Rv.image (prog : List Nat) (a : BitVec 32) : BitVec 8 :=
   BitVec.ofNat 8 (Rv.bits (Rv.wordAt prog (Nat.div a.toNat 4)) (8 * Nat.mod a.toNat 4) 8)
 def Arch.start (c : Cfg) (prog : List Nat) : Arch :=
-  Arch.mk (Rv.w32 0) (fun (j : BitVec 5) => Rv.w32 0) (fun (a : BitVec 32) => Rv.image prog (Rv.maddr c a)) 0 .nil
+  Arch.mk (Rv.w32 0) (fun (j : BitVec 5) => Rv.w32 0) (fun (a : BitVec 32) => Rv.image prog (Rv.maddr c a)) 0 .nil .nil

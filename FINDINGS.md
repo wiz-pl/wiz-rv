@@ -43,6 +43,18 @@ Writing `let ω here : List String := …` works. (Related to icestick-cpu C6.)
 its fixed prefix; here every simulation loop has accumulators, so they all go after the
 colon and every clause names them.
 
+### L5. No `\r` in string literals, and the error lands elsewhere (papercut)
+
+```
+def s : String := "a\r\nb"   -- error: expected unknown escape sequence \r, term
+```
+
+Alone the message points at the literal. Inside a large expression (a program as a
+`List.append` of lists, one argument per line) it was reported as "type mismatch
+expected: List Asm, inferred: List Asm → List Asm" at the enclosing application and
+"expected 'def', …" at the start of the next line, a screen away from the literal.
+Here: the assembler's string data turns `\n` into CR LF.
+
 ## The HDL library
 
 ### H1. Memories (#166) and the fast simulator (#199) do not compose (bug, between PRs)

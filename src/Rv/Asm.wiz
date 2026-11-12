@@ -25,6 +25,7 @@ inductive Asm where
   | opi (f3 f7 rd rs1 : Nat) (imm : Int)
   | op (f3 f7 rd rs1 rs2 : Nat)
   | li (rd : Nat) (v : Int)
+  | la (rd : Nat) (l : String)
 
 -- an integer as an `n`-bit two's complement number
 def Asm.tc (n : Nat) (i : Int) : Nat := match i with
@@ -62,6 +63,7 @@ def Asm.liHi (v : Int) : Nat :=
 def Asm.size (i : Asm) : Nat := match i with
   | .label l => 0
   | .li rd v => 8
+  | .la rd l => 8
   | _ => 4
 def Asm.here (pc : Nat) (i : Asm) : List (String × Nat) := match i with
   | .label l => .cons (l, pc) .nil
@@ -92,6 +94,7 @@ def Asm.encode (env : List (String × Nat)) (pc : Nat) (i : Asm) : List Nat := m
   | .opi f3 f7 rd rs1 imm => .cons (Enc.i Op.opimm f3 rd rs1 (f7 * 32 + Asm.tc 12 imm)) .nil
   | .op f3 f7 rd rs1 rs2 => .cons (Enc.r Op.op f3 f7 rd rs1 rs2) .nil
   | .li rd v => .cons (Enc.u Op.lui rd (Asm.liHi v)) (.cons (Enc.i Op.opimm 0 rd rd (Asm.liLo v)) .nil)
+  | .la rd l => .cons (Enc.u Op.auipc rd (Asm.liHi (Asm.offset env pc l))) (.cons (Enc.i Op.opimm 0 rd rd (Asm.liLo (Asm.offset env pc l))) .nil)
 
 def Asm.encodeAll (env : List (String × Nat)) : Nat → List Asm → List Nat
   | pc, .nil => .nil
@@ -133,6 +136,7 @@ def Asm.problem (c : Cfg) (env : List (String × Nat)) (pc : Nat) (i : Asm) : Li
   | .opi f3 f7 rd rs1 imm => List.append (Asm.regsOk c (.cons rd (.cons rs1 .nil))) (Asm.immOk 12 imm)
   | .op f3 f7 rd rs1 rs2 => Asm.regsOk c (.cons rd (.cons rs1 (.cons rs2 .nil)))
   | .li rd v => Asm.regsOk c (.cons rd .nil)
+  | .la rd l => List.append (Asm.regsOk c (.cons rd .nil)) (Asm.target env 32 pc l)
 
 def Asm.problemsAll (c : Cfg) (env : List (String × Nat)) : Nat → List Asm → List String
   | pc, .nil => .nil
@@ -199,3 +203,16 @@ def A.ecall : Asm := Asm.word 115
 def A.ebreak : Asm := Asm.word 1048691
 def A.fence : Asm := Asm.word 267386895   -- fence iorw, iorw
 def A.label (l : String) : Asm := Asm.label l
+def A.la (rd : Nat) (l : String) : Asm := Asm.la rd l
+def A.call (l : String) : Asm := Asm.jal 1 l
+
+-- data: a string's bytes (newlines as CR LF), then a zero, in words (little-endian)
+def Asm.pack : List Nat → Nat → Nat → List Asm
+  | .nil, k, acc => if Nat.beq k 0 then .nil else .cons (Asm.word acc) .nil
+  | .cons x xs, k, acc => if Nat.beq k 3 then .cons (Asm.word (acc + x * 16777216)) (Asm.pack xs 0 0)
+    else Asm.pack xs (Nat.succ k) (acc + x * Nat.pow 256 k)
+-- (a newline becomes CR LF: Wiz's string literals have no `\r`, FINDINGS.md, L5)
+def Asm.codes : List Char → List Nat
+  | .nil => .cons 0 .nil
+  | .cons ch cs => List.append (if Nat.beq (Char.code ch) 10 then .cons 13 (.cons 10 .nil) else .cons (Char.code ch) .nil) (Asm.codes cs)
+def A.string (l : String) (s : String) : List Asm := .cons (Asm.label l) (Asm.pack (Asm.codes (String.chars s)) 0 0)

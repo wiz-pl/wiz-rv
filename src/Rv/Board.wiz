@@ -1,4 +1,4 @@
-import Rv.Core
+import Rv.Uart
 -- The core on a board: the output port drives LEDs (the low bits of the last byte
 -- written), the trap code is shown too. iCEstick: five LEDs, the 12 MHz clock.
 
@@ -18,7 +18,7 @@ structure Sys (ab wb : Nat) (r : HwTy → Type) where
 -- LED1 … LED4: the low four bits of the last byte written; LED5 (green): stopped
 def sysStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : Sys ab wb r) (x : Pins r) :
     r (HwTy.prod (Sys.code ab wb) Leds.code) :=
-  let cr := coreStep ab wb mx s.cpu x.uart_rx;
+  let cr := coreStep ab wb mx s.cpu (In.mk (Hw.lit 1 1) (Hw.lit 1 0) (Hw.lit 8 0));
   let ω o := Out.unpack (Hw.snd cr);
   let latch := Hw.mux o.wr (Hw.slice 0 5 o.byte) s.latch;
   Hw.pair (Sys.pack ab wb (Sys.mk (St.unpack ab wb (Hw.fst cr)) latch))
@@ -32,3 +32,58 @@ def board (ab wb : Nat) (mx : Bool) (prog : List Nat) : Circuit Pins.code Leds.c
 def Icestick.clk : Nat := 21
 def Icestick.pins : List Pin :=
   .cons (Pin.one "uart_rx" 9) (.cons (Pin.bus "leds" (.cons 99 (.cons 98 (.cons 97 (.cons 96 (.cons 95 .nil)))))) .nil)
+
+------------------------------------------------------------------------------------
+-- The Arty A7 (`rv32im_arty_uart`): the output port is the UART's transmitter, the
+-- input port its receiver (a one-byte buffer: a byte that arrives while one is waiting
+-- replaces it), 115473 baud from the 100 MHz clock (`n` = 866 cycles per bit: the
+-- FT2232's "115200" is 3 MHz / 26 = 115384.6 baud, and the board must not be slower;
+-- wiz-arty's src/Arty/Designs.wiz). BTN0 resets the core (the memory keeps what the
+-- program wrote). LD4 blinks (a heartbeat), LD5 … LD7 show the trap code.
+-- Port names as in lib/Hdl/Arty.wiz (agent/artix-target).
+
+def Arty.n : Nat := 866
+def B26 : HwTy := HwTy.bits 26
+
+structure APins (r : HwTy → Type) where
+  uart_rx : r Bit
+  btn : r B4
+  deriving Bundle
+
+structure ABoard (r : HwTy → Type) where
+  uart_tx : r Bit
+  led : r B4
+  deriving Bundle
+
+structure ASys (ab wb : Nat) (r : HwTy → Type) where
+  cpu : St ab wb r
+  sync : Sync r
+  rx : Rx r
+  tx : Tx r
+  full : r Bit
+  byte : r B8
+  beat : r B26
+  deriving Bundle
+
+def aStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (n : Nat) (init : HwTy.El (St.code ab wb))
+    (s : ASys ab wb r) (x : APins r) : r (HwTy.prod (ASys.code ab wb) ABoard.code) :=
+  let rr := rxStep n s.rx s.sync.ff2;
+  let ω got := Byte.unpack (Hw.snd rr);
+  let cr := coreStep ab wb mx s.cpu (In.mk (txIdle s.tx) s.full s.byte);
+  let ω o := Out.unpack (Hw.snd cr);
+  let rst := bitOf 0 x.btn;
+  Hw.pair
+    (ASys.pack ab wb (ASys.mk
+      (St.unpack ab wb (Hw.resetTo rst init (Hw.fst cr)))
+      (Sync.unpack (syncStep s.sync x.uart_rx))
+      (Rx.unpack (Hw.fst rr))
+      (Tx.unpack (txStep n s.tx o.wr o.byte))
+      (Hw.mux got.valid hi (Hw.mux o.take lo s.full))
+      (Hw.mux got.valid got.data s.byte)
+      (inc s.beat)))
+    (ABoard.pack (ABoard.mk s.tx.line (Hw.cat s.cpu.trap (bitOf 25 s.beat))))
+
+def arty (ab wb : Nat) (mx : Bool) (n : Nat) (prog : List Nat) : Circuit APins.code ABoard.code :=
+  Circuit.bundled (ASys.bundle ab wb) APins.bundle ABoard.bundle
+    (ASys.mk (St.init ab wb prog) Sync.init Rx.init Tx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 26 0))
+    (aStep ab wb mx n (Bundle.toEl (St.bundle ab wb) (St.init ab wb prog)))

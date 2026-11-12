@@ -81,7 +81,7 @@ def Ls.go (ab wb : Nat) (mx : Bool) (prog : List Nat) :
       match bad with
       | .cons p ps => Ls.finish ab wb s a cyc ins out (.cons ("after " ++ Nat.repr ins ++ " instructions") bad)
       | .nil =>
-        let ω r := coreStep (r := HwTy.El) ab wb mx (Ls.hw (ab := ab) (wb := wb) v) (BitVec.ofNat 1 0);
+        let ω r := coreStep (r := HwTy.El) ab wb mx (Ls.hw (ab := ab) (wb := wb) v) In.idle;
         let ω o := Bundle.ofEl Out.bundle r.2;
         let ω out2 : List Nat := if BitVec.isTrue o.wr then .cons o.byte.toNat out else out;
         let ω a2 := if Nat.beq ph Ph.d then Rv.step (Ls.cfgM ab wb mx) a else a;

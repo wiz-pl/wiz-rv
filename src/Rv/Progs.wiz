@@ -134,3 +134,60 @@ def Prog.sieve : List Asm :=
 def Prog.muldivShort : List Asm :=
   P.port :: A.li 1 (-7) :: A.li 2 3 :: A.li 3 (-2147483648) :: A.li 4 (-1) :: A.li 5 0 :: A.li 6 123456789 ::
   List.append (P.all8 1 2) (List.append (P.all8 3 4) (List.append (P.all8 6 5) (A.ebreak :: .nil)))
+
+------------------------------------------------------------------------------------
+-- The board demo (RV32IM; registers below x16, so that it would run on RV32E but for
+-- the M instructions): a banner; an M self-test against values the specification
+-- computes when the program is assembled; the primes up to 1000 (trial division with
+-- REMU); then a prompt that echoes what is typed (input: a load from the port, -1
+-- while nothing has come). x15: the port, x2: the stack, x10: the argument.
+
+-- puts: the zero-terminated string at x10
+def D.puts : List Asm :=
+  A.label "puts" :: A.lbu 5 0 10 :: A.beqz 5 "puts.done" :: A.sb 5 0 15 :: A.addi 10 10 1 :: A.j "puts" ::
+  A.label "puts.done" :: A.ret :: .nil
+-- putd: x10 in decimal (digits pushed on the stack, then printed)
+def D.putd : List Asm :=
+  A.label "putd" :: A.addi 2 2 (-16) :: A.mv 5 10 :: A.li 7 10 :: A.li 12 0 ::
+  A.label "putd.l" :: A.remu 6 5 7 :: A.addi 6 6 48 :: A.add 13 2 12 :: A.sb 6 0 13 :: A.addi 12 12 1 ::
+    A.divu 5 5 7 :: A.bnez 5 "putd.l" ::
+  A.label "putd.p" :: A.addi 12 12 (-1) :: A.add 13 2 12 :: A.lbu 6 0 13 :: A.sb 6 0 15 :: A.bnez 12 "putd.p" ::
+  A.addi 2 2 16 :: A.ret :: .nil
+
+-- one self-test case: funct3 of an M instruction and its operands; the expected value
+-- is the specification's
+def D.expect (f3 : Nat) (a b : Int) : Int :=
+  Int.ofNat (Rv.muldiv f3 (Rv.w32 (Asm.tc 32 a)) (Rv.w32 (Asm.tc 32 b))).toNat
+def D.case (f3 : Nat) (a b : Int) : List Asm :=
+  A.li 5 a :: A.li 6 b :: Asm.op f3 1 7 5 6 :: A.li 12 (D.expect f3 a b) :: A.bne 7 12 "fail" :: .nil
+def D.cases8 (a b : Int) : List Asm :=
+  List.append (D.case 0 a b) (List.append (D.case 1 a b) (List.append (D.case 2 a b) (List.append (D.case 3 a b)
+  (List.append (D.case 4 a b) (List.append (D.case 5 a b) (List.append (D.case 6 a b) (D.case 7 a b)))))))
+def D.selftest : List Asm :=
+  List.append (D.cases8 (-7) 3) (List.append (D.cases8 (-2147483648) (-1)) (List.append (D.cases8 123456789 0)
+  (List.append (D.cases8 (-98765) 4321) (D.cases8 2147483647 (-2147483648)))))
+
+def D.primes : List Asm :=
+  A.li 8 2 ::
+  A.label "pl" :: A.li 9 2 ::
+  A.label "dl" :: A.mul 11 9 9 :: A.bltu 8 11 "isp" :: A.remu 11 8 9 :: A.beqz 11 "notp" :: A.addi 9 9 1 :: A.j "dl" ::
+  A.label "isp" :: A.mv 10 8 :: A.call "putd" :: A.li 11 32 :: A.sb 11 0 15 ::
+  A.label "notp" :: A.addi 8 8 1 :: A.li 11 1001 :: A.blt 8 11 "pl" :: .nil
+
+def Prog.demo (stack : Nat) : List Asm :=
+  List.append (P.port :: A.li 2 (Int.ofNat stack) :: A.la 10 "banner" :: A.call "puts" :: A.la 10 "mtest" :: A.call "puts" :: .nil)
+    (List.append D.selftest
+    (List.append (A.la 10 "pass" :: A.call "puts" :: A.j "primes" ::
+      A.label "fail" :: A.la 10 "failed" :: A.call "puts" ::
+      A.label "primes" :: A.la 10 "ptext" :: A.call "puts" :: .nil)
+    (List.append D.primes
+    (List.append (A.la 10 "prompt" :: A.call "puts" ::
+      A.label "echo" :: A.lw 5 0 15 :: A.blt 5 0 "echo" :: A.li 6 13 :: A.beq 5 6 "cr" :: A.sb 5 0 15 :: A.j "echo" ::
+      A.label "cr" :: A.la 10 "prompt" :: A.call "puts" :: A.j "echo" :: .nil)
+    (List.append D.puts (List.append D.putd
+    (List.append (A.string "banner" "\nwiz-rv RV32IM on Arty\n")
+    (List.append (A.string "mtest" "M self-test: ")
+    (List.append (A.string "pass" "PASS\n")
+    (List.append (A.string "failed" "FAIL\n")
+    (List.append (A.string "ptext" "primes up to 1000:\n")
+    (A.string "prompt" "\n> "))))))))))))
