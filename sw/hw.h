@@ -30,6 +30,8 @@
 #define PERF_REFRESH  IO(0x70)             /* OLED refreshes */
 #define PERF_ODD      IO(0x74)             /* refreshes whose pixel checksum changed with no write */
 #define PERF_SUM      IO(0x78)             /* the last refresh's checksum */
+#define PERF_UNDER    IO(0x7c)             /* sound ticks with the FIFO empty */
+#define PERF_OLED     IO(0x80)             /* the OLED controller: pins (11..7: PMODEN VCCEN RES DC CS), program counter */
 
 #define OLED_FB       ((volatile uint16_t *)0x81000000u)   /* 96 x 64 RGB565, row-major */
 #define OLED_W        96
