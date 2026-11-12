@@ -17,17 +17,20 @@ void DG_Init(void) {}
 
 /* OLED pixel (x, y) covers frame columns [x*320/96, (x+1)*320/96) and rows
    [y*200/64, (y+1)*200/64): average 2 x 2 samples of that block */
+static uint32_t sw_w;   /* framebuffer writes made by DG_DrawFrame */
 /* every 5 s: the performance counters' increments (cycles at 50 MHz) */
 static void perf_report(void) {
-  static uint64_t last; static uint32_t frames, l_i, l_b, l_m, l_l, l_f, l_h, l_x;
+  static uint64_t last; static uint32_t frames, l_i, l_b, l_m, l_l, l_f, l_h, l_x, l_w;
   frames++;
   uint64_t now = hw_cycles();
   if (now - last < 5ull * HW_CLOCK_HZ) return;
   uint32_t i = PERF_INSTR, b = PERF_BUS, m = PERF_MEM, l = PERF_LONG, f = PERF_FETCH, h = CACHE_HITS, x = CACHE_MISSES;
   uint32_t cyc = (uint32_t)(now - last);
-  printf("perf: %u frames, cycles %u, instr %u (CPI x100 %u), bus %u, M %u, long %u, F %u, cache hits %u misses %u\n",
+  uint32_t w = PERF_FBW;
+  printf("perf: %u frames, cycles %u, instr %u (CPI x100 %u), bus %u, M %u, long %u, F %u, cache hits %u misses %u, fb writes %u (drawn %u)\n",
          (unsigned)frames, (unsigned)cyc, (unsigned)(i - l_i), (unsigned)(i - l_i ? (uint64_t)cyc * 100 / (i - l_i) : 0),
-         (unsigned)(b - l_b), (unsigned)(m - l_m), (unsigned)(l - l_l), (unsigned)(f - l_f), (unsigned)(h - l_h), (unsigned)(x - l_x));
+         (unsigned)(b - l_b), (unsigned)(m - l_m), (unsigned)(l - l_l), (unsigned)(f - l_f), (unsigned)(h - l_h), (unsigned)(x - l_x), (unsigned)(w - l_w), (unsigned)sw_w);
+  l_w = w; sw_w = 0;
   last = now; frames = 0; l_i = i; l_b = b; l_m = m; l_l = l; l_f = f; l_h = h; l_x = x;
 }
 
@@ -43,6 +46,7 @@ void DG_DrawFrame(void) {
       uint32_t r = 0, g = 0, b = 0;
       for (int k = 0; k < 4; k++) { r += (p[k] >> 16) & 255; g += (p[k] >> 8) & 255; b += p[k] & 255; }
       OLED_FB[y * OLED_W + x] = rgb565(r / 4, g / 4, b / 4);
+      sw_w++;
     }
   }
 }

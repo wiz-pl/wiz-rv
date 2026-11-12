@@ -139,6 +139,27 @@ structure In (r : HwTy → Type) where
 ------------------------------------------------------------------------------------
 -- Helpers
 
+-- a barrel shifter: `x` shifted left (`left`) or right by `amt` places, filling with
+-- `fill` from the left (0, or the sign bit for an arithmetic shift)
+def shift1 {r : HwTy → Type} [Hw r] (left fill on : r W1) (x : r B32) : r B32 :=
+  Hw.mux on (Hw.mux left (Hw.cat (Hw.slice 0 31 x : r (HwTy.bits 31)) (Hw.lit 1 0))
+    (Hw.cat (Hw.mux fill (Hw.lit 1 1) (Hw.lit 1 0) : r (HwTy.bits 1)) (Hw.slice 1 31 x : r (HwTy.bits 31)))) x
+def shift2 {r : HwTy → Type} [Hw r] (left fill on : r W1) (x : r B32) : r B32 :=
+  Hw.mux on (Hw.mux left (Hw.cat (Hw.slice 0 30 x : r (HwTy.bits 30)) (Hw.lit 2 0))
+    (Hw.cat (Hw.mux fill (Hw.lit 2 3) (Hw.lit 2 0) : r (HwTy.bits 2)) (Hw.slice 2 30 x : r (HwTy.bits 30)))) x
+def shift4 {r : HwTy → Type} [Hw r] (left fill on : r W1) (x : r B32) : r B32 :=
+  Hw.mux on (Hw.mux left (Hw.cat (Hw.slice 0 28 x : r (HwTy.bits 28)) (Hw.lit 4 0))
+    (Hw.cat (Hw.mux fill (Hw.lit 4 15) (Hw.lit 4 0) : r (HwTy.bits 4)) (Hw.slice 4 28 x : r (HwTy.bits 28)))) x
+def shift8 {r : HwTy → Type} [Hw r] (left fill on : r W1) (x : r B32) : r B32 :=
+  Hw.mux on (Hw.mux left (Hw.cat (Hw.slice 0 24 x : r (HwTy.bits 24)) (Hw.lit 8 0))
+    (Hw.cat (Hw.mux fill (Hw.lit 8 255) (Hw.lit 8 0) : r (HwTy.bits 8)) (Hw.slice 8 24 x : r (HwTy.bits 24)))) x
+def shift16 {r : HwTy → Type} [Hw r] (left fill on : r W1) (x : r B32) : r B32 :=
+  Hw.mux on (Hw.mux left (Hw.cat (Hw.slice 0 16 x : r (HwTy.bits 16)) (Hw.lit 16 0))
+    (Hw.cat (Hw.mux fill (Hw.lit 16 65535) (Hw.lit 16 0) : r (HwTy.bits 16)) (Hw.slice 16 16 x : r (HwTy.bits 16)))) x
+def barrel {r : HwTy → Type} [Hw r] (left fill : r W1) (amt : r B5) (x : r B32) : r B32 :=
+  shift16 left fill (Hw.slice 4 1 amt) (shift8 left fill (Hw.slice 3 1 amt) (shift4 left fill (Hw.slice 2 1 amt)
+    (shift2 left fill (Hw.slice 1 1 amt) (shift1 left fill (Hw.slice 0 1 amt) x))))
+
 def bitOf {r : HwTy → Type} [Hw r] {ω n : Nat} (i : Nat) (w : r (HwTy.bits n)) : r W1 := Hw.slice i 1 w
 def rep {r : HwTy → Type} [Hw r] (ω n : Nat) (b : r W1) : r (HwTy.bits n) :=
   Hw.mux b (Hw.lit n (Nat.pow 2 n - 1)) (Hw.lit n 0)
@@ -277,9 +298,11 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
   let eq := Hw.eq a b;
   let taken := Hw.xor (Hw.mux (bitOf 2 d.f3) (Hw.mux (bitOf 1 d.f3) ult slt) eq) (bitOf 0 d.f3);
   let f3 := d.f3;
+  -- shifts in one cycle (a barrel shifter; the S phase is no longer used)
+  let shRes := barrel (isK f3 1) (Hw.and d.alt (bitOf 31 a)) (Hw.slice 0 5 b) a;
   let aluRes := Hw.mux (isK f3 0) sum (Hw.mux (isK f3 2) (zext32 slt) (Hw.mux (isK f3 3) (zext32 ult)
-    (Hw.mux (isK f3 4) (Hw.xor a b) (Hw.mux (isK f3 6) (Hw.or a b) (Hw.and a b)))));
-  let shift := Hw.and arith (Hw.or (isK f3 1) (isK f3 5));
+    (Hw.mux (isK f3 4) (Hw.xor a b) (Hw.mux (isK f3 6) (Hw.or a b) (Hw.mux (isK f3 7) (Hw.and a b) shRes)))));
+  let shift := Hw.lit 1 0;
   -- the next PC
   let pcInc := Hw.add s.pc (Hw.lit 32 4);
   let pcImm := Hw.add s.pc (Hw.mux d.jal d.immJ (Hw.mux d.branch d.immB d.immU));

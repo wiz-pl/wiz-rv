@@ -270,3 +270,14 @@ def Hex.wordsGo : List Nat → Nat → Nat → List Nat
   | .cons b bs, k, acc => if Nat.beq k 3 then .cons (acc + b * 16777216) (Hex.wordsGo bs 0 0)
     else Hex.wordsGo bs (Nat.succ k) (acc + b * Nat.pow 256 k)
 def Hex.words (s : String) : List Nat := Hex.wordsGo (Hex.bytesGo (String.chars s) .none) 0 0
+
+-- the L1 with stores to lines it holds: load (the line comes in), store every size,
+-- load back, and a line with every word written (DDR)
+def Prog.l1 : List Asm :=
+  P.port :: A.lui 1 262144 :: A.li 2 (-2023406815) :: A.sw 2 0 1 :: A.sw 2 4 1 :: A.sw 2 8 1 :: A.sw 2 12 1 ::
+  A.lw 3 0 1 ::
+  A.li 4 171 :: A.sb 4 1 1 :: A.lw 3 0 1 :: A.srli 5 3 8 :: P.out 5 :: P.out 3 ::
+  A.li 4 (-292) :: A.sh 4 6 1 :: A.lw 3 4 1 :: A.srli 5 3 16 :: P.out 5 :: P.out 3 ::
+  A.li 4 1193046 :: A.sw 4 8 1 :: A.lw 3 8 1 :: P.out 3 :: A.lbu 3 10 1 :: P.out 3 ::
+  A.lw 3 12 1 :: A.srli 5 3 24 :: P.out 5 ::
+  A.ebreak :: .nil

@@ -97,8 +97,11 @@ static uint32_t io_read(uint32_t a) {
   }
 }
 
+static uint32_t fbw_pc[16]; static int fbw_n; static uint64_t fbw_total;
 static void io_write(uint32_t a, uint32_t v, int size) {
   if ((a >> 24) == 0x81) {
+    fbw_total++;
+    { int k; for (k = 0; k < fbw_n && fbw_pc[k] != pc; k++) {} if (k == fbw_n && fbw_n < 16) fbw_pc[fbw_n++] = pc; }
     uint32_t i = (a & 0xffffff) >> 1;
     if (i < 96 * 64 && size == 2) {
       oled[i] = (uint16_t)v;
@@ -238,6 +241,9 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[iss] trap %d\n", t);
     for (int i = 0; i < 32; i++) fprintf(stderr, "x%d=%08x%s", i, x[i], i % 8 == 7 ? "\n" : " ");
   }
+  fprintf(stderr, "[iss] %llu framebuffer writes, from pcs", (unsigned long long)fbw_total);
+  for (int i = 0; i < fbw_n; i++) fprintf(stderr, " %08x", fbw_pc[i]);
+  fprintf(stderr, "\n");
   if (mis_total) {
     fprintf(stderr, "[iss] %llu misaligned accesses, at", (unsigned long long)mis_total);
     for (int i = 0; i < mis_n; i++) fprintf(stderr, " %08x", mis_pc[i]);
