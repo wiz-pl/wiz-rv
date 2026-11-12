@@ -193,7 +193,10 @@ structure PpBus (r : HwTy → Type) where
   wd : r B32
   strb : r B4
   sent : r W1     -- the request was taken (`ready`)
-  gap : r W1      -- a cycle without a request after each word
+  gap : r B2      -- two cycles without a request after each word (the board's latches of
+                  -- `ready`, `rvalid` see the request's end through a register: DoomTop's
+                  -- busStep gets `pend` a cycle late, so one cycle would let an answer
+                  -- stand into the next word)
   k : r B2
   buf : r B128
   freq : r W1     -- a fill is wanted: of the I-cache (`fI`), at `faddr`
@@ -248,12 +251,13 @@ def pipeStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : PpSt ab w
   let killTrap := gate rr.v rTrap;
   let kill := Hw.or killMiss (Hw.or killSmc killTrap);
   ----------------------------------------------------------------- the bus
-  let live := Hw.and bu.act (Hw.not bu.gap);
+  let gap0 := isK bu.gap 0;
+  let live := Hw.and bu.act gap0;
   let wordDone := gate live (Hw.mux bu.we x.ready x.rvalid);
   let stDone := gate wordDone bu.we;
   let fWord := gate wordDone (Hw.not bu.we);
   let fillDone := gate fWord (isK bu.k 3);
-  let idle := Hw.and (Hw.not bu.act) (Hw.not bu.gap);
+  let idle := Hw.and (Hw.not bu.act) gap0;
   let startSt := gate idle bu.sbv;
   let startF := gate idle (gate (Hw.not bu.sbv) bu.freq);
   let fillLine : r B128 := Hw.cat (Hw.mux (isK bu.k 3) x.rdata (Hw.slice 96 32 bu.buf : r B32))
@@ -467,7 +471,7 @@ def pipeStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : PpSt ab w
     (Hw.mux startSt bu.sba (Hw.mux startF lineA (Hw.mux fWord (Hw.add bu.addr (Hw.lit 32 4)) bu.addr)))
     (Hw.mux startSt bu.sbd bu.wd) (Hw.mux startSt bu.sbs bu.strb)
     (gate live (gate (Hw.not wordDone) (Hw.or bu.sent x.ready)))
-    wordDone
+    (Hw.mux wordDone (Hw.lit 2 2) (Hw.mux gap0 bu.gap (Hw.sub bu.gap (Hw.lit 2 1))))
     (Hw.mux startF (Hw.lit 2 0) (Hw.mux fWord (Hw.add bu.k (Hw.lit 2 1)) bu.k))
     (Hw.mux fWord fillLine bu.buf)
     (Hw.mux killMiss (Hw.lit 1 1) (Hw.mux fillDone (Hw.lit 1 0) bu.freq))
@@ -520,7 +524,7 @@ def Pp.reset {r : HwTy → Type} [Hw r] (ab wb : Nat) (rst : r W1) (c : PpSt ab 
       m.p0 m.p1 m.p2 m.p3 m.corr)
     (PpR.mk (z rr.v) (z rr.imiss) (z rr.miss) (z rr.smc) rr.pc rr.rd (z rr.we) rr.val rr.trap rr.addr)
     (PpDiv.mk (z dv.on) dv.cnt dv.acc dv.dvs dv.rm)
-    (PpBus.mk (z bu.sbv) bu.sba bu.sbd bu.sbs (z bu.act) bu.we bu.addr bu.wd bu.strb (z bu.sent) (z bu.gap) bu.k bu.buf
+    (PpBus.mk (z bu.sbv) bu.sba bu.sbd bu.sbs (z bu.act) bu.we bu.addr bu.wd bu.strb (z bu.sent) (Hw.mux rst (Hw.lit 2 0) bu.gap) bu.k bu.buf
       (z bu.freq) bu.fI bu.faddr)
     (Hw.mux rst (Hw.lit 3 0) c.trap)
 
@@ -551,7 +555,7 @@ def PpSt.init (ab wb : Nat) (prog : List Nat) : PpSt ab wb HwTy.El :=
       (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 3) (Pp.z 1) (Pp.z 32) (Pp.z 32) (Pp.z 32) (Pp.z 32) (Pp.z 32))
     (PpR.mk (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 32) (Pp.z 5) (Pp.z 1) (Pp.z 32) (Pp.z 3) (Pp.z 32))
     (PpDiv.mk (Pp.z 1) (Pp.z 5) (Pp.z 32) (Pp.z 32) (Pp.z 32))
-    (PpBus.mk (Pp.z 1) (Pp.z 32) (Pp.z 32) (Pp.z 4) (Pp.z 1) (Pp.z 1) (Pp.z 32) (Pp.z 32) (Pp.z 4) (Pp.z 1) (Pp.z 1)
+    (PpBus.mk (Pp.z 1) (Pp.z 32) (Pp.z 32) (Pp.z 4) (Pp.z 1) (Pp.z 1) (Pp.z 32) (Pp.z 32) (Pp.z 4) (Pp.z 1) (Pp.z 2)
       (Pp.z 2) (Pp.z 128) (Pp.z 1) (Pp.z 1) (Pp.z 32))
     (Pp.z 3)
 
