@@ -250,3 +250,17 @@ def Boot.session (prog : List Nat) : List Nat :=
 def Prog.hello : List Asm :=
   P.port :: A.la 10 "hello.s" :: A.label "hello.l" :: A.lbu 5 0 10 :: A.beqz 5 "hello.e" :: A.sb 5 0 15 :: A.addi 10 10 1 :: A.j "hello.l" ::
   A.label "hello.e" :: A.ebreak :: A.string "hello.s" "ok"
+
+-- a binary given as hexadecimal text (app/bin2wiz.wiz): its little-endian words
+def Hex.digit (c : Char) : Nat := if Nat.lt (Char.code c) 58 then Char.code c - 48 else Char.code c - 87
+-- (one character or byte at a time: a recursive call on the tail of a nested pattern,
+-- `.cons a (.cons b rest)` to `rest`, is not accepted as structural; FINDINGS.md, L6)
+def Hex.bytesGo : List Char → Option Nat → List Nat
+  | .nil, _ => .nil
+  | .cons c cs, .none => Hex.bytesGo cs (.some (Hex.digit c))
+  | .cons c cs, .some h => .cons (16 * h + Hex.digit c) (Hex.bytesGo cs .none)
+def Hex.wordsGo : List Nat → Nat → Nat → List Nat
+  | .nil, k, acc => if Nat.beq k 0 then .nil else .cons acc .nil
+  | .cons b bs, k, acc => if Nat.beq k 3 then .cons (acc + b * 16777216) (Hex.wordsGo bs 0 0)
+    else Hex.wordsGo bs (Nat.succ k) (acc + b * Nat.pow 256 k)
+def Hex.words (s : String) : List Nat := Hex.wordsGo (Hex.bytesGo (String.chars s) .none) 0 0

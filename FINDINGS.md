@@ -55,6 +55,19 @@ expected: List Asm, inferred: List Asm → List Asm" at the enclosing applicatio
 "expected 'def', …" at the start of the next line, a screen away from the literal.
 Here: the assembler's string data turns `\n` into CR LF.
 
+### L6. Recursion on the tail of a nested pattern is not structural (papercut)
+
+```
+def pairs : List Nat → List Nat
+  | .cons a (.cons b rest) => .cons (a + b) (pairs rest)
+  | _ => .nil
+-- error: recursive call of pairs on rest, which is not structurally smaller
+```
+
+`rest` is a sub-term of the argument two constructors down. Lean accepts this. Here:
+a position counter or an `Option` accumulator, one element per call (`Asm.pack`,
+`Hex.bytesGo`, `Hex.wordsGo`).
+
 ## The HDL library
 
 ### H1. Memories (#166) and the fast simulator (#199) do not compose (bug, between PRs)

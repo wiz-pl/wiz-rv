@@ -90,6 +90,37 @@ grail test           # the specification tests and the lockstep simulations
 .grail/bin/rv all    # Verilog, synthesis, place and route
 ```
 
+## Doom
+
+The machine for Doom on the Arty (src/Rv/Doom.wiz): the RV32IM core with a bus to the
+Arty's 256 MB DDR3 (through the write-back cache and the controller of wiz-ddr3, written
+in Wiz too), 16 KB of on-chip RAM holding a boot loader (`Prog.boot`, written with the
+assembler), and its I/O: the UART at 1 Mbaud, a cycle counter, a sound FIFO played at
+11025 Hz as PWM on JB pin 1 (a piezo between JB1 and GND on JB5), and a 96 × 64
+framebuffer sent continuously to a PmodOLEDrgb on JA.
+
+```
+0x00000000  16 KB on-chip RAM (the boot loader)
+0x40000000  DDR3, 256 MB: Doom from here, its WAD at 0x48000000
+0x80000000  UART · +0x10/+0x14 cycles · +0x30 sound sample · +0x34 sound FIFO free
+0x81000000  the framebuffer (RGB 565, halfwords)
+```
+
+The software (sw/, built by nix/doom.nix with the RV32IM toolchain of nix/riscv.nix):
+doomgeneric (fetched at a pinned commit), a platform layer (the frame downscaled to
+96 × 64, time from the cycle counter, keys from the UART if any; without them Doom plays
+its demos), a sound module (eight channels mixed into the FIFO), newlib's system calls
+(the console on the UART, the WAD as the one file). `rvload PORT doom.bin doom1.wad`
+(app/rvload.wiz) sends both through the boot loader and starts Doom. The shareware
+`doom1.wad` is not in the repository (wad/ is ignored).
+
+Checked so far: the core's bus and the boot loader in the lockstep against the
+specification (with a DDR model); the whole machine but the DDR controller in Icarus
+Verilog (`simTop`: it boots, loads a program into DDR over the UART, runs it);
+Doom itself on a host instruction-set simulator of the machine (sw/iss/iss.c: frames as
+images, sound as a WAV file): the demo loop at about 3.7 frames a second at the core's
+50 MHz, cache misses not counted.
+
 ## Next
 
 * **Doom on the Arty** (doomgeneric, bare-metal RV32IM): a GCC toolchain (Nix

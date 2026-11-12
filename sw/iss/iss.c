@@ -20,6 +20,7 @@ static uint64_t cycles, instret;
 static const char *frames;
 static int nframe;
 static const char *keys;        /* "ms:c,ms:c,..." */
+static uint32_t screen_ptr;     /* -screen ADDR: the address of DG_ScreenBuffer (320 x 200 XRGB) */
 static int lenient;             /* -lenient: do misaligned accesses (and report where) */
 static uint32_t mis_pc[64]; static int mis_n; static uint64_t mis_total;
 static void misaligned(void) {
@@ -62,6 +63,18 @@ static void dump_frame(void) {
     fputc(((p >> 11) & 31) << 3, f); fputc(((p >> 5) & 63) << 2, f); fputc((p & 31) << 3, f);
   }
   fclose(f);
+  if (screen_ptr) {        /* the full frame too */
+    uint32_t p; memcpy(&p, byte_at(screen_ptr), 4);
+    snprintf(name, sizeof name, "%s/full%05d.ppm", frames, nframe - 1);
+    f = fopen(name, "wb");
+    if (!f) return;
+    fprintf(f, "P6\n320 200\n255\n");
+    for (int i = 0; i < 320 * 200; i++) {
+      uint32_t v; memcpy(&v, byte_at(p + 4 * i), 4);
+      fputc((v >> 16) & 255, f); fputc((v >> 8) & 255, f); fputc(v & 255, f);
+    }
+    fclose(f);
+  }
 }
 
 static uint64_t snd_written;
@@ -209,6 +222,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "-frames")) frames = argv[i + 1];
     else if (!strcmp(argv[i], "-keys")) keys = argv[i + 1];
     else if (!strcmp(argv[i], "-lenient")) { lenient = 1; i--; }
+    else if (!strcmp(argv[i], "-screen")) screen_ptr = (uint32_t)strtoul(argv[i + 1], 0, 16);
     else if (!strcmp(argv[i], "-wav")) { wav = fopen(argv[i + 1], "wb"); fseek(wav, 44, SEEK_SET); }
   }
   ddr = calloc(DDR_SIZE, 1);
