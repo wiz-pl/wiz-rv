@@ -219,6 +219,59 @@ synth_xilinx died on `Assert memory_strings.count(...MEMID...)` in OPT_CLEAN on 
 design; the rerun passed (yosys 0.70, intermittent). The fix is the single-rate 100 MHz core with
 every RAM port from registers and timing closed (the pipeline branch).
 
+### H8. The single-rate pipeline: what 100 MHz took (no gap, a design note)
+
+The pipelined core (src/Rv/Pipe.wiz) at the full rate removes H5 and H6, since there is
+no multicycle path left, and H7, since every RAM write port is driven from registers.
+Here is what nextpnr showed on the way to 100 MHz (p_arty, the core with the UART
+alone):
+
+* First version, 74.4 MHz. The critical path ran through forwarding, the branch compare,
+  `redirect`, the flush of D, and the reset/enable of every E register (13.4 ns). Fix:
+  the taken branch is registered and redirects the fetch a cycle later.
+* Then 67.9 MHz. The path ran through forwarding, the compare, the trap code, `eOk`,
+  `isDiv`, `stallE`, `hold`, the fetch address, and the I-cache tag BRAM's address
+  (14.7 ns). Fixes: the divider and the rd-write enable are no longer gated by the trap
+  code (a trapping instruction is killed in R, and R's write is gated); the forwarding
+  selects and the load-use interlock are computed a cycle ahead into E's registers.
+* Result: 106.9 MHz alone, and 104.8 MHz for the whole doom_top with wiz-ddr3's
+  controller and cache.
+
+Nothing in the HDL got in the way. All of this is ordinary RTL.
+
+### H9. A one-cycle bus gap, invisible to the lockstep (bug, fixed; found in Icarus)
+
+The board's bus answers are latched: busStep keeps `ready` and `rvalid` while `pend` is
+high, and doomSys's Edge registers latch them again. The core drops `pend` between
+words so that the latches clear. At half rate a one-cycle gap was two clock cycles. At
+the full rate it was one, and busStep sees `pend` through the Edge register, a cycle
+late. So each fill word took the previous word's answer.
+
+simTop in Icarus printed ".!" and then garbage where the program loaded into DDR prints
+"ok". A trace of R and the bus showed each fill word with the last word's data. The
+fix is two idle cycles after each word.
+
+The lockstep missed it because its DDR model answers with one-cycle pulses (`Ls.go`),
+not with the board's latches. Wanted: the lockstep's bus model through busStep and
+Edge, or the adapter's contract written down where both sides can see it.
+
+### H10. Proofs: the two-cycle claims do not carry over as they stand (gap)
+
+src/Rv/Proofs.wiz still checks: it is about the multi-cycle core, which is still in the
+tree (`doomTopHalf`, the iCEstick and Arty demos).
+
+For the pipelined core, the natural restatement is at retirement. With D holding the
+word at the PC and E, M and R empty (bubbles), three cycles later R holds the
+instruction with the specification's PC and rd value, and a fourth writes it. XOR, OR,
+AND, XORI, ORI, ANDI, LUI and AUIPC should go through by `rfl` as before.
+
+That needs `gate` (H2) in the places where the pipeline ANDs a control bit with data,
+now that forwarding and the stall logic add some. Examples: `Hw.and m.we …` in the
+forwarding selects, and the bypass in D.
+
+A claim with instructions in flight (forwarding from M, from R) is the interesting one,
+and it would need a symbolic predecessor. Not done.
+
 ## Compiler and run time
 
 ### S1. A program that imports the core takes 12 to 15 minutes to compile (slow)

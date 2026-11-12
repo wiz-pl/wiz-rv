@@ -13,6 +13,8 @@ src/Rv/Asm.wiz       a small assembler (mnemonics as functions, labels, two pass
 src/Rv/Progs.wiz     test programs (riscv-tests style: they print results, then ebreak)
 src/Rv/Core.wiz      the multi-cycle core, parameterised by register count and memory size
 src/Rv/Lockstep.wiz  the core against the specification, cycle by cycle / instruction by instruction
+src/Rv/Pipe.wiz      the 5-stage pipelined core (the Doom machine's, at 100 MHz)
+src/Rv/PLockstep.wiz the pipelined core against the specification, instruction by instruction at retirement
 app/rv.wiz           the flow driver: Verilog, yosys, nextpnr
 tests/*.wiz          grail tests
 ```
@@ -37,12 +39,58 @@ barrel shifter). `src/Rv/Core.wiz` has the phase diagram.
 Optionally (`mx`) the M extension: a one-cycle 64-bit multiplier (DSP blocks on a
 Xilinx part) and a 32-cycle restoring divider.
 
+## The pipelined core
+
+`src/Rv/Pipe.wiz`: five stages, in order, at the full clock rate (no clock enable):
+
+* **F**: the next fetch address goes to block RAM: the on-chip RAM's fetch copy and the
+  I-cache (16 KB, 16-byte lines, direct-mapped).
+* **D**: the I-cache hit check and the decode. The register file is two RAM32M copies,
+  read asynchronously, with a bypass of R's write.
+* **E**: the ALU and the barrel shifter. Branches are predicted not taken and resolved
+  here; a taken branch or jump is registered and redirects the fetch a cycle later, so
+  it costs 2 cycles. Also here: the traps, and the four 16 × 16 partial products of the
+  multiplier (4 DSP48E1). The divider is iterative (33 cycles; E waits). The D-side
+  memories are read at the address.
+* **M**: the load data comes from the on-chip RAM's data copy, the D-cache (16 KB,
+  write-through, no allocation on a store) or I/O. Also here: the store merge and the
+  product's sum.
+* **R**: the register file is written. Any instruction that cannot complete kills
+  everything younger here (a trap, an I- or D-cache miss, which is replayed after the
+  fill), so traps are precise.
+
+Forwarding goes from M and R into E. A load or product that E needs costs one cycle. The
+forwarding selects and that interlock are decided a cycle ahead into E's registers.
+
+Every block RAM and LUT-RAM write port is driven from registers: the on-chip RAM, both
+caches, their tags and the register file. A store's write is done the cycle after it
+leaves M, and loads forward from that write and from the one before it. DDR stores go
+through a one-entry store buffer.
+
+A store that may hit fetched instructions restarts the fetch after it: any on-chip
+store, or a DDR store to a line that is in the I-cache, which is then invalidated. So
+self-modifying code behaves as the specification says.
+
+The ISA (src/Rv/Isa.wiz) and the bus to DDR are unchanged.
+
+Lockstep (`tests/plockstep.wiz`, src/Rv/PLockstep.wiz): at every retirement the PC and
+every register (both copies) must be the specification's. At the end come the trap, the
+output, both copies of the on-chip RAM and DDR. All the programs of tests/lockstep.wiz
+agree, with the same output as the multi-cycle core, including the boot loader loading
+over the UART into DDR and the compiled C test (1060 instructions).
+
+Cycle counts against the multi-cycle core: alu 66 vs 149 cycles (62 instructions), sort
+600 vs 705, sum 59 vs 76. Every on-chip store restarts the fetch, which costs sort and
+mem; DDR code does not pay this.
+
 ## Results
 
 | design | part | logic | block RAM | Fmax (nextpnr) |
 |---|---|---|---|---|
 | RV32E, 2 KB, LEDs (`rv32e_hx1k`) | iCE40-HX1K (tq144, iCEstick pins) | 1036 / 1280 LCs (80 %) | 8 / 16 | 37 MHz |
 | RV32IM, 16 KB, UART (`rv32im_arty_uart`) | Artix-7 XC7A35T (Arty A7-35T) | about 970 LUTs, 300 FFs, 10 DSP48E1 | 4 RAMB36E1 + 12 RAM32M (the register file) | 78.9 MHz: run at half rate, 50 MHz (FINDINGS.md, H5) |
+| pipelined RV32IM, 16 KB, UART (`p_arty`, app/pgen.wiz) | XC7A35T | about 2000 LUTs, 936 FFs, 4 DSP48E1 | 12 RAMB36E1 + 2 RAMB18E1 + 12 RAM32M (no DDR, so no caches) | 106.9 MHz, run at 100 |
+| the Doom machine, pipelined (`doom_top`) | XC7A35T | about 5100 LUTs, 3900 FFs, 4 DSP48E1 (with wiz-ddr3's controller, cache, PHY) | 23 RAMB36E1 + 4 RAMB18E1 + 12 RAM32M | 104.8 MHz, run at 100 (no multicycle constraints) |
 
 (The Arty build is artix-target's openXC7 flow: yosys, nextpnr-xilinx, Project X-Ray.)
 
@@ -92,7 +140,9 @@ grail test           # the specification tests and the lockstep simulations
 
 ## Doom
 
-The machine for Doom on the Arty (src/Rv/Doom.wiz): the RV32IM core with a bus to the
+The machine for Doom on the Arty (src/Rv/Doom.wiz): the pipelined RV32IM core at 100 MHz
+(`doomTop`; `doomTopHalf` is the multi-cycle core at half rate; `doomSys` takes the rate
+and the core) with a bus to the
 Arty's 256 MB DDR3 (through the write-back cache and the controller of wiz-ddr3, written
 in Wiz too), 16 KB of on-chip RAM holding a boot loader (`Prog.boot`, written with the
 assembler), and its I/O: the UART at 1 Mbaud, a cycle counter, a sound FIFO played at
@@ -118,6 +168,17 @@ On the board (2026-11-12, with wiz-ddr3 f99ab70): the boot loader printed "wiz-r
 "DDR ok"; rvload loaded doom.bin and the WAD into DDR and Doom started (its whole
 start-up on the console, as in the simulator). `scripts/arty-load.sh` is what was run
 (SRAM load, then rvload when the board says "DDR ok").
+
+With the pipelined core at 100 MHz (2026-11-12, doom_top at 100.12 MHz in nextpnr): Doom's
+demo loop at about 15 frames a second (69 to 83 frames per 5 s), about 278 M instructions
+per 500 M cycles, so CPI about 1.8. (The perf line's "CPI x100" divides the 50 MHz cycle
+counter by the instruction count: 89 there is 1.78.) The multi-cycle core at half rate
+managed about 4 frames a second, at CPI 3.9 in 50 MHz cycles. A bus access is under way in about half of the
+cycles, and the front end waits for a miss or a restart in about a quarter. The OLED
+streamer's "odd" count rose by about 25 to 30 per 5 s, out of about 120 refreshes. It
+counts a refresh whose checksum changed with no framebuffer write since the last
+refresh, so a write during the previous refresh, after its pixel was sent, also counts.
+With Doom drawing faster, that artefact grows. It needs a look at the panel.
 
 Checked so far: the core's bus and the boot loader in the lockstep against the
 specification (with a DDR model), and compiled C (sw/ctest: gcc's output and newlib's
