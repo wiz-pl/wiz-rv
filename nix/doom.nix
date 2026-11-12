@@ -22,7 +22,7 @@ in pkgs.stdenvNoCC.mkDerivation {
     CC=riscv32-none-elf-gcc
     FLAGS="-march=rv32im -mabi=ilp32 -O2 -ffunction-sections -fdata-sections -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 -DNORMALUNIX -D_DEFAULT_SOURCE -DFEATURE_SOUND -w"
     mkdir obj
-    for f in ${doomSrc}; do $CC $FLAGS -Idoomgeneric -c doomgeneric/$f.c -o obj/$f.o; done
+    for f in ${doomSrc}; do $CC $FLAGS -Idoomgeneric -I$sw/stub -c doomgeneric/$f.c -o obj/$f.o; done
     $CC $FLAGS -Idoomgeneric -I$sw -c $sw/doomgeneric_wizrv.c -o obj/platform.o
     $CC $FLAGS -I$sw -c $sw/syscalls.c -o obj/syscalls.o
     $CC $FLAGS -Idoomgeneric -I$sw -c $sw/sound_wizrv.c -o obj/sound.o

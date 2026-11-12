@@ -98,3 +98,7 @@ music_module_t DG_music_module = {
   devices, sizeof devices / sizeof devices[0],
   mus_init, mus_void, mus_vol, mus_void, mus_void, mus_register, mus_unregister, mus_play, mus_void, mus_playing, NULL
 };
+
+/* i_sound.c binds these settings (they belong to the SDL module elsewhere) */
+int use_libsamplerate = 0;
+float libsamplerate_scale = 0.65f;

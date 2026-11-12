@@ -5,4 +5,5 @@ import Grail
 def package : Package := Package.new "wiz-rv"
   |> Package.lib "lib" "src"
   |> Package.exe "rv" "app/rv.wiz"
+  |> Package.exe "rvload" "app/rvload.wiz"
   |> Package.tests "tests" "tests"

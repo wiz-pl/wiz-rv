@@ -20,6 +20,13 @@ static uint64_t cycles, instret;
 static const char *frames;
 static int nframe;
 static const char *keys;        /* "ms:c,ms:c,..." */
+static int lenient;             /* -lenient: do misaligned accesses (and report where) */
+static uint32_t mis_pc[64]; static int mis_n; static uint64_t mis_total;
+static void misaligned(void) {
+  mis_total++;
+  for (int i = 0; i < mis_n; i++) if (mis_pc[i] == pc) return;
+  if (mis_n < 64) mis_pc[mis_n++] = pc;
+}
 
 static uint8_t *byte_at(uint32_t a) {
   if ((a >> 30) == 1) return &ddr[a & (DDR_SIZE - 1)];
@@ -126,7 +133,7 @@ static int step(void) {
   case 0x03: {
     uint32_t ad = a + iI, size = 1u << (f3 & 3);
     if (f3 == 3 || f3 > 5) return 3;
-    if (ad & (size - 1)) return 5;
+    if (ad & (size - 1)) { if (!lenient) return 5; misaligned(); }
     cycles += 1;
     if (ad >> 31) v = io_read(ad);
     else {
@@ -139,7 +146,7 @@ static int step(void) {
   case 0x23: {
     uint32_t ad = a + iS, size = 1u << (f3 & 3);
     if (f3 > 2) return 3;
-    if (ad & (size - 1)) return 6;
+    if (ad & (size - 1)) { if (!lenient) return 6; misaligned(); }
     cycles += 1;
     if (ad >> 31) io_write(ad, b, size);
     else memcpy(byte_at(ad), &b, size);
@@ -201,6 +208,7 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[i], "-n")) limit = strtoull(argv[i + 1], 0, 10);
     else if (!strcmp(argv[i], "-frames")) frames = argv[i + 1];
     else if (!strcmp(argv[i], "-keys")) keys = argv[i + 1];
+    else if (!strcmp(argv[i], "-lenient")) { lenient = 1; i--; }
     else if (!strcmp(argv[i], "-wav")) { wav = fopen(argv[i + 1], "wb"); fseek(wav, 44, SEEK_SET); }
   }
   ddr = calloc(DDR_SIZE, 1);
@@ -212,7 +220,15 @@ int main(int argc, char **argv) {
   while (instret < limit && !(t = step())) {}
   fprintf(stderr, "\n[iss] %s after %llu instructions, %llu cycles (%.1f s at 50 MHz), pc %08x, %d frames\n",
           t ? "trap" : "stopped", (unsigned long long)instret, (unsigned long long)cycles, cycles / 50e6, pc, nframe);
-  if (t) fprintf(stderr, "[iss] trap %d\n", t);
+  if (t) {
+    fprintf(stderr, "[iss] trap %d\n", t);
+    for (int i = 0; i < 32; i++) fprintf(stderr, "x%d=%08x%s", i, x[i], i % 8 == 7 ? "\n" : " ");
+  }
+  if (mis_total) {
+    fprintf(stderr, "[iss] %llu misaligned accesses, at", (unsigned long long)mis_total);
+    for (int i = 0; i < mis_n; i++) fprintf(stderr, " %08x", mis_pc[i]);
+    fprintf(stderr, "\n");
+  }
   if (wav) {                /* the RIFF header: 8-bit unsigned mono at 11025 Hz */
     uint32_t h[11] = { 0x46464952, 36 + wav_n, 0x45564157, 0x20746d66, 16, 0x00010001, 11025, 11025, 0x00080001,
                        0x61746164, wav_n };

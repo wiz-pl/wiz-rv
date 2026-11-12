@@ -1,0 +1,64 @@
+import Serial
+import Text
+-- `rvload PORT PROGRAM.bin WAD`: load Doom into the Arty's DDR through the boot loader
+-- (src/Rv/Progs.wiz, `Prog.boot`), at 1 Mbaud: the program at 0x40000000, the WAD's
+-- length at 0x47fffff0 and the WAD at 0x48000000, then jump to 0x40000000; then show
+-- what the board prints, until interrupted.
+
+def say (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+def le32 (v : Nat) : List Nat :=
+  .cons (Nat.mod v 256) (.cons (Nat.mod (Nat.div v 256) 256) (.cons (Nat.mod (Nat.div v 65536) 256) (.cons (Nat.mod (Nat.div v 16777216) 256) .nil)))
+
+-- wait for the byte `c` (the boot loader's answer), showing whatever else comes
+def expect (f : Fd) (c : Nat) : Nat → EIO Unit
+  | .zero => EIO.fail ("no answer " ++ Nat.repr c ++ " from the board")
+  | .succ k => do
+    g ← Fd.read f 1;
+    match g with
+    | .none => EIO.fail "the port closed"
+    | .some b => match Bytes.at b 0 with
+      | .some x => if Nat.beq x c then EIO.pure () else expect f c k
+      | .none => expect f c k
+
+-- a record 'L' addr len bytes, sent in pieces of 64 KB
+def sendChunks (f : Fd) : Bytes → Nat → Nat → EIO Unit
+  | b, at, .zero => EIO.pure ()
+  | b, at, .succ fuel =>
+    if Bytes.isEmpty b then EIO.pure () else do
+      Fd.write f (Bytes.ofList (List.append (.cons 76 (le32 at)) (le32 (if Nat.lt (Bytes.size b) 65536 then Bytes.size b else 65536))));
+      Fd.write f (Bytes.take b 65536);
+      expect f 46 100000;
+      sendChunks f (Bytes.drop b 65536) (at + 65536) fuel
+
+def load (f : Fd) (name : String) (b : Bytes) (at : Nat) : EIO Unit := do
+  say ("loading " ++ name ++ ": " ++ Nat.repr (Bytes.size b) ++ " bytes at " ++ Nat.repr at);
+  sendChunks f b at 1000
+
+def console (f : Fd) : Nat → EIO Unit
+  | .zero => EIO.pure ()
+  | .succ k => do
+    g ← Fd.read f 4096;
+    match g with
+    | .none => EIO.pure ()
+    | .some b => do
+      EIO.lift (IO.print (String.mk (List.map Char.mk (Bytes.toList b))));
+      console f k
+
+def run (port binPath wadPath : String) : EIO Unit := do
+  bin ← FS.readBytes binPath;
+  wad ← FS.readBytes wadPath;
+  f ← Serial.open port (SerialConfig.raw8N1 .b1000000);
+  load f binPath bin 1073741824;
+  load f "the WAD's length" (Bytes.ofList (le32 (Bytes.size wad))) 1207959536;
+  load f wadPath wad 1207959552;
+  Fd.write f (Bytes.ofList (.cons 71 (le32 1073741824)));
+  expect f 33 100000;
+  say "started";
+  console f 1000000000
+
+def main : IO Unit := EIO.toIO (do
+  args ← EIO.lift IO.args;
+  match args with
+  | .cons port (.cons bin (.cons wad .nil)) => run port bin wad
+  | _ => EIO.fail "usage: rvload PORT PROGRAM.bin WAD")
