@@ -1,0 +1,69 @@
+import Rv.Pipe
+import Rv.Board
+-- The pipelined core on the Arty A7 at the full 100 MHz (`pArty`): as `arty`
+-- (src/Rv/Board.wiz), the output port is the UART's transmitter (115473 baud, 866
+-- cycles a bit), its input port the receiver; BTN0 resets the core; LD4 heartbeat,
+-- LD5 a byte was sent, LD6 an instruction retired, LD7 stopped (a trap).
+
+structure PASys (ab wb : Nat) (r : HwTy → Type) where
+  cpu : PpSt ab wb r
+  sync : Sync r
+  rx : Rx r
+  tx : UTx r
+  full : r W1
+  byte : r W8
+  beat : r B26
+  sent : r W1
+  ran : r W1
+  deriving Bundle
+
+-- the core's reset: the front end restarts at 0, the stages are emptied, the divider,
+-- the bus and the trap code are cleared; memories and data registers keep their contents
+def Pp.reset {r : HwTy → Type} [Hw r] (ab wb : Nat) (rst : r W1) (c : PpSt ab wb r) : PpSt ab wb r :=
+  let ω fe := c.fe;
+  let ω e := c.e;
+  let ω m := c.m;
+  let ω rr := c.rr;
+  let ω dv := c.dv;
+  let ω bu := c.bus;
+  let z := fun (x : r W1) => (Hw.mux rst (Hw.lit 1 0) x : r W1);
+  PpSt.mk
+    (PpFe.mk fe.pc (z fe.v) (Hw.mux rst (Hw.lit 2 3) fe.fz) (Hw.mux rst (Hw.lit 32 0) fe.rpc))
+    c.ms c.wr
+    (PpE.mk (z e.v) (z e.imiss) e.pc e.ins e.imm e.a e.b e.lui e.auipc e.jal e.jalr e.branch e.load e.store e.arith e.op e.md
+      e.legal e.ecall e.ebreak e.u1 e.u2)
+    (PpM.mk (z m.v) (z m.imiss) m.pc m.rd (z m.we) (z m.late) m.res m.addr m.sd m.f3 m.load m.store m.io m.ddr m.trap m.mul
+      m.p0 m.p1 m.p2 m.p3 m.corr)
+    (PpR.mk (z rr.v) (z rr.imiss) (z rr.miss) (z rr.smc) rr.pc rr.rd (z rr.we) rr.val rr.trap rr.addr)
+    (PpDiv.mk (z dv.on) dv.cnt dv.acc dv.dvs dv.rm)
+    (PpBus.mk (z bu.sbv) bu.sba bu.sbd bu.sbs (z bu.act) bu.we bu.addr bu.wd bu.strb (z bu.sent) (z bu.gap) bu.k bu.buf
+      (z bu.freq) bu.fI bu.faddr)
+    (Hw.mux rst (Hw.lit 3 0) c.trap)
+
+def paStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (n : Nat)
+    (s : PASys ab wb r) (x : APins r) : r (HwTy.prod (PASys.code ab wb) ABoard.code) :=
+  let rr := rxStep n s.rx s.sync.ff2;
+  let ω got := Byte.unpack (Hw.snd rr);
+  let uartA := isK (Hw.slice 0 8 s.cpu.m.addr : r W8) 0;
+  let cr := pipeStep ab wb mx s.cpu (In.mk (Hw.mux uartA (txIdle s.tx) (Hw.lit 1 1))
+    (Hw.mux s.full (Hw.cat (Hw.lit 24 0) s.byte) (Hw.lit 32 4294967295)) (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 32 0));
+  let ω o := Out.unpack (Hw.snd cr);
+  let take := Hw.and o.rd uartA;
+  let rst := bitOf 0 x.btn;
+  Hw.pair
+    (PASys.pack ab wb (PASys.mk
+      (Pp.reset ab wb rst (PpSt.unpack ab wb (Hw.fst cr)))
+      (Sync.unpack (syncStep s.sync x.uart_rx))
+      (Rx.unpack (Hw.fst rr))
+      (UTx.unpack (txStep n s.tx (Hw.and o.wr uartA) o.byte))
+      (Hw.mux got.valid hi (Hw.mux take lo s.full))
+      (Hw.mux got.valid got.data s.byte)
+      (inc s.beat)
+      (Hw.mux rst lo (Hw.mux o.wr hi s.sent))
+      (Hw.mux rst lo (Hw.mux (Hw.and s.cpu.rr.v (Hw.not s.cpu.rr.miss)) hi s.ran))))
+    (ABoard.pack (ABoard.mk s.tx.line (Hw.cat (Hw.not (isK s.cpu.trap 0)) (Hw.cat s.ran (Hw.cat s.sent (bitOf 25 s.beat))))))
+
+def pArty (ab wb : Nat) (mx : Bool) (n : Nat) (prog : List Nat) : Circuit APins.code ABoard.code :=
+  Circuit.bundled (PASys.bundle ab wb) APins.bundle ABoard.bundle
+    (PASys.mk (PpSt.init ab wb prog) Sync.init Rx.init UTx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 26 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0))
+    (paStep ab wb mx n)

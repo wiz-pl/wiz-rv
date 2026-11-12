@@ -1,0 +1,511 @@
+import Rv.Core
+-- A 5-stage in-order pipelined RV32I / RV32E (optionally M) core, at one clock rate:
+--
+--   F   the fetch address (`nf`) goes to the instruction memories (block RAM, read
+--       every cycle: the on-chip RAM's fetch copy and the I-cache)
+--   D   the word is out of block RAM (`fe.pc`, `fe.v`): I-cache hit check, decode, the
+--       register file (two LUT-RAM copies, read asynchronously) with a bypass of the
+--       write in R
+--   E   ALU, barrel shifter, branch / jump (resolved here: predicted not taken, a taken
+--       one redirects F and flushes D), address, traps; the multiplier's partial
+--       products (four 16 × 16 products, DSP48); the iterative divider (33 cycles, E
+--       stalls); the D-side memories are read at the address
+--   M   the read data (on-chip RAM's data copy, D-cache, I/O), store merge, the
+--       product's sum, D-cache hit check
+--   R   (write-back) the register file is written from R's registers; an instruction
+--       that cannot complete (a trap, a D- or I-cache miss) or that wrote memory that may
+--       hold fetched instructions kills everything younger here ("precise at R")
+--
+-- Hazards: forwarding from M and R into E (E's operands are refreshed from them while E
+-- is held, so a value that retires during a stall is not lost); a load or a product in M
+-- whose result E needs stalls E one cycle (the interlock is in E, from registers only).
+--
+-- Every block RAM and LUT-RAM write port is driven from registers (FINDINGS.md, H7):
+-- a store's write is registered when the store leaves M (`wr`) and done at the next edge;
+-- loads in M forward from that pending write and from the one written at the edge their
+-- read was done at (`P` copies), so that the read-during-write of a block RAM is never
+-- relied on.
+--
+-- Misses: the miss travels to R as a marker, R kills the younger instructions, the
+-- front end waits (`fe.fz`) for the bus to fill the line (4 words, after any buffered
+-- store), then fetches again from the missing instruction. DDR stores go through a
+-- one-entry store buffer (write-through; a D-cache line that is present is updated, an
+-- I-cache line that is present is invalidated). A store that may have changed an
+-- instruction already fetched (any on-chip store, a DDR store to a line in the I-cache)
+-- restarts the fetch after it (`smc`), so stores into the instruction stream behave as
+-- in the specification.
+--
+-- The bus, I/O ports and `Out`/`In` are the multi-cycle core's (src/Rv/Core.wiz).
+
+def B33 : HwTy := HwTy.bits 33
+def B64P : HwTy := HwTy.bits 64
+
+structure PpFe (r : HwTy → Type) where
+  pc : r B32      -- the instruction in D: its address, valid
+  v : r W1
+  fz : r B2       -- 0 running; 1 waiting for a fill; 2 a fill's write; 3 fetch `rpc` again
+  rpc : r B32
+  deriving Bundle
+
+structure PpMem (ab wb : Nat) (r : HwTy → Type) where
+  mi0 : r (HwTy.mem wb 8)     -- the on-chip RAM, fetch copy (byte lanes)
+  mi1 : r (HwTy.mem wb 8)
+  mi2 : r (HwTy.mem wb 8)
+  mi3 : r (HwTy.mem wb 8)
+  md0 : r (HwTy.mem wb 8)     -- the data copy (both written by every store)
+  md1 : r (HwTy.mem wb 8)
+  md2 : r (HwTy.mem wb 8)
+  md3 : r (HwTy.mem wb 8)
+  qi0 : r W8
+  qi1 : r W8
+  qi2 : r W8
+  qi3 : r W8
+  qd0 : r W8
+  qd1 : r W8
+  qd2 : r W8
+  qd3 : r W8
+  rfa : r (HwTy.mem ab 32)
+  rfb : r (HwTy.mem ab 32)
+  ic : r (HwTy.mem (L1.bits wb) 128)          -- the I-cache: lines, tags
+  it : r (HwTy.mem (L1.bits wb) (L1.tagW wb))
+  itd : r (HwTy.mem (L1.bits wb) (L1.tagW wb)) -- the tags again, read at a store's address
+  icq : r B128
+  itq : r (HwTy.bits (L1.tagW wb))
+  itdq : r (HwTy.bits (L1.tagW wb))
+  dc : r (HwTy.mem (L1.bits wb) 128)          -- the D-cache
+  dt : r (HwTy.mem (L1.bits wb) (L1.tagW wb))
+  dcq : r B128
+  dtq : r (HwTy.bits (L1.tagW wb))
+  deriving Bundle
+
+-- the memories' write ports, in registers
+structure PpWr (wb : Nat) (r : HwTy → Type) where
+  oWe : r B4                  -- on-chip RAM: byte lanes, word, data
+  oIx : r (HwTy.bits wb)
+  oD : r B32
+  oWeP : r B4                 -- the write done at the last edge
+  oIxP : r (HwTy.bits wb)
+  oDP : r B32
+  dWe : r W1                  -- D-cache: line, tag (a fill)
+  dTwe : r W1
+  dIx : r (HwTy.bits (L1.bits wb))
+  dLine : r B128
+  dTag : r (HwTy.bits (L1.tagW wb))
+  dWeP : r W1
+  dIxP : r (HwTy.bits (L1.bits wb))
+  dLineP : r B128
+  iWe : r W1                  -- I-cache: line, tag (a fill, or invalid after a store)
+  iTwe : r W1
+  iIx : r (HwTy.bits (L1.bits wb))
+  iLine : r B128
+  iTag : r (HwTy.bits (L1.tagW wb))
+  deriving Bundle
+
+structure PpE (r : HwTy → Type) where
+  v : r W1
+  imiss : r W1    -- not an instruction: an I-cache miss on its way to R
+  pc : r B32
+  ins : r B32
+  imm : r B32
+  a : r B32       -- rs1, rs2 (refreshed from forwarding while E is held)
+  b : r B32
+  lui : r W1
+  auipc : r W1
+  jal : r W1
+  jalr : r W1
+  branch : r W1
+  load : r W1
+  store : r W1
+  arith : r W1
+  op : r W1
+  md : r W1
+  legal : r W1
+  ecall : r W1
+  ebreak : r W1
+  u1 : r W1       -- reads rs1, rs2
+  u2 : r W1
+  deriving Bundle
+
+structure PpM (r : HwTy → Type) where
+  v : r W1
+  imiss : r W1
+  pc : r B32
+  rd : r B5
+  we : r W1       -- writes rd (not x0)
+  late : r W1     -- the value is made in M (a load, a product)
+  res : r B32
+  addr : r B32
+  sd : r B32
+  f3 : r B3
+  load : r W1
+  store : r W1
+  io : r W1
+  ddr : r W1
+  trap : r B3
+  mul : r W1
+  p0 : r B32      -- the partial products: lo × lo, lo × hi, hi × lo, hi × hi
+  p1 : r B32
+  p2 : r B32
+  p3 : r B32
+  corr : r B32    -- subtracted from the high word (signed operands)
+  deriving Bundle
+
+structure PpR (r : HwTy → Type) where
+  v : r W1
+  imiss : r W1
+  miss : r W1     -- a D-cache miss (at `addr`)
+  smc : r W1      -- a store that may have changed a fetched instruction
+  pc : r B32
+  rd : r B5
+  we : r W1
+  val : r B32
+  trap : r B3
+  addr : r B32
+  deriving Bundle
+
+structure PpDiv (r : HwTy → Type) where
+  on : r W1
+  cnt : r B5
+  acc : r B32
+  dvs : r B32
+  rm : r B32
+  deriving Bundle
+
+structure PpBus (r : HwTy → Type) where
+  sbv : r W1      -- the store buffer
+  sba : r B32
+  sbd : r B32
+  sbs : r B4
+  act : r W1      -- an access: a store, or a line fill word by word
+  we : r W1
+  addr : r B32
+  wd : r B32
+  strb : r B4
+  sent : r W1     -- the request was taken (`ready`)
+  gap : r W1      -- a cycle without a request after each word
+  k : r B2
+  buf : r B128
+  freq : r W1     -- a fill is wanted: of the I-cache (`fI`), at `faddr`
+  fI : r W1
+  faddr : r B32
+  deriving Bundle
+
+structure PpSt (ab wb : Nat) (r : HwTy → Type) where
+  fe : PpFe r
+  ms : PpMem ab wb r
+  wr : PpWr wb r
+  e : PpE r
+  m : PpM r
+  rr : PpR r
+  dv : PpDiv r
+  bus : PpBus r
+  trap : r B3
+  deriving Bundle
+
+-- byte lane `l` of a word given as four bytes
+def Pp.lane4 {r : HwTy → Type} [Hw r] (l : Nat) (q0 q1 q2 q3 : r W8) : r W8 :=
+  if Nat.beq l 0 then q0 else if Nat.beq l 1 then q1 else if Nat.beq l 2 then q2 else q3
+
+-- the word of a 16-byte line at an address
+def Pp.lineWord {r : HwTy → Type} [Hw r] (ln : r B128) (a : r B32) : r B32 :=
+  Hw.mux (bitOf 3 a) (Hw.mux (bitOf 2 a) (Hw.slice 96 32 ln) (Hw.slice 64 32 ln))
+    (Hw.mux (bitOf 2 a) (Hw.slice 32 32 ln) (Hw.slice 0 32 ln))
+
+def Pp.isDdr {r : HwTy → Type} [Hw r] (a : r B32) : r W1 := Hw.and (bitOf 30 a) (Hw.not (bitOf 31 a))
+
+def Pp.idx {r : HwTy → Type} [Hw r] (wb : Nat) (a : r B32) : r (HwTy.bits (L1.bits wb)) := Hw.slice 4 (L1.bits wb) a
+def Pp.tagOf {r : HwTy → Type} [Hw r] (wb : Nat) (a : r B32) : r (HwTy.bits (L1.tagW wb)) :=
+  Hw.cat (Hw.lit 1 1) (Hw.slice (4 + L1.bits wb) (24 - L1.bits wb) a : r (HwTy.bits (24 - L1.bits wb)))
+
+------------------------------------------------------------------------------------
+-- One cycle
+
+def pipeStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : PpSt ab wb r) (x : In r) :
+    r (HwTy.prod (PpSt.code ab wb) Out.code) :=
+  let ω fe := s.fe;
+  let ω ms := s.ms;
+  let ω wr := s.wr;
+  let ω e := s.e;
+  let ω m := s.m;
+  let ω rr := s.rr;
+  let ω dv := s.dv;
+  let ω bu := s.bus;
+  ----------------------------------------------------------------- R
+  let rTrap := Hw.not (isK rr.trap 0);
+  let killMiss := Hw.or rr.imiss (gate rr.v (gate (Hw.not rTrap) rr.miss));
+  let killSmc := gate rr.v (gate (Hw.not rTrap) (gate (Hw.not rr.miss) rr.smc));
+  let killTrap := gate rr.v rTrap;
+  let kill := Hw.or killMiss (Hw.or killSmc killTrap);
+  ----------------------------------------------------------------- the bus
+  let live := Hw.and bu.act (Hw.not bu.gap);
+  let wordDone := gate live (Hw.mux bu.we x.ready x.rvalid);
+  let stDone := gate wordDone bu.we;
+  let fWord := gate wordDone (Hw.not bu.we);
+  let fillDone := gate fWord (isK bu.k 3);
+  let idle := Hw.and (Hw.not bu.act) (Hw.not bu.gap);
+  let startSt := gate idle bu.sbv;
+  let startF := gate idle (gate (Hw.not bu.sbv) bu.freq);
+  let fillLine : r B128 := Hw.cat (Hw.mux (isK bu.k 3) x.rdata (Hw.slice 96 32 bu.buf : r B32))
+    (Hw.cat (Hw.mux (isK bu.k 2) x.rdata (Hw.slice 64 32 bu.buf : r B32))
+    (Hw.cat (Hw.mux (isK bu.k 1) x.rdata (Hw.slice 32 32 bu.buf : r B32)) (Hw.mux (isK bu.k 0) x.rdata (Hw.slice 0 32 bu.buf : r B32))));
+  let dFill := gate fillDone (Hw.not bu.fI);
+  let iFill := gate fillDone bu.fI;
+  ----------------------------------------------------------------- M
+  let mOk := gate m.v (isK m.trap 0);
+  let mIdx : r (HwTy.bits wb) := Hw.slice 2 wb m.addr;
+  let fwdLane := fun (l : Nat) => (Hw.mux (Hw.and (bitOf l wr.oWe) (Hw.eq wr.oIx mIdx)) (Hw.slice (8 * l) 8 wr.oD)
+    (Hw.mux (Hw.and (bitOf l wr.oWeP) (Hw.eq wr.oIxP mIdx)) (Hw.slice (8 * l) 8 wr.oDP)
+      (Pp.lane4 l ms.qd0 ms.qd1 ms.qd2 ms.qd3)) : r W8);
+  let onw : r B32 := Hw.cat (fwdLane 3) (Hw.cat (fwdLane 2) (Hw.cat (fwdLane 1) (fwdLane 0)));
+  let mLine := Pp.idx wb m.addr;
+  let dline : r B128 := Hw.mux (Hw.and wr.dWe (Hw.eq wr.dIx mLine)) wr.dLine
+    (Hw.mux (Hw.and wr.dWeP (Hw.eq wr.dIxP mLine)) wr.dLineP ms.dcq);
+  let dhit := Hw.eq ms.dtq (Pp.tagOf wb m.addr);
+  let ihitD := Hw.eq ms.itdq (Pp.tagOf wb m.addr);
+  let w : r B32 := Hw.mux m.ddr (Pp.lineWord dline m.addr) onw;
+  let wq0 : r W8 := Hw.slice 0 8 w;
+  let wq1 : r W8 := Hw.slice 8 8 w;
+  let wq2 : r W8 := Hw.slice 16 8 w;
+  let wq3 : r W8 := Hw.slice 24 8 w;
+  let slo : r B2 := Hw.slice 0 2 m.addr;
+  let byte := Hw.mux (bitOf 1 slo) (Hw.mux (bitOf 0 slo) wq3 wq2) (Hw.mux (bitOf 0 slo) wq1 wq0);
+  let half : r B16 := Hw.mux (bitOf 1 slo) (Hw.cat wq3 wq2) (Hw.cat wq1 wq0);
+  let sx := Hw.not (bitOf 2 m.f3);
+  let ldm := Hw.mux (bitOf 1 m.f3) w (Hw.mux (bitOf 0 m.f3)
+    (Hw.cat (rep 16 (Hw.and sx (bitOf 15 half))) half) (Hw.cat (rep 24 (Hw.and sx (bitOf 7 byte))) byte));
+  let ldv := Hw.mux m.io x.ioIn ldm;
+  -- the product: {p3, p0} + (p1 + p2) << 16, the high word corrected for signs
+  let mid : r B33 := Hw.add (Hw.cat (Hw.lit 1 0) m.p1) (Hw.cat (Hw.lit 1 0) m.p2);
+  let full : r B64P := Hw.add (Hw.cat m.p3 m.p0) (Hw.cat (Hw.lit 15 0) (Hw.cat mid (Hw.lit 16 0)));
+  let mres : r B32 := Hw.mux (isK m.f3 0) (Hw.slice 0 32 full) (Hw.sub (Hw.slice 32 32 full) m.corr);
+  let mval := Hw.mux m.load ldv (Hw.mux m.mul mres m.res);
+  -- stores: the byte lanes
+  let sb := isK m.f3 0;
+  let sh16 := isK m.f3 1;
+  let laneOn := fun (l : Nat) => Hw.mux sb (isK slo l) (Hw.mux sh16 (isK (bitOf 1 m.addr) (Nat.div l 2)) (Hw.lit 1 1));
+  let lanes : r B4 := Hw.cat (laneOn 3) (Hw.cat (laneOn 2) (Hw.cat (laneOn 1) (laneOn 0)));
+  let d0 : r W8 := Hw.slice 0 8 m.sd;
+  let d1 : r W8 := Hw.mux sb d0 (Hw.slice 8 8 m.sd);
+  let d2 : r W8 := Hw.mux (isK m.f3 2) (Hw.slice 16 8 m.sd) d0;
+  let d3 : r W8 := Hw.mux sb d0 (Hw.mux sh16 d1 (Hw.slice 24 8 m.sd));
+  let sdata : r B32 := Hw.cat d3 (Hw.cat d2 (Hw.cat d1 d0));
+  let mSt := gate mOk m.store;
+  let stallM := gate (Hw.not kill) (gate mSt (Hw.or (gate m.ddr bu.sbv) (gate m.io (Hw.not x.txReady))));
+  let goM := gate mOk (Hw.and (Hw.not kill) (Hw.not stallM));
+  let goSt := gate goM m.store;
+  let onSt := gate goSt (Hw.and (Hw.not m.io) (Hw.not m.ddr));
+  let ddrSt := gate goSt m.ddr;
+  let dmiss := gate mOk (gate m.load (gate m.ddr (Hw.not dhit)));
+  let smc := Hw.or onSt (gate ddrSt ihitD);
+  -- a store's bytes merged into the line read
+  let sbyte := fun (j : Nat) => (Hw.mux (Hw.and (isK (Hw.slice 2 2 m.addr : r B2) (Nat.div j 4)) (bitOf (Nat.mod j 4) lanes))
+    (Hw.slice (8 * Nat.mod j 4) 8 sdata) (Hw.slice (8 * j) 8 dline) : r W8);
+  let w4 := fun (k : Nat) => (Hw.cat (sbyte (4 * k + 3)) (Hw.cat (sbyte (4 * k + 2)) (Hw.cat (sbyte (4 * k + 1)) (sbyte (4 * k)))) : r B32);
+  let stLine : r B128 := Hw.cat (w4 3) (Hw.cat (w4 2) (Hw.cat (w4 1) (w4 0)));
+  ----------------------------------------------------------------- E
+  let r1 : r B5 := Hw.slice 15 5 e.ins;
+  let r2 : r B5 := Hw.slice 20 5 e.ins;
+  let rdE : r B5 := Hw.slice 7 5 e.ins;
+  let f3 : r B3 := Hw.slice 12 3 e.ins;
+  let alt := bitOf 30 e.ins;
+  let fwd := fun (rs : r B5) (v : r B32) => (Hw.mux (Hw.and m.we (Hw.eq m.rd rs)) m.res
+    (Hw.mux (Hw.and rr.we (Hw.eq rr.rd rs)) rr.val v) : r B32);
+  let a := fwd r1 e.a;
+  let rs2v := fwd r2 e.b;
+  let loadUse := gate e.v (gate m.late (gate m.we (Hw.or (gate e.u1 (Hw.eq m.rd r1)) (gate e.u2 (Hw.eq m.rd r2)))));
+  let regB := Hw.or e.op e.branch;
+  let b := Hw.mux regB rs2v e.imm;
+  let cmpOp := Hw.and e.arith (Hw.or (isK f3 2) (isK f3 3));
+  let sub := Hw.or e.branch (Hw.or cmpOp (Hw.and e.op (Hw.and alt (isK f3 0))));
+  let s34 : r B34 := Hw.add (Hw.cat (Hw.lit 1 0) (Hw.cat a (Hw.lit 1 1)))
+    (Hw.cat (Hw.lit 1 0) (Hw.cat (Hw.mux sub (Hw.not b) b) sub));
+  let sum : r B32 := Hw.slice 1 32 s34;
+  let ult := Hw.not (bitOf 33 s34);
+  let slt := Hw.mux (Hw.xor (bitOf 31 a) (bitOf 31 b)) (bitOf 31 a) (bitOf 31 sum);
+  let eq := Hw.eq a b;
+  let taken := Hw.xor (Hw.mux (bitOf 2 f3) (Hw.mux (bitOf 1 f3) ult slt) eq) (bitOf 0 f3);
+  let shRes := barrel (isK f3 1) (Hw.and alt (bitOf 31 a)) (Hw.slice 0 5 b) a;
+  let aluRes := Hw.mux (isK f3 0) sum (Hw.mux (isK f3 2) (zext32 slt) (Hw.mux (isK f3 3) (zext32 ult)
+    (Hw.mux (isK f3 4) (Hw.xor a b) (Hw.mux (isK f3 6) (Hw.or a b) (Hw.mux (isK f3 7) (Hw.and a b) shRes)))));
+  let pcInc := Hw.add e.pc (Hw.lit 32 4);
+  let pcImm := Hw.add e.pc e.imm;
+  let jalrT : r B32 := Hw.cat (Hw.slice 1 31 sum : r (HwTy.bits 31)) (Hw.lit 1 0);
+  let jump := Hw.mux (Hw.or e.jal e.jalr) (Hw.lit 1 1) (gate e.branch taken);
+  let target := Hw.mux e.jalr jalrT pcImm;
+  let lo2 : r B2 := Hw.slice 0 2 sum;
+  let mis := Hw.mux (isK (Hw.slice 0 2 f3 : r B2) 2) (Hw.not (isK lo2 0))
+    (Hw.mux (isK (Hw.slice 0 2 f3 : r B2) 1) (bitOf 0 sum) (Hw.lit 1 0));
+  let misJ := gate jump (bitOf 1 target);
+  let code : r B3 := Hw.mux (Hw.not e.legal) (Hw.lit 3 Trap.illegal) (Hw.mux e.ecall (Hw.lit 3 Trap.ecall)
+    (Hw.mux e.ebreak (Hw.lit 3 Trap.ebreak) (Hw.mux misJ (Hw.lit 3 Trap.jump)
+    (Hw.mux (gate e.load mis) (Hw.lit 3 Trap.load) (Hw.mux (gate e.store mis) (Hw.lit 3 Trap.store) (Hw.lit 3 0))))));
+  let eOk := gate e.v (isK code 0);
+  let resE := Hw.mux e.lui e.imm (Hw.mux e.auipc pcImm (Hw.mux (Hw.or e.jal e.jalr) pcInc aluRes));
+  -- M: the partial products (unsigned 16 × 16), the sign correction of the high word
+  let aL : r B32 := Hw.cat (Hw.lit 16 0) (Hw.slice 0 16 a : r B16);
+  let aH : r B32 := Hw.cat (Hw.lit 16 0) (Hw.slice 16 16 a : r B16);
+  let bL : r B32 := Hw.cat (Hw.lit 16 0) (Hw.slice 0 16 rs2v : r B16);
+  let bH : r B32 := Hw.cat (Hw.lit 16 0) (Hw.slice 16 16 rs2v : r B16);
+  let sA := Hw.and (Hw.or (isK f3 1) (isK f3 2)) (bitOf 31 a);
+  let sB := Hw.and (isK f3 1) (bitOf 31 rs2v);
+  let corr := Hw.add (Hw.mux sA rs2v (Hw.lit 32 0)) (Hw.mux sB a (Hw.lit 32 0));
+  -- the divider: restoring, one quotient bit per cycle
+  let signed := Hw.not (bitOf 0 f3);
+  let negA := Hw.and signed (bitOf 31 a);
+  let negB := Hw.and signed (bitOf 31 rs2v);
+  let absA := Hw.mux negA (Hw.sub (Hw.lit 32 0) a) a;
+  let absB := Hw.mux negB (Hw.sub (Hw.lit 32 0) rs2v) rs2v;
+  let negQ := Hw.and (Hw.xor negA negB) (Hw.not (isK rs2v 0));
+  let rm2 : r B32 := Hw.cat (Hw.slice 0 31 dv.rm : r (HwTy.bits 31)) (bitOf 31 dv.acc);
+  let ge := Hw.not (Hw.ult rm2 dv.dvs);
+  let rmN := Hw.mux ge (Hw.sub rm2 dv.dvs) rm2;
+  let accN : r B32 := Hw.cat (Hw.slice 0 31 dv.acc : r (HwTy.bits 31)) ge;
+  let dres := Hw.mux (bitOf 1 f3) (Hw.mux negA (Hw.sub (Hw.lit 32 0) rmN) rmN)
+    (Hw.mux negQ (Hw.sub (Hw.lit 32 0) accN) accN);
+  let isDiv : r W1 := if mx then gate eOk (gate e.md (bitOf 2 f3)) else Hw.lit 1 0;
+  let isMul : r W1 := if mx then gate e.md (Hw.not (bitOf 2 f3)) else Hw.lit 1 0;
+  let dDone := gate dv.on (isK dv.cnt 0);
+  let stallE := Hw.or loadUse (gate isDiv (Hw.not dDone));
+  let dStart := gate isDiv (gate (Hw.not dv.on) (Hw.and (Hw.not loadUse) (Hw.not kill)));
+  let dStep := gate dv.on (Hw.and (Hw.not kill) (Hw.not (Hw.and (isK dv.cnt 0) stallM)));
+  let hold := Hw.or stallM stallE;
+  let advE := Hw.and (Hw.not kill) (Hw.not hold);
+  let redirect := gate advE (gate eOk jump);
+  let rdNZ := Hw.not (isK rdE 0);
+  let weE := gate eOk (gate rdNZ (Hw.or (Hw.or (Hw.or e.lui e.auipc) (Hw.or e.jal e.jalr)) (Hw.or (Hw.or e.arith e.load) e.md)));
+  let eRes := Hw.mux isDiv dres resE;
+  let io := bitOf 31 sum;
+  ----------------------------------------------------------------- D
+  let fz := fe.fz;
+  let run := isK fz 0;
+  let isDdrF := Pp.isDdr fe.pc;
+  let onwi : r B32 := Hw.cat ms.qi3 (Hw.cat ms.qi2 (Hw.cat ms.qi1 ms.qi0));
+  let wD : r B32 := Hw.mux isDdrF (Pp.lineWord ms.icq fe.pc) onwi;
+  let ihit := Hw.or (Hw.not isDdrF) (Hw.eq ms.itq (Pp.tagOf wb fe.pc));
+  let ω d := decode ab mx wD;
+  let immD := Hw.mux (Hw.or d.lui d.auipc) d.immU (Hw.mux d.jal d.immJ (Hw.mux d.branch d.immB (Hw.mux d.store d.immS d.immI)));
+  let byp := fun (rs : r B5) (v : r B32) => (Hw.mux (Hw.and rr.we (Hw.eq rr.rd rs)) rr.val v : r B32);
+  let rv1 := byp d.r1 (Hw.memRead ms.rfa (regIx ab d.r1));
+  let rv2 := byp d.r2 (Hw.memRead ms.rfb (regIx ab d.r2));
+  let u1 := Hw.not (Hw.or (Hw.or d.lui d.auipc) d.jal);
+  let u2 := Hw.or (Hw.or d.branch d.store) (Hw.or d.op d.md);
+  -- the next fetch address
+  let nf := Hw.mux (isK fz 3) fe.rpc (Hw.mux hold fe.pc (Hw.mux redirect target (Hw.add fe.pc (Hw.lit 32 4))));
+  let vDn := Hw.mux kill (Hw.lit 1 0) (Hw.mux (isK fz 3) (Hw.lit 1 1) (Hw.mux run (Hw.mux hold fe.v (Hw.lit 1 1)) (Hw.lit 1 0)));
+  let fzN : r B2 := Hw.mux kill (Hw.mux killSmc (Hw.lit 2 2) (Hw.lit 2 1))
+    (Hw.mux (isK fz 1) (Hw.mux fillDone (Hw.lit 2 2) fz) (Hw.mux (isK fz 2) (Hw.lit 2 3) (Hw.lit 2 0)));
+  -- (a trap leaves fz at 1 with no fill wanted: stopped)
+  let fD := gate fe.v (gate run (Hw.not redirect));
+  -- the D-side read address: the instruction entering M, or the one staying there
+  let rdA := Hw.mux advE sum m.addr;
+  let ixF : r (HwTy.bits wb) := Hw.slice 2 wb nf;
+  let ixD : r (HwTy.bits wb) := Hw.slice 2 wb rdA;
+  ----------------------------------------------------------------- next state
+  let eHold := gate (Hw.not kill) hold;
+  let mHold := gate (Hw.not kill) stallM;
+  let rTake := Hw.and (Hw.not kill) (Hw.not stallM);
+  let ek := fun (o n : r W1) => (Hw.mux eHold o n : r W1);
+  let ω eN := PpE.mk
+    (Hw.mux eHold e.v (gate advE (gate fD ihit)))
+    (Hw.mux eHold e.imiss (gate advE (gate fD (Hw.not ihit))))
+    (Hw.mux eHold e.pc fe.pc) (Hw.mux eHold e.ins wD) (Hw.mux eHold e.imm immD)
+    (Hw.mux eHold a rv1) (Hw.mux eHold rs2v rv2)
+    (ek e.lui d.lui) (ek e.auipc d.auipc) (ek e.jal d.jal) (ek e.jalr d.jalr) (ek e.branch d.branch)
+    (ek e.load d.load) (ek e.store d.store) (ek e.arith (Hw.or d.op d.opimm)) (ek e.op d.op) (ek e.md d.md)
+    (ek e.legal d.legal) (ek e.ecall d.ecall) (ek e.ebreak d.ebreak) (ek e.u1 u1) (ek e.u2 u2);
+  let mk1 := fun (o n : r W1) => (Hw.mux mHold o n : r W1);
+  let mk32 := fun (o n : r B32) => (Hw.mux mHold o n : r B32);
+  let ω mN := PpM.mk
+    (Hw.mux mHold m.v (gate advE e.v)) (Hw.mux mHold m.imiss (gate advE e.imiss))
+    (mk32 m.pc e.pc) (Hw.mux mHold m.rd rdE)
+    (Hw.mux mHold m.we (gate advE weE)) (Hw.mux mHold m.late (gate advE (Hw.or e.load isMul)))
+    (mk32 m.res eRes) (mk32 m.addr sum) (mk32 m.sd rs2v) (Hw.mux mHold m.f3 f3)
+    (mk1 m.load e.load) (mk1 m.store e.store) (mk1 m.io io) (mk1 m.ddr (Pp.isDdr sum)) (Hw.mux mHold m.trap code)
+    (mk1 m.mul isMul)
+    (mk32 m.p0 (Hw.mul aL bL)) (mk32 m.p1 (Hw.mul aL bH)) (mk32 m.p2 (Hw.mul aH bL)) (mk32 m.p3 (Hw.mul aH bH))
+    (mk32 m.corr corr);
+  let ω rN := PpR.mk (gate rTake m.v) (gate rTake m.imiss) (gate rTake dmiss) smc m.pc m.rd
+    (gate rTake (gate m.we (Hw.not dmiss))) mval m.trap m.addr;
+  let ω dvN := PpDiv.mk
+    (Hw.mux kill (Hw.lit 1 0) (Hw.mux dStart (Hw.lit 1 1) (Hw.mux (gate dDone advE) (Hw.lit 1 0) dv.on)))
+    (Hw.mux dStart (Hw.lit 5 31) (Hw.mux dStep (Hw.sub dv.cnt (Hw.lit 5 1)) dv.cnt))
+    (Hw.mux dStart absA (Hw.mux dStep accN dv.acc))
+    (Hw.mux dStart absB dv.dvs)
+    (Hw.mux dStart (Hw.lit 32 0) (Hw.mux dStep rmN dv.rm));
+  let lineA : r B32 := Hw.cat (Hw.slice 4 28 bu.faddr : r (HwTy.bits 28)) (Hw.lit 4 0);
+  let ω buN := PpBus.mk
+    (Hw.mux ddrSt (Hw.lit 1 1) (Hw.mux stDone (Hw.lit 1 0) bu.sbv))
+    (Hw.mux ddrSt m.addr bu.sba) (Hw.mux ddrSt sdata bu.sbd) (Hw.mux ddrSt lanes bu.sbs)
+    (Hw.or (Hw.or startSt startF) (gate bu.act (Hw.not (Hw.or stDone fillDone))))
+    (Hw.mux startSt (Hw.lit 1 1) (Hw.mux startF (Hw.lit 1 0) bu.we))
+    (Hw.mux startSt bu.sba (Hw.mux startF lineA (Hw.mux fWord (Hw.add bu.addr (Hw.lit 32 4)) bu.addr)))
+    (Hw.mux startSt bu.sbd bu.wd) (Hw.mux startSt bu.sbs bu.strb)
+    (gate live (gate (Hw.not wordDone) (Hw.or bu.sent x.ready)))
+    wordDone
+    (Hw.mux startF (Hw.lit 2 0) (Hw.mux fWord (Hw.add bu.k (Hw.lit 2 1)) bu.k))
+    (Hw.mux fWord fillLine bu.buf)
+    (Hw.mux killMiss (Hw.lit 1 1) (Hw.mux fillDone (Hw.lit 1 0) bu.freq))
+    (Hw.mux killMiss rr.imiss bu.fI)
+    (Hw.mux killMiss (Hw.mux rr.imiss rr.pc rr.addr) bu.faddr);
+  let fIdx := Pp.idx wb bu.faddr;
+  let ω wrN := PpWr.mk
+    (Hw.mux onSt lanes (Hw.lit 4 0)) mIdx sdata wr.oWe wr.oIx wr.oD
+    (Hw.or dFill (gate ddrSt dhit)) dFill (Hw.mux dFill fIdx mLine) (Hw.mux dFill fillLine stLine) (Pp.tagOf wb bu.faddr)
+    wr.dWe wr.dIx wr.dLine
+    iFill (Hw.or iFill (gate ddrSt ihitD)) (Hw.mux iFill fIdx mLine) fillLine
+    (Hw.mux iFill (Pp.tagOf wb bu.faddr) (Hw.lit (L1.tagW wb) 0));
+  let oLane := fun (l : Nat) => (Hw.slice (8 * l) 8 wr.oD : r W8);
+  let ixFL := Pp.idx wb nf;
+  let ixDL := Pp.idx wb rdA;
+  let ω msN := PpMem.mk
+    (Hw.memWrite ms.mi0 (bitOf 0 wr.oWe) wr.oIx (oLane 0)) (Hw.memWrite ms.mi1 (bitOf 1 wr.oWe) wr.oIx (oLane 1))
+    (Hw.memWrite ms.mi2 (bitOf 2 wr.oWe) wr.oIx (oLane 2)) (Hw.memWrite ms.mi3 (bitOf 3 wr.oWe) wr.oIx (oLane 3))
+    (Hw.memWrite ms.md0 (bitOf 0 wr.oWe) wr.oIx (oLane 0)) (Hw.memWrite ms.md1 (bitOf 1 wr.oWe) wr.oIx (oLane 1))
+    (Hw.memWrite ms.md2 (bitOf 2 wr.oWe) wr.oIx (oLane 2)) (Hw.memWrite ms.md3 (bitOf 3 wr.oWe) wr.oIx (oLane 3))
+    (Hw.memRead ms.mi0 ixF) (Hw.memRead ms.mi1 ixF) (Hw.memRead ms.mi2 ixF) (Hw.memRead ms.mi3 ixF)
+    (Hw.memRead ms.md0 ixD) (Hw.memRead ms.md1 ixD) (Hw.memRead ms.md2 ixD) (Hw.memRead ms.md3 ixD)
+    (Hw.memWrite ms.rfa rr.we (regIx ab rr.rd) rr.val) (Hw.memWrite ms.rfb rr.we (regIx ab rr.rd) rr.val)
+    (Hw.memWrite ms.ic wr.iWe wr.iIx wr.iLine) (Hw.memWrite ms.it wr.iTwe wr.iIx wr.iTag) (Hw.memWrite ms.itd wr.iTwe wr.iIx wr.iTag)
+    (Hw.memRead ms.ic ixFL) (Hw.memRead ms.it ixFL) (Hw.memRead ms.itd ixDL)
+    (Hw.memWrite ms.dc wr.dWe wr.dIx wr.dLine) (Hw.memWrite ms.dt wr.dTwe wr.dIx wr.dTag)
+    (Hw.memRead ms.dc ixDL) (Hw.memRead ms.dt ixDL);
+  let ω feN := PpFe.mk nf vDn fzN (Hw.mux kill (Hw.mux killSmc (Hw.add rr.pc (Hw.lit 32 4)) rr.pc) fe.rpc);
+  Hw.pair
+    (PpSt.pack ab wb (PpSt.mk feN msN wrN eN mN rN dvN buN (Hw.mux killTrap rr.trap s.trap)))
+    (Out.pack (Out.mk s.trap (gate goSt m.io) (Hw.slice 0 8 m.sd) (gate goM (gate m.load m.io)) m.addr m.sd
+      (gate live (Hw.not bu.sent)) bu.addr bu.we bu.wd bu.strb live))
+
+------------------------------------------------------------------------------------
+-- The core as a circuit, with a program in both copies of the on-chip RAM
+
+def Pp.z (n : Nat) : BitVec n := BitVec.ofNat n 0
+
+def PpSt.init (ab wb : Nat) (prog : List Nat) : PpSt ab wb HwTy.El :=
+  PpSt.mk
+    (PpFe.mk (Pp.z 32) (Pp.z 1) (BitVec.ofNat 2 3) (Pp.z 32))
+    (PpMem.mk (Core.lane prog wb 0) (Core.lane prog wb 1) (Core.lane prog wb 2) (Core.lane prog wb 3)
+      (Core.lane prog wb 0) (Core.lane prog wb 1) (Core.lane prog wb 2) (Core.lane prog wb 3)
+      (Pp.z 8) (Pp.z 8) (Pp.z 8) (Pp.z 8) (Pp.z 8) (Pp.z 8) (Pp.z 8) (Pp.z 8)
+      (fun (i : BitVec ab) => Pp.z 32) (fun (i : BitVec ab) => Pp.z 32)
+      (fun (i : BitVec (L1.bits wb)) => Pp.z 128) (fun (i : BitVec (L1.bits wb)) => Pp.z (L1.tagW wb))
+      (fun (i : BitVec (L1.bits wb)) => Pp.z (L1.tagW wb))
+      (Pp.z 128) (Pp.z (L1.tagW wb)) (Pp.z (L1.tagW wb))
+      (fun (i : BitVec (L1.bits wb)) => Pp.z 128) (fun (i : BitVec (L1.bits wb)) => Pp.z (L1.tagW wb))
+      (Pp.z 128) (Pp.z (L1.tagW wb)))
+    (PpWr.mk (Pp.z 4) (Pp.z wb) (Pp.z 32) (Pp.z 4) (Pp.z wb) (Pp.z 32)
+      (Pp.z 1) (Pp.z 1) (Pp.z (L1.bits wb)) (Pp.z 128) (Pp.z (L1.tagW wb)) (Pp.z 1) (Pp.z (L1.bits wb)) (Pp.z 128)
+      (Pp.z 1) (Pp.z 1) (Pp.z (L1.bits wb)) (Pp.z 128) (Pp.z (L1.tagW wb)))
+    (PpE.mk (Pp.z 1) (Pp.z 1) (Pp.z 32) (Pp.z 32) (Pp.z 32) (Pp.z 32) (Pp.z 32)
+      (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1)
+      (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1))
+    (PpM.mk (Pp.z 1) (Pp.z 1) (Pp.z 32) (Pp.z 5) (Pp.z 1) (Pp.z 1) (Pp.z 32) (Pp.z 32) (Pp.z 32) (Pp.z 3)
+      (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 3) (Pp.z 1) (Pp.z 32) (Pp.z 32) (Pp.z 32) (Pp.z 32) (Pp.z 32))
+    (PpR.mk (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 32) (Pp.z 5) (Pp.z 1) (Pp.z 32) (Pp.z 3) (Pp.z 32))
+    (PpDiv.mk (Pp.z 1) (Pp.z 5) (Pp.z 32) (Pp.z 32) (Pp.z 32))
+    (PpBus.mk (Pp.z 1) (Pp.z 32) (Pp.z 32) (Pp.z 4) (Pp.z 1) (Pp.z 1) (Pp.z 32) (Pp.z 32) (Pp.z 4) (Pp.z 1) (Pp.z 1)
+      (Pp.z 2) (Pp.z 128) (Pp.z 1) (Pp.z 1) (Pp.z 32))
+    (Pp.z 3)
+
+def pipeCore (ab wb : Nat) (mx : Bool) (prog : List Nat) : Circuit In.code Out.code :=
+  Circuit.mk (PpSt.code ab wb) (Bundle.toEl (PpSt.bundle ab wb) (PpSt.init ab wb prog))
+    (fun s x => pipeStep ab wb mx (PpSt.unpack ab wb s) (In.unpack x))
