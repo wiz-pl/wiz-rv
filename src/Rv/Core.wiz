@@ -1,0 +1,289 @@
+import Hdl.Core
+import Rv.Isa
+-- A multi-cycle RV32I / RV32E core: a 32-bit datapath, the registers and the memory in
+-- block RAM. Parameters: `ab`, the register address bits (5: RV32I, 4: RV32E), and
+-- `wb`, the memory's word address bits (2^wb words of 32 bits, as four byte lanes of
+-- 2^wb bytes each, so that byte and halfword stores need no read-modify-write).
+--
+-- Every memory read is registered (an iCE40 or Xilinx block RAM): the four `q` lanes
+-- are the memory's read data, `x1`, `x2` the register file's. The register file is two
+-- copies (`rfa`, `rfb`, written together), so that rs1 and rs2 are read in one cycle.
+--
+-- Phases (`ph`):
+--   F  fetch: read the word at PC (after reset and after a store)
+--   D  decode: the instruction is in `q`; read rs1 and rs2
+--   E  execute: ALU, branch, next PC, register write; a load reads memory, a store
+--      writes it; the next instruction's word is read (unless a load or store)
+--   M  memory: the loaded word is in `q`; write rd; read the word at PC
+--   S  shift: one place per cycle, `cnt` left; then write rd
+--   H  stopped (the trap code is in `trap`)
+-- So an instruction takes 2 cycles (D, E), a load 3, a store 3, a shift 3 + its amount.
+
+def B2 : HwTy := HwTy.bits 2
+def B3 : HwTy := HwTy.bits 3
+def B5 : HwTy := HwTy.bits 5
+def B7 : HwTy := HwTy.bits 7
+def B8 : HwTy := HwTy.bits 8
+def B12 : HwTy := HwTy.bits 12
+def B16 : HwTy := HwTy.bits 16
+def B20 : HwTy := HwTy.bits 20
+def B32 : HwTy := HwTy.bits 32
+def B34 : HwTy := HwTy.bits 34
+def Bit : HwTy := HwTy.bit
+
+def Ph.f : Nat := 0
+def Ph.d : Nat := 1
+def Ph.e : Nat := 2
+def Ph.m : Nat := 3
+def Ph.s : Nat := 4
+def Ph.h : Nat := 5
+
+structure St (ab wb : Nat) (r : HwTy → Type) where
+  ph : r B3
+  pc : r B32
+  q0 : r B8
+  q1 : r B8
+  q2 : r B8
+  q3 : r B8
+  m0 : r (HwTy.mem wb 8)
+  m1 : r (HwTy.mem wb 8)
+  m2 : r (HwTy.mem wb 8)
+  m3 : r (HwTy.mem wb 8)
+  rfa : r (HwTy.mem ab 32)
+  rfb : r (HwTy.mem ab 32)
+  x1 : r B32
+  x2 : r B32
+  acc : r B32     -- the shifter
+  cnt : r B5      -- places still to shift
+  srd : r B5      -- saved for M and S: rd, funct3, the address's low bits / instr bit 30
+  sf3 : r B3
+  slo : r B2
+  trap : r B3
+  deriving Bundle
+
+-- what the core shows: the trap code (0 while running), and a byte written to the
+-- output port (`wr` for one cycle)
+structure Out (r : HwTy → Type) where
+  trap : r B3
+  wr : r Bit
+  byte : r B8
+  deriving Bundle
+
+------------------------------------------------------------------------------------
+-- Helpers
+
+def bitOf {r : HwTy → Type} [Hw r] {ω n : Nat} (i : Nat) (w : r (HwTy.bits n)) : r Bit := Hw.slice i 1 w
+def rep {r : HwTy → Type} [Hw r] (ω n : Nat) (b : r Bit) : r (HwTy.bits n) :=
+  Hw.mux b (Hw.lit n (Nat.pow 2 n - 1)) (Hw.lit n 0)
+def isK {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) (k : Nat) : r Bit := Hw.eq x (Hw.lit n k)
+-- `c and x` for a control signal `c` (one that the instruction alone determines) and a
+-- data-dependent `x`, as a multiplexer: at values with `c` known it reduces whatever `x`
+-- is, which the single-instruction proofs need (`Hw.and 0 x` is stuck for a symbolic
+-- `x`; icestick-uart FINDINGS.md, C2). yosys makes the same AND of it.
+def gate {r : HwTy → Type} [Hw r] (c x : r Bit) : r Bit := Hw.mux c x (Hw.lit 1 0)
+def zext32 {r : HwTy → Type} [Hw r] (b : r Bit) : r B32 := Hw.cat (Hw.lit 31 0) b
+
+-- a register field names a register of the configuration (RV32E: below x16)
+def regOk {r : HwTy → Type} [Hw r] (ab : Nat) (f : r B5) : r Bit :=
+  if Nat.lt ab 5 then isK (bitOf 4 f) 0 else Hw.lit 1 1
+def regIx {r : HwTy → Type} [Hw r] (ab : Nat) (f : r B5) : r (HwTy.bits ab) := Hw.slice 0 ab f
+
+------------------------------------------------------------------------------------
+-- The decoded instruction
+
+structure Dec (r : HwTy → Type) where
+  rd : r B5
+  f3 : r B3
+  r1 : r B5
+  r2 : r B5
+  alt : r Bit      -- bit 30 (SUB, SRA, SRAI)
+  lui : r Bit
+  auipc : r Bit
+  jal : r Bit
+  jalr : r Bit
+  branch : r Bit
+  load : r Bit
+  store : r Bit
+  opimm : r Bit
+  op : r Bit
+  ecall : r Bit
+  ebreak : r Bit
+  legal : r Bit
+  immI : r B32
+  immS : r B32
+  immB : r B32
+  immU : r B32
+  immJ : r B32
+
+def decode {r : HwTy → Type} [Hw r] (ab : Nat) (w : r B32) : Dec r :=
+  let opc : r B7 := Hw.slice 0 7 w;
+  let rd : r B5 := Hw.slice 7 5 w;
+  let f3 : r B3 := Hw.slice 12 3 w;
+  let r1 : r B5 := Hw.slice 15 5 w;
+  let r2 : r B5 := Hw.slice 20 5 w;
+  let f7 : r B7 := Hw.slice 25 7 w;
+  let sgn := bitOf 31 w;
+  let lui := isK opc Op.lui;
+  let auipc := isK opc Op.auipc;
+  let jal := isK opc Op.jal;
+  let jalr := isK opc Op.jalr;
+  let branch := isK opc Op.branch;
+  let load := isK opc Op.load;
+  let store := isK opc Op.store;
+  let opimm := isK opc Op.opimm;
+  let op := isK opc Op.op;
+  let fence := isK opc Op.fence;
+  let ecall := isK w 115;
+  let ebreak := isK w 1048691;
+  let okd := regOk ab rd;
+  let ok1 := regOk ab r1;
+  let ok2 := regOk ab r2;
+  let f7z := isK f7 0;
+  let f7a := isK f7 32;
+  let f30 := Hw.or (isK f3 0) (isK f3 5);
+  let legal := Hw.or (Hw.or (Hw.and (Hw.or (Hw.or lui auipc) jal) okd)
+      (Hw.or (Hw.and jalr (Hw.and (isK f3 0) (Hw.and okd ok1)))
+        (Hw.and branch (Hw.and (Hw.not (isK (Hw.slice 1 2 f3 : r B2) 1)) (Hw.and ok1 ok2)))))
+    (Hw.or (Hw.or (Hw.and load (Hw.and (Hw.or (Hw.ult f3 (Hw.lit 3 3)) (Hw.or (isK f3 4) (isK f3 5))) (Hw.and okd ok1)))
+        (Hw.and store (Hw.and (Hw.ult f3 (Hw.lit 3 3)) (Hw.and ok1 ok2))))
+      (Hw.or (Hw.or (Hw.and opimm (Hw.and okd (Hw.and ok1
+            (Hw.mux (isK f3 1) f7z (Hw.mux (isK f3 5) (Hw.or f7z f7a) (Hw.lit 1 1))))))
+          (Hw.and op (Hw.and (Hw.and okd (Hw.and ok1 ok2)) (Hw.or f7z (Hw.and f7a f30)))))
+        (Hw.or fence (Hw.or ecall ebreak))));
+  let immI : r B32 := Hw.cat (rep 20 sgn) (Hw.slice 20 12 w : r B12);
+  let immS : r B32 := Hw.cat (rep 20 sgn) (Hw.cat (Hw.slice 25 7 w : r B7) (Hw.slice 7 5 w : r B5));
+  let immB : r B32 := Hw.cat (rep 20 sgn) (Hw.cat (bitOf 7 w) (Hw.cat (Hw.slice 25 6 w : r (HwTy.bits 6))
+      (Hw.cat (Hw.slice 8 4 w : r (HwTy.bits 4)) (Hw.lit 1 0))));
+  let immU : r B32 := Hw.cat (Hw.slice 12 20 w : r B20) (Hw.lit 12 0);
+  let immJ : r B32 := Hw.cat (rep 12 sgn) (Hw.cat (Hw.slice 12 8 w : r B8) (Hw.cat (bitOf 20 w)
+      (Hw.cat (Hw.slice 21 10 w : r (HwTy.bits 10)) (Hw.lit 1 0))));
+  Dec.mk rd f3 r1 r2 (bitOf 30 w) lui auipc jal jalr branch load store opimm op ecall ebreak legal
+    immI immS immB immU immJ
+
+------------------------------------------------------------------------------------
+-- One cycle
+
+def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (s : St ab wb r) (x : r Bit) :
+    r (HwTy.prod (St.code ab wb) Out.code) :=
+  let ph := s.ph;
+  let inF := isK ph Ph.f;
+  let inD := isK ph Ph.d;
+  let inE := isK ph Ph.e;
+  let inM := isK ph Ph.m;
+  let inS := isK ph Ph.s;
+  let w : r B32 := Hw.cat s.q3 (Hw.cat s.q2 (Hw.cat s.q1 s.q0));
+  let ω d := decode ab w;
+  let a := s.x1;
+  let rs2v := s.x2;
+  let regB := Hw.or d.op d.branch;
+  let b := Hw.mux regB rs2v (Hw.mux d.store d.immS d.immI);
+  let arith := Hw.or d.op d.opimm;
+  let cmpOp := Hw.and arith (Hw.or (isK d.f3 2) (isK d.f3 3));
+  let sub := Hw.or d.branch (Hw.or cmpOp (Hw.and d.op (Hw.and d.alt (isK d.f3 0))));
+  -- a + b, or a - b as a + ~b + 1 (the carry in through a low bit), with the carry out
+  let s34 : r B34 := Hw.add (Hw.cat (Hw.lit 1 0) (Hw.cat a (Hw.lit 1 1)))
+    (Hw.cat (Hw.lit 1 0) (Hw.cat (Hw.mux sub (Hw.not b) b) sub));
+  let sum : r B32 := Hw.slice 1 32 s34;
+  let ult := Hw.not (bitOf 33 s34);
+  let slt := Hw.mux (Hw.xor (bitOf 31 a) (bitOf 31 b)) (bitOf 31 a) (bitOf 31 sum);
+  let eq := Hw.eq a b;
+  let taken := Hw.xor (Hw.mux (bitOf 2 d.f3) (Hw.mux (bitOf 1 d.f3) ult slt) eq) (bitOf 0 d.f3);
+  let f3 := d.f3;
+  let aluRes := Hw.mux (isK f3 0) sum (Hw.mux (isK f3 2) (zext32 slt) (Hw.mux (isK f3 3) (zext32 ult)
+    (Hw.mux (isK f3 4) (Hw.xor a b) (Hw.mux (isK f3 6) (Hw.or a b) (Hw.and a b)))));
+  let shift := Hw.and arith (Hw.or (isK f3 1) (isK f3 5));
+  -- the next PC
+  let pcInc := Hw.add s.pc (Hw.lit 32 4);
+  let pcImm := Hw.add s.pc (Hw.mux d.jal d.immJ (Hw.mux d.branch d.immB d.immU));
+  let jalrT : r B32 := Hw.cat (Hw.slice 1 31 sum : r (HwTy.bits 31)) (Hw.lit 1 0);
+  let jump := Hw.mux (Hw.or d.jal d.jalr) (Hw.lit 1 1) (gate d.branch taken);
+  let target := Hw.mux d.jalr jalrT pcImm;
+  let npc := Hw.mux jump target pcInc;
+  -- traps
+  let lo2 : r B2 := Hw.slice 0 2 sum;
+  let mis := Hw.mux (isK (Hw.slice 0 2 f3 : r B2) 2) (Hw.not (isK lo2 0))
+    (Hw.mux (isK (Hw.slice 0 2 f3 : r B2) 1) (bitOf 0 sum) (Hw.lit 1 0));
+  let misJ := gate jump (bitOf 1 target);
+  let misL := gate d.load mis;
+  let misS := gate d.store mis;
+  let code : r B3 := Hw.mux (Hw.not d.legal) (Hw.lit 3 Trap.illegal) (Hw.mux d.ecall (Hw.lit 3 Trap.ecall)
+    (Hw.mux d.ebreak (Hw.lit 3 Trap.ebreak) (Hw.mux misJ (Hw.lit 3 Trap.jump)
+    (Hw.mux misL (Hw.lit 3 Trap.load) (Hw.mux misS (Hw.lit 3 Trap.store) (Hw.lit 3 0))))));
+  let trapE := Hw.and inE (Hw.not (isK code 0));
+  let goE := gate inE (isK code 0);
+  -- register writes: in E (everything but loads and shifts), M (loads), S (shifts)
+  let rdNZ := Hw.not (isK d.rd 0);
+  let wE := gate goE (gate rdNZ (Hw.or (Hw.or (Hw.or d.lui d.auipc) (Hw.or d.jal d.jalr)) (Hw.and arith (Hw.not shift))));
+  let resE := Hw.mux d.lui d.immU (Hw.mux d.auipc pcImm (Hw.mux (Hw.or d.jal d.jalr) pcInc aluRes));
+  -- the loaded value
+  let slo := s.slo;
+  let byte := Hw.mux (bitOf 1 slo) (Hw.mux (bitOf 0 slo) s.q3 s.q2) (Hw.mux (bitOf 0 slo) s.q1 s.q0);
+  let half : r B16 := Hw.mux (bitOf 1 slo) (Hw.cat s.q3 s.q2) (Hw.cat s.q1 s.q0);
+  let sx := Hw.not (bitOf 2 s.sf3);
+  let ldv := Hw.mux (bitOf 1 s.sf3) w (Hw.mux (bitOf 0 s.sf3)
+    (Hw.cat (rep 16 (Hw.and sx (bitOf 15 half))) half) (Hw.cat (rep 24 (Hw.and sx (bitOf 7 byte))) byte));
+  let sNZ := Hw.not (isK s.srd 0);
+  let sDone := isK s.cnt 0;
+  let wM := gate inM sNZ;
+  let wS := gate inS (Hw.and sDone sNZ);
+  let we := Hw.or wE (Hw.or wM wS);
+  let wa := Hw.mux inE (regIx ab d.rd) (regIx ab s.srd);
+  let wd := Hw.mux inE resE (Hw.mux inM ldv s.acc);
+  -- the shifter: left (funct3 1), right logical or arithmetic (bit 30)
+  let left := isK s.sf3 1;
+  let sh := Hw.mux left (Hw.cat (Hw.slice 0 31 s.acc : r (HwTy.bits 31)) (Hw.lit 1 0))
+    (Hw.cat (Hw.and (bitOf 0 slo) (bitOf 31 s.acc)) (Hw.slice 1 31 s.acc : r (HwTy.bits 31)));
+  -- memory: stores in E (not to the output port), byte lanes
+  let io := bitOf 31 sum;
+  let st := gate goE (gate d.store (Hw.not io));
+  let wix : r (HwTy.bits wb) := Hw.slice 2 wb sum;
+  let sb := isK f3 0;
+  let sh16 := isK f3 1;
+  let lane := fun (l : Nat) => gate st (Hw.mux sb (isK lo2 l) (Hw.mux sh16 (isK (bitOf 1 sum) (Nat.div l 2)) (Hw.lit 1 1)));
+  let d0 : r B8 := Hw.slice 0 8 rs2v;
+  let d1 : r B8 := Hw.mux sb d0 (Hw.slice 8 8 rs2v);
+  let d2 : r B8 := Hw.mux (isK f3 2) (Hw.slice 16 8 rs2v) d0;
+  let d3 : r B8 := Hw.mux sb d0 (Hw.mux sh16 d1 (Hw.slice 24 8 rs2v));
+  -- the memory read: the load's address, else the next instruction's
+  let raddr := Hw.mux (gate goE d.load) sum (Hw.mux goE npc s.pc);
+  let rix : r (HwTy.bits wb) := Hw.slice 2 wb raddr;
+  let nph : r B3 := Hw.mux inF (Hw.lit 3 Ph.d) (Hw.mux inD (Hw.lit 3 Ph.e)
+    (Hw.mux inE (Hw.mux trapE (Hw.lit 3 Ph.h) (Hw.mux d.load (Hw.lit 3 Ph.m) (Hw.mux shift (Hw.lit 3 Ph.s)
+      (Hw.mux d.store (Hw.lit 3 Ph.f) (Hw.lit 3 Ph.d)))))
+    (Hw.mux inM (Hw.lit 3 Ph.d) (Hw.mux inS (Hw.mux sDone (Hw.lit 3 Ph.d) (Hw.lit 3 Ph.s)) ph))));
+  let rfa := Hw.memWrite s.rfa we wa wd;
+  let rfb := Hw.memWrite s.rfb we wa wd;
+  Hw.pair
+    (St.pack ab wb (St.mk nph
+      (Hw.mux goE npc s.pc)
+      (Hw.memRead s.m0 rix) (Hw.memRead s.m1 rix) (Hw.memRead s.m2 rix) (Hw.memRead s.m3 rix)
+      (Hw.memWrite s.m0 (lane 0) wix d0) (Hw.memWrite s.m1 (lane 1) wix d1)
+      (Hw.memWrite s.m2 (lane 2) wix d2) (Hw.memWrite s.m3 (lane 3) wix d3)
+      rfa rfb
+      (Hw.memRead s.rfa (regIx ab d.r1)) (Hw.memRead s.rfb (regIx ab d.r2))
+      (Hw.mux inE a (Hw.mux inS sh s.acc))
+      (Hw.mux inE (Hw.slice 0 5 b) (Hw.mux inS (Hw.sub s.cnt (Hw.lit 5 1)) s.cnt))
+      (Hw.mux inE d.rd s.srd)
+      (Hw.mux inE f3 s.sf3)
+      (Hw.mux inE (Hw.mux d.load lo2 (Hw.cat (Hw.lit 1 0) d.alt)) s.slo)
+      (Hw.mux trapE code s.trap)))
+    (Out.pack (Out.mk s.trap (gate goE (gate d.store io)) (Hw.slice 0 8 rs2v)))
+
+------------------------------------------------------------------------------------
+-- The core as a circuit, with a program in memory from address 0
+
+-- byte `l` of word `k` of the program
+def Core.lane (prog : List Nat) (wb l : Nat) : HwTy.El (HwTy.mem wb 8) :=
+  fun (a : BitVec wb) => BitVec.ofNat 8 (Rv.bits (Rv.wordAt prog a.toNat) (8 * l) 8)
+
+def St.init (ab wb : Nat) (prog : List Nat) : St ab wb HwTy.El :=
+  St.mk (BitVec.ofNat 3 Ph.f) (BitVec.ofNat 32 0)
+    (BitVec.ofNat 8 0) (BitVec.ofNat 8 0) (BitVec.ofNat 8 0) (BitVec.ofNat 8 0)
+    (Core.lane prog wb 0) (Core.lane prog wb 1) (Core.lane prog wb 2) (Core.lane prog wb 3)
+    (fun (a : BitVec ab) => BitVec.ofNat 32 0) (fun (a : BitVec ab) => BitVec.ofNat 32 0)
+    (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0)
+    (BitVec.ofNat 5 0) (BitVec.ofNat 5 0) (BitVec.ofNat 3 0) (BitVec.ofNat 2 0) (BitVec.ofNat 3 0)
+
+def core (ab wb : Nat) (prog : List Nat) : Circuit Bit Out.code :=
+  Circuit.mk (St.code ab wb) (Bundle.toEl (St.bundle ab wb) (St.init ab wb prog))
+    (fun s x => coreStep ab wb (St.unpack ab wb s) x)

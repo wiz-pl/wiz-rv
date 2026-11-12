@@ -1,0 +1,47 @@
+import Rv.Core
+import Rv.Asm
+-- Kernel-checked single-instruction proofs: the RV32E core (16 registers, 2 KB), started
+-- in its decode phase on an instruction, is after two cycles where the specification's
+-- `Rv.exec` says: in decode again, with the specification's PC and the specification's
+-- value in rd. The architectural state is symbolic (any PC, any registers, any memory,
+-- any leftovers in the core's other registers); the instruction is a fixed word.
+--
+-- What goes through by `rfl` and what does not: FINDINGS.md, P1.
+
+def Pf.wb : Nat := 9
+def Pf.cfg : Cfg := Cfg.rv32e 11
+
+-- the core's register file holding the architectural registers
+def Pf.rf (a : Arch) : BitVec 4 → BitVec 32 := fun (i : BitVec 4) => a.regs (BitVec.ofNat 5 i.toNat)
+
+-- the core in its decode phase on the word `w`, at the architectural state `a`
+def Pf.at (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc : BitVec 32) (cnt srd : BitVec 5)
+    (sf3 : BitVec 3) (slo : BitVec 2) : St 4 9 HwTy.El :=
+  St.mk (BitVec.ofNat 3 Ph.d) a.pc
+    (BitVec.ofNat 8 (Rv.bits w 0 8)) (BitVec.ofNat 8 (Rv.bits w 8 8)) (BitVec.ofNat 8 (Rv.bits w 16 8)) (BitVec.ofNat 8 (Rv.bits w 24 8))
+    m0 m1 m2 m3 (Pf.rf a) (Pf.rf a) x1 x2 acc cnt srd sf3 slo (BitVec.ofNat 3 0)
+
+def Pf.step (s : St 4 9 HwTy.El) : St 4 9 HwTy.El :=
+  Bundle.ofEl (St.bundle 4 9) (coreStep (r := HwTy.El) 4 9 s (BitVec.ofNat 1 0)).1
+
+-- what is compared: the phase, the PC, register rd (core: its register file; spec: x[rd])
+def Pf.core (s : St 4 9 HwTy.El) (rd : Nat) : BitVec 3 × BitVec 32 × BitVec 32 :=
+  (s.ph, s.pc, s.rfa (BitVec.ofNat 4 rd))
+def Pf.spec (a : Arch) (w rd : Nat) : BitVec 3 × BitVec 32 × BitVec 32 :=
+  (BitVec.ofNat 3 Ph.d, (Rv.exec Pf.cfg a w).pc, Rv.reg (Rv.exec Pf.cfg a w) rd)
+
+-- the instruction words
+def Pf.w (i : Asm) : Nat := Rv.wordAt (Asm.assemble (.cons i .nil)) 0
+
+
+-- the four bytes the decode phase reads (from memory at PC), and those of a word
+def Pf.Q : Type := BitVec 8 × BitVec 8 × BitVec 8 × BitVec 8
+def Pf.fetchQ (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) : Pf.Q :=
+  let ω ix : HwTy.El (HwTy.bits 9) := Hw.slice (r := HwTy.El) 2 9 a.pc;
+  (Hw.memRead (r := HwTy.El) m0 ix, Hw.memRead (r := HwTy.El) m1 ix, Hw.memRead (r := HwTy.El) m2 ix, Hw.memRead (r := HwTy.El) m3 ix)
+def Pf.bytes (w : Nat) : Pf.Q :=
+  (BitVec.ofNat 8 (Rv.bits w 0 8), BitVec.ofNat 8 (Rv.bits w 8 8), BitVec.ofNat 8 (Rv.bits w 16 8), BitVec.ofNat 8 (Rv.bits w 24 8))
+
+-- a state with other read data
+def Pf.setQ (s : St 4 9 HwTy.El) (q : Pf.Q) : St 4 9 HwTy.El :=
+  St.mk s.ph s.pc q.1 q.2.1 q.2.2.1 q.2.2.2 s.m0 s.m1 s.m2 s.m3 s.rfa s.rfb s.x1 s.x2 s.acc s.cnt s.srd s.sf3 s.slo s.trap

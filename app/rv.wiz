@@ -1,0 +1,77 @@
+import Rv.Lockstep
+import Rv.Progs
+import Sys
+import Text
+-- The flow driver: `rv COMMAND`. grail builds this program (and checks the library);
+-- it writes the Verilog and runs the FPGA tools as child processes.
+--
+--   gen       write build/NAME.v for every design (the core with the `blink` program)
+--   bit       synthesise and place and route every design for its part (yosys,
+--             nextpnr-ice40); the utilisation and Fmax in build/NAME.nextpnr.log
+--   all       gen, bit
+
+def say (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+def unwords : List String → String
+  | .nil => ""
+  | .cons a as => a ++ " " ++ unwords as
+
+def tool (cmd : String) (args : List String) : EIO Unit := do
+  say ("$ " ++ cmd ++ " " ++ unwords args);
+  st ← Process.run cmd args;
+  match ExitStatus.success st with
+  | .true => EIO.pure ()
+  | .false => EIO.fail (cmd ++ ": " ++ ExitStatus.toString st)
+
+def ensureDir (p : String) : EIO Unit := do
+  d ← EIO.lift (FS.isDir p);
+  match d with
+  | .true => EIO.pure ()
+  | .false => FS.createDir p
+
+def EIO.forEach {A : Type} (f : A → EIO Unit) : List A → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons x xs => EIO.bind (f x) (fun u => EIO.forEach f xs)
+
+def build (file : String) : String := "build/" ++ file
+
+-- A design: a name, the core's configuration, the part it is placed on.
+structure Target where
+  name : String
+  ab : Nat
+  wb : Nat
+  device : String   -- nextpnr-ice40's option: hx1k, hx8k, up5k
+  package : String
+
+def targets : List Target :=
+  .cons (Target.mk "rv32e_hx1k" 4 9 "hx1k" "tq144")
+  (.cons (Target.mk "rv32i_hx8k" 5 9 "hx8k" "ct256") .nil)
+
+def Target.netlist (t : Target) : Netlist := Circuit.netlist t.name (core t.ab t.wb (Asm.assemble Prog.blink))
+
+def genT (t : Target) : EIO Unit := do
+  let n := Target.netlist t;
+  say (t.name ++ ": " ++ Nat.repr (List.length n.nodes) ++ " netlist nodes, "
+    ++ Nat.repr (List.length n.regs) ++ " registers, " ++ Nat.repr (List.length n.mems) ++ " memories");
+  FS.writeFile (build (t.name ++ ".v")) (Verilog.emit n)
+
+def bitT (t : Target) : EIO Unit := do
+  let name := t.name;
+  tool "yosys" (.cons "-q" (.cons "-l" (.cons (build (name ++ ".yosys.log")) (.cons "-p"
+    (.cons ("synth_ice40 -top " ++ name ++ " -json " ++ build (name ++ ".json") ++ "; stat")
+    (.cons (build (name ++ ".v")) .nil))))));
+  tool "nextpnr-ice40" (.cons ("--" ++ t.device) (.cons "--package" (.cons t.package (.cons "--freq" (.cons "12"
+    (.cons "--json" (.cons (build (name ++ ".json")) (.cons "--asc" (.cons (build (name ++ ".asc"))
+    (.cons "--log" (.cons (build (name ++ ".nextpnr.log")) (.cons "-q" .nil))))))))))))
+
+def usage : String := "usage: rv gen | bit | all"
+
+def run : List String → EIO Unit
+  | .cons cmd rest =>
+    if String.eq cmd "gen" then EIO.bind (ensureDir "build") (fun u => EIO.forEach genT targets)
+    else if String.eq cmd "bit" then EIO.forEach bitT targets
+    else if String.eq cmd "all" then EIO.bind (ensureDir "build") (fun u => EIO.bind (EIO.forEach genT targets) (fun u => EIO.forEach bitT targets))
+    else EIO.fail usage
+  | .nil => EIO.fail usage
+
+def main : IO Unit := EIO.toIO (EIO.bind (EIO.lift IO.args) run)

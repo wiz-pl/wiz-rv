@@ -1,0 +1,193 @@
+import Rv.Isa
+import Int
+import Text
+-- A small RISC-V assembler: a program is a list of `Asm` items (instructions, labels
+-- and data words); `Asm.assemble` gives the memory image from address 0, one 32-bit
+-- word per item (`li` is two). Branches and `jal` name labels. `Asm.problems` lists
+-- what is wrong with a program (an unknown or repeated label, an immediate or offset
+-- out of range, a register the configuration does not have).
+--
+-- The mnemonics are functions (`A.addi 1 0 5` is `addi x1, x0, 5`); `A.sw rs2 off rs1`
+-- reads as `sw rs2, off(rs1)`, `A.lw rd off rs1` as `lw rd, off(rs1)`.
+
+infixr:67 " :: " => List.cons
+
+inductive Asm where
+  | label (l : String)
+  | word (w : Nat)
+  | lui (rd imm : Nat)
+  | auipc (rd imm : Nat)
+  | jal (rd : Nat) (l : String)
+  | jalr (rd rs1 : Nat) (imm : Int)
+  | br (f3 rs1 rs2 : Nat) (l : String)
+  | load (f3 rd rs1 : Nat) (imm : Int)
+  | store (f3 rs2 rs1 : Nat) (imm : Int)
+  | opi (f3 f7 rd rs1 : Nat) (imm : Int)
+  | op (f3 f7 rd rs1 rs2 : Nat)
+  | li (rd : Nat) (v : Int)
+
+-- an integer as an `n`-bit two's complement number
+def Asm.tc (n : Nat) (i : Int) : Nat := match i with
+  | .ofNat k => Nat.mod k (Rv.pow2 n)
+  | .negSucc k => Rv.pow2 n - 1 - Nat.mod k (Rv.pow2 n)
+-- `i` fits in `n` bits, signed
+def Asm.fits (n : Nat) (i : Int) : Bool := match i with
+  | .ofNat k => Nat.lt k (Rv.pow2 (n - 1))
+  | .negSucc k => Nat.lt k (Rv.pow2 (n - 1))
+
+-- the formats
+def Enc.r (op f3 f7 rd rs1 rs2 : Nat) : Nat :=
+  f7 * Rv.pow2 25 + rs2 * Rv.pow2 20 + rs1 * Rv.pow2 15 + f3 * 4096 + rd * 128 + op
+def Enc.i (op f3 rd rs1 imm : Nat) : Nat :=
+  Nat.mod imm 4096 * Rv.pow2 20 + rs1 * Rv.pow2 15 + f3 * 4096 + rd * 128 + op
+def Enc.s (op f3 rs1 rs2 imm : Nat) : Nat :=
+  Rv.bits imm 5 7 * Rv.pow2 25 + rs2 * Rv.pow2 20 + rs1 * Rv.pow2 15 + f3 * 4096 + Rv.bits imm 0 5 * 128 + op
+def Enc.b (f3 rs1 rs2 imm : Nat) : Nat :=
+  Rv.bits imm 12 1 * Rv.pow2 31 + Rv.bits imm 5 6 * Rv.pow2 25 + rs2 * Rv.pow2 20 + rs1 * Rv.pow2 15
+    + f3 * 4096 + Rv.bits imm 1 4 * 256 + Rv.bits imm 11 1 * 128 + Op.branch
+def Enc.u (op rd imm : Nat) : Nat := Nat.mod imm (Rv.pow2 20) * 4096 + rd * 128 + op
+def Enc.j (rd imm : Nat) : Nat :=
+  Rv.bits imm 20 1 * Rv.pow2 31 + Rv.bits imm 1 10 * Rv.pow2 21 + Rv.bits imm 11 1 * Rv.pow2 20
+    + Rv.bits imm 12 8 * 4096 + rd * 128 + Op.jal
+
+-- `li`: LUI with the upper part, ADDI with the (sign-extended) lower twelve bits
+def Asm.liLo (v : Int) : Nat := Rv.bits (Asm.tc 32 v) 0 12
+def Asm.liHi (v : Int) : Nat :=
+  Rv.bits (Nat.mod (Asm.tc 32 v + Rv.pow2 32 - (Rv.sext 12 (Asm.liLo v)).toNat) (Rv.pow2 32)) 12 20
+
+------------------------------------------------------------------------------------
+-- Two passes: the labels' addresses, then the words. (The recursive calls are
+-- outside the `match`: icestick-cpu FINDINGS.md, C7.)
+
+def Asm.size (i : Asm) : Nat := match i with
+  | .label l => 0
+  | .li rd v => 8
+  | _ => 4
+def Asm.here (pc : Nat) (i : Asm) : List (String × Nat) := match i with
+  | .label l => .cons (l, pc) .nil
+  | _ => .nil
+def Asm.labels : Nat → List Asm → List (String × Nat)
+  | pc, .nil => .nil
+  | pc, .cons i is => List.append (Asm.here pc i) (Asm.labels (pc + Asm.size i) is)
+
+def Asm.lookup (l : String) : List (String × Nat) → Option Nat
+  | .nil => .none
+  | .cons p ps => if String.beq p.1 l then .some p.2 else Asm.lookup l ps
+
+-- the offset from `pc` to label `l` (0 for an unknown label)
+def Asm.offset (env : List (String × Nat)) (pc : Nat) (l : String) : Int := match Asm.lookup l env with
+  | .some a => Int.subNatNat a pc
+  | .none => 0
+
+def Asm.encode (env : List (String × Nat)) (pc : Nat) (i : Asm) : List Nat := match i with
+  | .label l => .nil
+  | .word w => .cons w .nil
+  | .lui rd imm => .cons (Enc.u Op.lui rd imm) .nil
+  | .auipc rd imm => .cons (Enc.u Op.auipc rd imm) .nil
+  | .jal rd l => .cons (Enc.j rd (Asm.tc 21 (Asm.offset env pc l))) .nil
+  | .jalr rd rs1 imm => .cons (Enc.i Op.jalr 0 rd rs1 (Asm.tc 12 imm)) .nil
+  | .br f3 rs1 rs2 l => .cons (Enc.b f3 rs1 rs2 (Asm.tc 13 (Asm.offset env pc l))) .nil
+  | .load f3 rd rs1 imm => .cons (Enc.i Op.load f3 rd rs1 (Asm.tc 12 imm)) .nil
+  | .store f3 rs2 rs1 imm => .cons (Enc.s Op.store f3 rs1 rs2 (Asm.tc 12 imm)) .nil
+  | .opi f3 f7 rd rs1 imm => .cons (Enc.i Op.opimm f3 rd rs1 (f7 * 32 + Asm.tc 12 imm)) .nil
+  | .op f3 f7 rd rs1 rs2 => .cons (Enc.r Op.op f3 f7 rd rs1 rs2) .nil
+  | .li rd v => .cons (Enc.u Op.lui rd (Asm.liHi v)) (.cons (Enc.i Op.opimm 0 rd rd (Asm.liLo v)) .nil)
+
+def Asm.encodeAll (env : List (String × Nat)) : Nat → List Asm → List Nat
+  | pc, .nil => .nil
+  | pc, .cons i is => List.append (Asm.encode env pc i) (Asm.encodeAll env (pc + Asm.size i) is)
+
+def Asm.assemble (p : List Asm) : List Nat := Asm.encodeAll (Asm.labels 0 p) 0 p
+
+------------------------------------------------------------------------------------
+-- What can be wrong
+
+def Asm.countLabel (l : String) : List (String × Nat) → Nat
+  | .nil => 0
+  | .cons p ps => (if String.beq p.1 l then 1 else 0) + Asm.countLabel l ps
+
+def Asm.showNat (n : Nat) : String := Nat.repr n
+
+def Asm.regsOk (c : Cfg) : List Nat → List String
+  | .nil => .nil
+  | .cons r rs => List.append (if Rv.okReg c r then .nil else .cons ("no register x" ++ Asm.showNat r) .nil) (Asm.regsOk c rs)
+
+def Asm.immOk (n : Nat) (i : Int) : List String :=
+  if Asm.fits n i then .nil else .cons ("immediate out of range for " ++ Asm.showNat n ++ " bits") .nil
+
+def Asm.target (env : List (String × Nat)) (n : Nat) (pc : Nat) (l : String) : List String :=
+  match Asm.lookup l env with
+  | .some a => Asm.immOk n (Int.subNatNat a pc)
+  | .none => .cons ("unknown label " ++ l) .nil
+
+def Asm.problem (c : Cfg) (env : List (String × Nat)) (pc : Nat) (i : Asm) : List String := match i with
+  | .label l => if Nat.beq (Asm.countLabel l env) 1 then .nil else .cons ("label defined twice: " ++ l) .nil
+  | .word w => .nil
+  | .lui rd imm => Asm.regsOk c (.cons rd .nil)
+  | .auipc rd imm => Asm.regsOk c (.cons rd .nil)
+  | .jal rd l => List.append (Asm.regsOk c (.cons rd .nil)) (Asm.target env 21 pc l)
+  | .jalr rd rs1 imm => List.append (Asm.regsOk c (.cons rd (.cons rs1 .nil))) (Asm.immOk 12 imm)
+  | .br f3 rs1 rs2 l => List.append (Asm.regsOk c (.cons rs1 (.cons rs2 .nil))) (Asm.target env 13 pc l)
+  | .load f3 rd rs1 imm => List.append (Asm.regsOk c (.cons rd (.cons rs1 .nil))) (Asm.immOk 12 imm)
+  | .store f3 rs2 rs1 imm => List.append (Asm.regsOk c (.cons rs2 (.cons rs1 .nil))) (Asm.immOk 12 imm)
+  | .opi f3 f7 rd rs1 imm => List.append (Asm.regsOk c (.cons rd (.cons rs1 .nil))) (Asm.immOk 12 imm)
+  | .op f3 f7 rd rs1 rs2 => Asm.regsOk c (.cons rd (.cons rs1 (.cons rs2 .nil)))
+  | .li rd v => Asm.regsOk c (.cons rd .nil)
+
+def Asm.problemsAll (c : Cfg) (env : List (String × Nat)) : Nat → List Asm → List String
+  | pc, .nil => .nil
+  | pc, .cons i is => List.append (Asm.problem c env pc i) (Asm.problemsAll c env (pc + Asm.size i) is)
+
+def Asm.problems (c : Cfg) (p : List Asm) : List String := Asm.problemsAll c (Asm.labels 0 p) 0 p
+
+------------------------------------------------------------------------------------
+-- The mnemonics
+
+def A.lui (rd imm : Nat) : Asm := Asm.lui rd imm
+def A.auipc (rd imm : Nat) : Asm := Asm.auipc rd imm
+def A.jal (rd : Nat) (l : String) : Asm := Asm.jal rd l
+def A.j (l : String) : Asm := Asm.jal 0 l
+def A.jalr (rd rs1 : Nat) (imm : Int) : Asm := Asm.jalr rd rs1 imm
+def A.ret : Asm := Asm.jalr 0 1 0
+def A.beq (a b : Nat) (l : String) : Asm := Asm.br 0 a b l
+def A.bne (a b : Nat) (l : String) : Asm := Asm.br 1 a b l
+def A.blt (a b : Nat) (l : String) : Asm := Asm.br 4 a b l
+def A.bge (a b : Nat) (l : String) : Asm := Asm.br 5 a b l
+def A.bltu (a b : Nat) (l : String) : Asm := Asm.br 6 a b l
+def A.bgeu (a b : Nat) (l : String) : Asm := Asm.br 7 a b l
+def A.beqz (a : Nat) (l : String) : Asm := Asm.br 0 a 0 l
+def A.bnez (a : Nat) (l : String) : Asm := Asm.br 1 a 0 l
+def A.lb (rd : Nat) (imm : Int) (rs1 : Nat) : Asm := Asm.load 0 rd rs1 imm
+def A.lh (rd : Nat) (imm : Int) (rs1 : Nat) : Asm := Asm.load 1 rd rs1 imm
+def A.lw (rd : Nat) (imm : Int) (rs1 : Nat) : Asm := Asm.load 2 rd rs1 imm
+def A.lbu (rd : Nat) (imm : Int) (rs1 : Nat) : Asm := Asm.load 4 rd rs1 imm
+def A.lhu (rd : Nat) (imm : Int) (rs1 : Nat) : Asm := Asm.load 5 rd rs1 imm
+def A.sb (rs2 : Nat) (imm : Int) (rs1 : Nat) : Asm := Asm.store 0 rs2 rs1 imm
+def A.sh (rs2 : Nat) (imm : Int) (rs1 : Nat) : Asm := Asm.store 1 rs2 rs1 imm
+def A.sw (rs2 : Nat) (imm : Int) (rs1 : Nat) : Asm := Asm.store 2 rs2 rs1 imm
+def A.addi (rd rs1 : Nat) (imm : Int) : Asm := Asm.opi 0 0 rd rs1 imm
+def A.slti (rd rs1 : Nat) (imm : Int) : Asm := Asm.opi 2 0 rd rs1 imm
+def A.sltiu (rd rs1 : Nat) (imm : Int) : Asm := Asm.opi 3 0 rd rs1 imm
+def A.xori (rd rs1 : Nat) (imm : Int) : Asm := Asm.opi 4 0 rd rs1 imm
+def A.ori (rd rs1 : Nat) (imm : Int) : Asm := Asm.opi 6 0 rd rs1 imm
+def A.andi (rd rs1 : Nat) (imm : Int) : Asm := Asm.opi 7 0 rd rs1 imm
+def A.slli (rd rs1 sh : Nat) : Asm := Asm.opi 1 0 rd rs1 (Int.ofNat sh)
+def A.srli (rd rs1 sh : Nat) : Asm := Asm.opi 5 0 rd rs1 (Int.ofNat sh)
+def A.srai (rd rs1 sh : Nat) : Asm := Asm.opi 5 32 rd rs1 (Int.ofNat sh)
+def A.add (rd a b : Nat) : Asm := Asm.op 0 0 rd a b
+def A.sub (rd a b : Nat) : Asm := Asm.op 0 32 rd a b
+def A.sll (rd a b : Nat) : Asm := Asm.op 1 0 rd a b
+def A.slt (rd a b : Nat) : Asm := Asm.op 2 0 rd a b
+def A.sltu (rd a b : Nat) : Asm := Asm.op 3 0 rd a b
+def A.xor (rd a b : Nat) : Asm := Asm.op 4 0 rd a b
+def A.srl (rd a b : Nat) : Asm := Asm.op 5 0 rd a b
+def A.sra (rd a b : Nat) : Asm := Asm.op 5 32 rd a b
+def A.or (rd a b : Nat) : Asm := Asm.op 6 0 rd a b
+def A.and (rd a b : Nat) : Asm := Asm.op 7 0 rd a b
+def A.mv (rd rs : Nat) : Asm := Asm.opi 0 0 rd rs 0
+def A.nop : Asm := Asm.opi 0 0 0 0 0
+def A.li (rd : Nat) (v : Int) : Asm := Asm.li rd v
+def A.ecall : Asm := Asm.word 115
+def A.ebreak : Asm := Asm.word 1048691
+def A.fence : Asm := Asm.word 267386895   -- fence iorw, iorw
+def A.label (l : String) : Asm := Asm.label l

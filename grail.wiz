@@ -1,0 +1,8 @@
+import Grail
+-- `grail build`: check the library (the ISA specification, the assembler, the cores and
+-- their proofs) and compile the flow driver, `.grail/bin/rv` (app/rv.wiz).
+-- `grail test`: the simulation tests under tests/.
+def package : Package := Package.new "wiz-rv"
+  |> Package.lib "lib" "src"
+  |> Package.exe "rv" "app/rv.wiz"
+  |> Package.tests "tests" "tests"

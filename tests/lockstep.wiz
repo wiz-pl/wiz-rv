@@ -1,0 +1,45 @@
+-- test: check
+import Rv.Lockstep
+import Rv.Progs
+-- The core against the specification, in lockstep (src/Rv/Lockstep.wiz), on the test
+-- programs: RV32E (16 registers, the HX1K configuration) and RV32I (32), 1 KB of
+-- memory. Each line: instructions, cycles, trap code, the bytes output, and "agrees"
+-- or what differed. (By `#eval`, in the kernel's evaluator: compiled, the value
+-- simulation is slower; FINDINGS.md, S2.)
+
+def showBytes : List Nat → String
+  | .nil => ""
+  | .cons x xs => Nat.repr x ++ " " ++ showBytes xs
+
+def lines : List String → String
+  | .nil => ""
+  | .cons s ss => "; " ++ s ++ lines ss
+
+def report (ab : Nat) (p : List Asm) (fuel : Nat) : String :=
+  (fun (r : Ls.Result) => Nat.repr r.instrs ++ " instructions, " ++ Nat.repr r.cycles ++ " cycles, trap "
+    ++ Nat.repr r.trap ++ ", out " ++ showBytes r.out
+    ++ (match r.problems with
+      | .nil => "agrees"
+      | ps => "DISAGREES" ++ lines ps)) (Ls.run ab 8 (Asm.assemble p) fuel)
+
+def sumE : String := report 4 Prog.sum 400
+#eval sumE
+def aluE : String := report 4 Prog.alu 400
+#eval aluE
+def shiftE : String := report 4 Prog.shift 1000
+#eval shiftE
+def memE : String := report 4 Prog.mem 400
+#eval memE
+def branchE : String := report 4 Prog.branch 400
+#eval branchE
+def sortE : String := report 4 Prog.sort 6000
+#eval sortE
+def trapsE : List String :=
+  .cons (report 4 Prog.trapLoad 50) (.cons (report 4 Prog.trapStore 50) (.cons (report 4 Prog.trapJump 50)
+  (.cons (report 4 Prog.trapIllegal 50) (.cons (report 4 Prog.trapEcall 50) (.cons (report 4 Prog.x16 50) .nil)))))
+#eval trapsE
+-- RV32I: x16 is a register
+def x16I : String := report 5 Prog.x16 50
+#eval x16I
+def aluI : String := report 5 Prog.alu 400
+#eval aluI

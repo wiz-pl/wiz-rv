@@ -1,0 +1,15 @@
+-- test: run
+import Rv.Progs
+import IO
+-- The ISA specification on its own: programs assembled and run on `Rv.step`.
+
+def showBytes : List Nat → String
+  | .nil => ""
+  | .cons x xs => Nat.repr x ++ " " ++ showBytes xs
+
+def report (name : String) (p : List Asm) (steps : Nat) : IO Unit :=
+  let s := Rv.run (Cfg.rv32e 12) steps (Arch.start (Cfg.rv32e 12) (Asm.assemble p));
+  IO.println (name ++ ": trap " ++ Nat.repr s.trap ++ ", pc " ++ Nat.repr s.pc.toNat ++ ", x1 " ++ Nat.repr (Rv.reg s 1).toNat ++ ", x15 " ++ Nat.repr (Rv.reg s 15).toNat ++ ", out " ++ showBytes (List.reverse s.out))
+
+def main : IO Unit := do
+  report "sum" Prog.sum 100

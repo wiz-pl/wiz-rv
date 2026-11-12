@@ -1,0 +1,101 @@
+import Rv.Asm
+-- Test programs, riscv-tests style: each computes something and writes bytes to the
+-- output port (a store to 0x80000000; x31 … hold that address where needed), then stops
+-- with `ebreak`. Registers stay below x16, so every program runs on RV32E too.
+
+-- the output port's address in x15
+def P.port : Asm := A.lui 15 524288
+
+-- sum 1 … 10 = 55, output
+def Prog.sum : List Asm :=
+  P.port :: A.li 1 0 :: A.li 2 10 ::
+  A.label "loop" :: A.add 1 1 2 :: A.addi 2 2 (-1) :: A.bnez 2 "loop" ::
+  A.sb 1 0 15 :: A.ebreak :: .nil
+
+-- output x`r`'s low byte
+def P.out (r : Nat) : Asm := A.sb r 0 15
+
+-- the ALU: every OP and OP-IMM operation on a few operands, each result output
+def Prog.alu : List Asm :=
+  P.port :: A.li 1 (-7) :: A.li 2 3 :: A.li 3 2147483647 :: A.li 4 (-2147483648) ::
+  A.add 5 1 2 :: P.out 5 :: A.sub 5 1 2 :: P.out 5 :: A.sub 5 2 1 :: P.out 5 ::
+  A.add 5 3 2 :: A.srli 6 5 24 :: P.out 6 ::
+  A.slt 5 1 2 :: P.out 5 :: A.slt 5 2 1 :: P.out 5 :: A.sltu 5 1 2 :: P.out 5 :: A.sltu 5 2 1 :: P.out 5 ::
+  A.slt 5 4 3 :: P.out 5 :: A.sltu 5 4 3 :: P.out 5 ::
+  A.xor 5 1 2 :: P.out 5 :: A.or 5 1 2 :: P.out 5 :: A.and 5 1 2 :: P.out 5 ::
+  A.addi 5 1 (-100) :: P.out 5 :: A.slti 5 1 (-6) :: P.out 5 :: A.slti 5 1 (-8) :: P.out 5 ::
+  A.sltiu 5 2 (-1) :: P.out 5 :: A.sltiu 5 1 5 :: P.out 5 ::
+  A.xori 5 1 (-1) :: P.out 5 :: A.ori 5 2 1024 :: A.srli 5 5 8 :: P.out 5 :: A.andi 5 1 2047 :: P.out 5 ::
+  A.lui 6 74565 :: A.srli 7 6 12 :: P.out 7 :: A.srli 7 6 20 :: P.out 7 ::
+  A.add 0 1 2 :: A.addi 0 0 5 :: P.out 0 ::
+  A.ebreak :: .nil
+
+-- the shifts, by register and by constant: 0, 1, 4, 31 places, and amounts above 31
+-- (only the low five bits count)
+def Prog.shift : List Asm :=
+  P.port :: A.li 1 (-1985229329) :: A.li 2 0 :: A.li 3 1 :: A.li 4 4 :: A.li 5 31 :: A.li 6 36 ::
+  A.sll 7 1 2 :: A.srli 8 7 24 :: P.out 8 ::
+  A.sll 7 1 3 :: P.out 7 :: A.srl 7 1 4 :: A.srli 8 7 24 :: P.out 8 :: A.sra 7 1 4 :: A.srli 8 7 24 :: P.out 8 ::
+  A.sra 7 1 5 :: P.out 7 :: A.srl 7 1 5 :: P.out 7 :: A.sll 7 1 5 :: A.srli 8 7 24 :: P.out 8 ::
+  A.sll 7 1 6 :: P.out 7 :: A.srl 7 1 6 :: A.srli 8 7 24 :: P.out 8 ::
+  A.slli 7 1 3 :: P.out 7 :: A.srli 7 1 9 :: P.out 7 :: A.srai 7 1 9 :: A.srli 8 7 16 :: P.out 8 ::
+  A.srai 7 1 0 :: P.out 7 :: A.slli 7 1 31 :: A.srli 8 7 24 :: P.out 8 ::
+  A.ebreak :: .nil
+
+-- loads and stores of every size at every legal offset, sign and zero extension
+def Prog.mem : List Asm :=
+  P.port :: A.li 1 256 :: A.li 2 (-2023406815) ::
+  A.sw 2 0 1 :: A.lw 3 0 1 :: P.out 3 :: A.lbu 3 1 1 :: P.out 3 :: A.lb 3 3 1 :: A.srli 4 3 24 :: P.out 4 ::
+  A.lh 3 2 1 :: A.srli 4 3 16 :: P.out 4 :: A.lhu 3 2 1 :: A.srli 4 3 8 :: P.out 4 ::
+  A.li 5 171 :: A.sb 5 5 1 :: A.sb 5 6 1 :: A.lw 3 4 1 :: A.srli 4 3 8 :: P.out 4 :: A.srli 4 3 16 :: P.out 4 ::
+  A.li 5 (-292) :: A.sh 5 10 1 :: A.lh 3 10 1 :: A.srli 4 3 8 :: P.out 4 :: A.lw 3 8 1 :: A.srli 4 3 24 :: P.out 4 ::
+  A.sh 5 8 1 :: A.lhu 3 8 1 :: A.srli 4 3 8 :: P.out 4 :: A.lb 3 (-255) 1 :: P.out 3 ::
+  A.sw 2 1020 0 :: A.lbu 3 1023 0 :: P.out 3 ::
+  A.ebreak :: .nil
+
+-- branches taken and not, each condition on signed and unsigned edge cases; a call
+-- and a return (JAL, JALR), AUIPC
+def Prog.branch : List Asm :=
+  P.port :: A.li 1 (-1) :: A.li 2 1 :: A.li 10 0 ::
+  A.beq 1 2 "f1" :: A.addi 10 10 1 :: A.label "f1" ::
+  A.bne 1 2 "t1" :: A.addi 10 10 100 :: A.label "t1" ::
+  A.blt 1 2 "t2" :: A.addi 10 10 100 :: A.label "t2" ::
+  A.bltu 1 2 "f2" :: A.addi 10 10 2 :: A.label "f2" ::
+  A.bge 1 2 "f3" :: A.addi 10 10 4 :: A.label "f3" ::
+  A.bgeu 1 2 "t3" :: A.addi 10 10 100 :: A.label "t3" ::
+  A.bge 2 2 "t4" :: A.addi 10 10 100 :: A.label "t4" ::
+  A.beq 0 0 "t5" :: A.addi 10 10 100 :: A.label "t5" ::
+  P.out 10 ::
+  A.jal 1 "sub" :: P.out 10 :: A.auipc 3 0 :: P.out 3 :: A.auipc 3 1 :: A.srli 3 3 12 :: P.out 3 ::
+  A.li 11 3 :: A.label "back" :: A.addi 11 11 (-1) :: P.out 11 :: A.bnez 11 "back" ::
+  A.ebreak ::
+  A.label "sub" :: A.addi 10 10 16 :: A.jalr 0 1 0 :: .nil
+
+-- bubble sort of eight words at 512, then output
+def Prog.sort : List Asm :=
+  P.port :: A.li 1 512 ::
+  A.li 2 5 :: A.sw 2 0 1 :: A.li 2 (-3) :: A.sw 2 4 1 :: A.li 2 9 :: A.sw 2 8 1 :: A.li 2 0 :: A.sw 2 12 1 ::
+  A.li 2 77 :: A.sw 2 16 1 :: A.li 2 (-100) :: A.sw 2 20 1 :: A.li 2 2 :: A.sw 2 24 1 :: A.li 2 9 :: A.sw 2 28 1 ::
+  A.li 3 7 ::
+  A.label "outer" :: A.mv 4 1 :: A.li 5 0 ::
+  A.label "inner" :: A.lw 6 0 4 :: A.lw 7 4 4 :: A.bge 7 6 "noswap" :: A.sw 7 0 4 :: A.sw 6 4 4 ::
+  A.label "noswap" :: A.addi 4 4 4 :: A.addi 5 5 1 :: A.blt 5 3 "inner" ::
+  A.addi 3 3 (-1) :: A.bnez 3 "outer" ::
+  A.li 5 8 :: A.mv 4 1 ::
+  A.label "print" :: A.lw 6 0 4 :: P.out 6 :: A.addi 4 4 4 :: A.addi 5 5 (-1) :: A.bnez 5 "print" ::
+  A.ebreak :: .nil
+
+-- traps: a misaligned load, a misaligned store, a misaligned jump, an illegal
+-- instruction (all zeros), ECALL; and x16 (illegal on RV32E only)
+def Prog.trapLoad : List Asm := A.li 1 2 :: A.lw 2 0 1 :: A.ebreak :: .nil
+def Prog.trapStore : List Asm := A.li 1 1 :: A.sh 2 0 1 :: A.ebreak :: .nil
+def Prog.trapJump : List Asm := A.li 1 6 :: A.jalr 0 1 0 :: A.ebreak :: .nil
+def Prog.trapIllegal : List Asm := A.nop :: Asm.word 0 :: .nil
+def Prog.trapEcall : List Asm := A.nop :: A.ecall :: .nil
+def Prog.x16 : List Asm := A.li 16 5 :: A.ebreak :: .nil
+
+-- blink: a counter on the output port, a delay between steps (for the board)
+def Prog.blink : List Asm :=
+  P.port :: A.li 1 0 ::
+  A.label "top" :: P.out 1 :: A.addi 1 1 1 :: A.li 2 1000000 ::
+  A.label "wait" :: A.addi 2 2 (-1) :: A.bnez 2 "wait" :: A.j "top" :: .nil
