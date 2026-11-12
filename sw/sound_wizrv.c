@@ -36,7 +36,7 @@ static int mus_sample(void);
 
 /* one mixed sample: the sum of the channels, each (s - 128) * vol / 128, clipped */
 static uint8_t mix1(void) {
-  int acc = mus_sample();
+  int acc = 0, music = mus_sample();
   for (int i = 0; i < NCH; i++) {
     chan_t *c = &ch[i];
     if (!c->data) continue;
@@ -47,6 +47,7 @@ static uint8_t mix1(void) {
 #endif
     c->pos += c->step;
   }
+  acc = music * 2 + acc * 3 / 5;   /* the balance for the piezo: music × 2, effects × 0.6 */
   /* the master gain (× 1.5), then a soft limit: linear to ±80, above that compressed
      smoothly towards ±127 (no hard wrap or flat clipping on loud mixes) */
   int x = acc * 3 / 2, m = x < 0 ? -x : x;
