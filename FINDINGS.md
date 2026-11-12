@@ -125,6 +125,20 @@ loop of `coreStep` (after #207): 100 cycles 0.04 s, 1 000 cycles 0.53 s, 4 000 c
 3.7 s (one run each), although the program stops after 76 cycles. Long runs here use
 the netlist in `Circuit.simFast` (#228) instead.
 
+### H5. One clock: no PLL, no clock divider, no multicycle paths (gap)
+
+On the Arty (xc7a35t, nextpnr-xilinx via artix-target's flow) the RV32IM board design
+reached 79 MHz against the 100 MHz oscillator: the execute path (register read data,
+the 34-bit adder, the result multiplexer, the register file's write port) is 12.6 ns,
+9.1 of it routing. The usual fixes are a slower clock from an MMCM/PLL or a multicycle
+constraint; the HDL has a single implicit clock and no way to instantiate a primitive
+(MMCME2, PLLE2, BUFG), and the XDC emitter knows no timing exceptions. Here: the whole
+design runs at half rate under a clock enable (`Circuit.half` in src/Rv/Board.wiz:
+`Circuit.withEnable` and a toggle flip-flop), so every register-to-register path has
+two periods, and the UART divider is computed for 50 MHz. The timing report still
+checks those paths against 10 ns. Wanted: black-box instances of vendor primitives (a
+PLL, at least), more than one clock domain, or `set_multicycle_path` from the enable.
+
 ## Compiler and run time
 
 ### S1. A program that imports the core takes 12 to 15 minutes to compile (slow)
@@ -137,6 +151,17 @@ only runs `coreStep` took 15:48 (845 s CPU) before the link. The IR is 35 000 li
 is `Hw.snd` applied k times, with the type codes rebuilt in every one; main reports
 this is about n^2.7 in the number of fields, and an agent is making `deriving Bundle`
 emit a chain of lets). `decode` (22 fields) is 2 300 lines, `St.pack` 1 900.
+
+Later, with the core grown (M extension, 23-field state, the input and output
+bundles) and the linear `deriving Bundle` of agent/bundle-unpack in the library: the
+same 25-line loop took 35:00 (1992 s CPU) to compile, and `grail test long`
+(tests/long.wiz: the core and the Arty board design in `Circuit.simFast`, compiled)
+did not get through the IR step within grail's 30-minute job limit ("timed out after
+1800 s … and printed nothing"), on a loaded machine. Reported to bundle-unpack (who
+suspects the smaller unpack is now inlined into `coreStep` and blows up a later pass).
+So the long runs are not in the test suite yet; the Arty demo's RTL was checked
+instead by artix-target in Icarus Verilog (3 M cycles, the banner, the self-test and
+the primes decoded from the TX line).
 
 ### S2. The compiled value simulation is slower than the kernel's evaluator (slow)
 
@@ -177,7 +202,10 @@ same. Seen with a type error in `src/Rv/Lockstep.wiz`:
 1 passed, 0 failed (0 recorded passes)
 ```
 
-Wanted: a failed check is a failure, with or without `--update`.
+Wanted: a failed check is a failure, with or without `--update`. It happened again
+with a job that timed out: `grail test long --update` printed `✓ tests/long.wiz
+(updated)` and recorded "error: timed out after 1800.000 s (its process group was
+killed), and printed nothing" as the expected output.
 
 ## Assembler, in passing
 

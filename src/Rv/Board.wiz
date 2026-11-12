@@ -38,8 +38,9 @@ def Icestick.pins : List Pin :=
 -- input port its receiver (a one-byte buffer: a byte that arrives while one is waiting
 -- replaces it), 115473 baud from the 100 MHz clock (`n` = 866 cycles per bit: the
 -- FT2232's "115200" is 3 MHz / 26 = 115384.6 baud, and the board must not be slower;
--- wiz-arty's src/Arty/Designs.wiz). BTN0 resets the core (the memory keeps what the
--- program wrote). LD4 blinks (a heartbeat), LD5 … LD7 show the trap code.
+-- wiz-arty's src/Arty/Designs.wiz). BTN0 resets the core (PC, phase, trap; the memory and
+-- the registers keep their contents). LD4 blinks (a heartbeat), LD5: a byte was sent,
+-- LD6: an instruction was executed, LD7: stopped (a trap).
 -- Port names as in lib/Hdl/Arty.wiz (agent/artix-target).
 
 def Arty.n : Nat := 866
@@ -63,27 +64,54 @@ structure ASys (ab wb : Nat) (r : HwTy → Type) where
   full : r Bit
   byte : r B8
   beat : r B26
+  sent : r Bit    -- a byte has been sent (since reset)
+  ran : r Bit     -- an instruction has been executed (since reset)
   deriving Bundle
 
-def aStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (n : Nat) (init : HwTy.El (St.code ab wb))
+def aStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (n : Nat)
     (s : ASys ab wb r) (x : APins r) : r (HwTy.prod (ASys.code ab wb) ABoard.code) :=
   let rr := rxStep n s.rx s.sync.ff2;
   let ω got := Byte.unpack (Hw.snd rr);
   let cr := coreStep ab wb mx s.cpu (In.mk (txIdle s.tx) s.full s.byte);
   let ω o := Out.unpack (Hw.snd cr);
   let rst := bitOf 0 x.btn;
+  let ω c := St.unpack ab wb (Hw.fst cr);
+  -- the reset: the phase, the PC and the trap code only (no reset on the memories'
+  -- read registers, which are block RAM's output latches)
+  let c2 := St.mk (Hw.mux rst (Hw.lit 3 Ph.f) c.ph) (Hw.mux rst (Hw.lit 32 0) c.pc) c.q0 c.q1 c.q2 c.q3
+    c.m0 c.m1 c.m2 c.m3 c.rfa c.rfb c.x1 c.x2 c.acc c.dv c.rm c.cnt c.srd c.sf3 c.slo c.sio (Hw.mux rst (Hw.lit 3 0) c.trap);
   Hw.pair
     (ASys.pack ab wb (ASys.mk
-      (St.unpack ab wb (Hw.resetTo rst init (Hw.fst cr)))
+      c2
       (Sync.unpack (syncStep s.sync x.uart_rx))
       (Rx.unpack (Hw.fst rr))
       (Tx.unpack (txStep n s.tx o.wr o.byte))
       (Hw.mux got.valid hi (Hw.mux o.take lo s.full))
       (Hw.mux got.valid got.data s.byte)
-      (inc s.beat)))
-    (ABoard.pack (ABoard.mk s.tx.line (Hw.cat s.cpu.trap (bitOf 25 s.beat))))
+      (inc s.beat)
+      (Hw.mux rst lo (Hw.mux o.wr hi s.sent))
+      (Hw.mux rst lo (Hw.mux (isK s.cpu.ph Ph.e) hi s.ran))))
+    -- LD4: heartbeat, LD5: a byte was sent, LD6: running (an instruction executed),
+    -- LD7: stopped (a trap)
+    (ABoard.pack (ABoard.mk s.tx.line (Hw.cat (Hw.not (isK s.cpu.trap 0)) (Hw.cat s.ran (Hw.cat s.sent (bitOf 25 s.beat))))))
 
 def arty (ab wb : Nat) (mx : Bool) (n : Nat) (prog : List Nat) : Circuit APins.code ABoard.code :=
   Circuit.bundled (ASys.bundle ab wb) APins.bundle ABoard.bundle
-    (ASys.mk (St.init ab wb prog) Sync.init Rx.init Tx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 26 0))
-    (aStep ab wb mx n (Bundle.toEl (St.bundle ab wb) (St.init ab wb prog)))
+    (ASys.mk (St.init ab wb prog) Sync.init Rx.init Tx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 26 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0))
+    (aStep ab wb mx n)
+
+-- Half rate: every register of `c` (and every memory write) is enabled in every other
+-- cycle, by a toggle flip-flop (`half`), so that each path between them has two clock
+-- periods. On the Arty the core's execute path is about 12.6 ns (nextpnr, xc7a35t):
+-- too long for 100 MHz, fine for 50. The only one-period path is from the toggle to
+-- the enables.
+def Circuit.half {ω i o : HwTy} (c : Circuit i o) : Circuit i o :=
+  Circuit.mk (HwTy.prod (HwTy.named "half" HwTy.bit) c.st) (BitVec.ofNat 1 0, c.init) (fun s x =>
+    let t := Hw.untag (Hw.fst s);
+    let r := (Circuit.withEnable c).step (Hw.snd s) (Hw.pair (Hw.tag "en" t) x);
+    Hw.pair (Hw.pair (Hw.tag "half" (Hw.not t)) (Hw.fst r)) (Hw.snd r))
+
+-- the design for the board: at 50 MHz effective, 433 cycles per bit (50 MHz * 26 / 3 MHz,
+-- rounded down: 115473 baud, a little fast of the FT2232's 115384.6)
+def Arty.nHalf : Nat := 433
+def artyHalf (prog : List Nat) : Circuit APins.code ABoard.code := Circuit.half (arty 5 12 .true Arty.nHalf prog)
