@@ -146,7 +146,8 @@ and the core) with a bus to the
 Arty's 256 MB DDR3 (through the write-back cache and the controller of wiz-ddr3, written
 in Wiz too), 16 KB of on-chip RAM holding a boot loader (`Prog.boot`, written with the
 assembler), and its I/O: the UART at 1 Mbaud, a cycle counter, a sound FIFO played at
-11025 Hz as PWM on JB pin 1 (a piezo between JB1 and GND on JB5), and a 96 × 64
+11025 Hz as PWM on JB pin 1 (a piezo between JB1 and GND on JB5, or across JB1 and JB2,
+which carries the PWM's complement, for twice the swing), and a 96 × 64
 framebuffer sent continuously to a PmodOLEDrgb on JA.
 
 ```
@@ -159,7 +160,11 @@ framebuffer sent continuously to a PmodOLEDrgb on JA.
 The software (sw/, built by nix/doom.nix with the RV32IM toolchain of nix/riscv.nix):
 doomgeneric (fetched at a pinned commit), a platform layer (the frame downscaled to
 96 × 64, time from the cycle counter, keys from the UART if any; without them Doom plays
-its demos), a sound module (eight channels mixed into the FIFO), newlib's system calls
+its demos), a sound module (eight effect channels and the music mixed into the FIFO:
+music × 2, effects × 0.6, a gain of 1.5 and a soft limiter, tuned by ear on the piezo),
+a music synthesizer (sw/mus_synth.c: the MUS score drives six square-wave voices with a
+decay envelope, an octave up for the piezo, channel 15 as noise; `mustest` in
+sw/iss renders a lump to WAV on the host), newlib's system calls
 (the console on the UART, the WAD as the one file). `rvload PORT doom.bin doom1.wad`
 (app/rvload.wiz) sends both through the boot loader and starts Doom. The shareware
 `doom1.wad` is not in the repository (wad/ is ignored).

@@ -280,6 +280,13 @@ forwarding selects, and the bypass in D.
 A claim with instructions in flight (forwarding from M, from R) is the interesting one,
 and it would need a symbolic predecessor. Not done.
 
+### H11. Timing at 100 MHz is thin after the pipeline merge (note)
+
+The merged doomTop placed at 100.12 MHz. A one-gate change (JB2 = the PWM's complement)
+placed at 88.95 MHz with nextpnr's default seed and 108.17 MHz with `--seed 2`
+(`SEED=2 sh .scratch/bitn.sh`). So until rv-pipeline's timing work lands, a build has to
+be checked and maybe placed again; a failing "Max frequency" is not to be loaded.
+
 ## Compiler and run time
 
 ### S1. A program that imports the core takes 12 to 15 minutes to compile (slow)
