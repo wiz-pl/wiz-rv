@@ -2,7 +2,8 @@
    unsigned PCM at 11025 Hz, or another rate, resampled) mixed in software into one
    channel and written to the audio FIFO (hw.h: SND_DATA, played by PWM on JB pin 1).
    Each Update fills the FIFO; at a few frames a second it holds about 0.37 s.
-   Music: not played (the music module is empty). */
+   Music: the MUS lump's events drive a small synthesizer (MUSV square-wave voices with
+   a decay envelope, percussion as noise bursts), mixed in with the effects. */
 #include <stdio.h>
 #include <string.h>
 #include "doomtype.h"
@@ -31,9 +32,11 @@ static int snd_lump(sfxinfo_t *sfx) {
   return W_GetNumForName(name);
 }
 
+static int mus_sample(void);
+
 /* one mixed sample: the sum of the channels, each (s - 128) * vol / 128, clipped */
 static uint8_t mix1(void) {
-  int acc = 0;
+  int acc = mus_sample();
   for (int i = 0; i < NCH; i++) {
     chan_t *c = &ch[i];
     if (!c->data) continue;
@@ -88,18 +91,33 @@ sound_module_t DG_sound_module = {
   snd_init, snd_shutdown, snd_lump, snd_update, snd_params, snd_start, snd_stop, snd_playing, snd_cache
 };
 
-/* music: nothing */
-static boolean mus_init(void) { return true; }
-static void mus_void(void) {}
-static void mus_vol(int v) { (void)v; }
-static void *mus_register(void *d, int n) { (void)d; (void)n; return (void *)1; }
-static void mus_unregister(void *h) { (void)h; }
-static void mus_play(void *h, boolean loop) { (void)h; (void)loop; }
-static boolean mus_playing(void) { return false; }
+#include "mus_synth.c"   /* the synthesizer: MUS events, voices, mus_sample */
+
+static boolean mus_init(void) { notes_init(); mus_on = 0; for (int i = 0; i < MUSV; i++) vo[i].chan = -1; return true; }
+static void mus_shutdown(void) { mus_on = 0; }
+static void mus_vol(int v) { mus_volume = v; }
+static void mus_pause(void) { mus_paused = 1; }
+static void mus_resume(void) { mus_paused = 0; }
+/* a MUS lump: "MUS\x1a", score length, score start (16 bits each), … */
+static void *mus_register(void *d, int n) {
+  const uint8_t *b = d;
+  if (n < 16 || memcmp(b, "MUS\x1a", 4)) return NULL;
+  return d;
+}
+static void mus_unregister(void *h) { if (h == mus) { mus_on = 0; mus = NULL; } }
+static void mus_play(void *h, boolean loop) {
+  if (!h) return;
+  const uint8_t *b = h;
+  uint32_t len = b[4] | (b[5] << 8), start = b[6] | (b[7] << 8);
+  mus = b; mus_score = b + start; mus_end = mus_score + len;
+  mus_loop = loop; mus_reset(); mus_on = 1; mus_paused = 0;
+}
+static void mus_stop(void) { mus_on = 0; for (int i = 0; i < MUSV; i++) vo[i].chan = -1; }
+static boolean mus_playing(void) { return mus_on; }
 
 music_module_t DG_music_module = {
   devices, sizeof devices / sizeof devices[0],
-  mus_init, mus_void, mus_vol, mus_void, mus_void, mus_register, mus_unregister, mus_play, mus_void, mus_playing, NULL
+  mus_init, mus_shutdown, mus_vol, mus_pause, mus_resume, mus_register, mus_unregister, mus_play, mus_stop, mus_playing, NULL
 };
 
 /* i_sound.c binds these settings (they belong to the SDL module elsewhere) */
