@@ -1,0 +1,18 @@
+import PipeProofs.Base
+-- ORI, field by field: the three cycles with D presenting the word as a hit (`Qp.G`,
+-- the step function `pipeStepW` with D's word and hit given) agree with the specification
+-- in each observed value. (The claim in the form of Xor.wiz, `Qp.ok` with one `rfl` of the
+-- whole record, went over heavy's 5 GB memory cap for the immediate forms; each field
+-- takes seconds. FINDINGS.md, H10.)
+def Qp.ori_npc (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.ori 4 4 1365)) m0 m1 m2 m3 ea eb mres rval) (BitVec.ofNat 32 (Qp.w (A.ori 4 4 1365)), BitVec.ofNat 1 1)).npc = (Qp.spec a (Qp.w (A.ori 4 4 1365)) 4).npc := rfl
+def Qp.ori_pc (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.ori 4 4 1365)) m0 m1 m2 m3 ea eb mres rval) (BitVec.ofNat 32 (Qp.w (A.ori 4 4 1365)), BitVec.ofNat 1 1)).pc = (Qp.spec a (Qp.w (A.ori 4 4 1365)) 4).pc := rfl
+def Qp.ori_v (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.ori 4 4 1365)) m0 m1 m2 m3 ea eb mres rval) (BitVec.ofNat 32 (Qp.w (A.ori 4 4 1365)), BitVec.ofNat 1 1)).v = (Qp.spec a (Qp.w (A.ori 4 4 1365)) 4).v := rfl
+def Qp.ori_we (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.ori 4 4 1365)) m0 m1 m2 m3 ea eb mres rval) (BitVec.ofNat 32 (Qp.w (A.ori 4 4 1365)), BitVec.ofNat 1 1)).we = (Qp.spec a (Qp.w (A.ori 4 4 1365)) 4).we := rfl
+def Qp.ori_rd (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.ori 4 4 1365)) m0 m1 m2 m3 ea eb mres rval) (BitVec.ofNat 32 (Qp.w (A.ori 4 4 1365)), BitVec.ofNat 1 1)).rd = (Qp.spec a (Qp.w (A.ori 4 4 1365)) 4).rd := rfl
+def Qp.ori_val (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.ori 4 4 1365)) m0 m1 m2 m3 ea eb mres rval) (BitVec.ofNat 32 (Qp.w (A.ori 4 4 1365)), BitVec.ofNat 1 1)).val = (Qp.spec a (Qp.w (A.ori 4 4 1365)) 4).val := rfl

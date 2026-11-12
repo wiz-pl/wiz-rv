@@ -4,3 +4,4 @@ build/
 grail.local.wiz
 result
 wad/
+proofs/PipeProofs/*.log

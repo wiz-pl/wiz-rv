@@ -1,0 +1,92 @@
+import Rv.Pipe
+import Rv.Asm
+-- Kernel-checked single-instruction proofs for the pipelined core (src/Rv/Pipe.wiz), at
+-- retirement: the RV32E core (16 registers, 2 KB), with an instruction word in D and
+-- the stages behind it empty (E, M and R bubbles, no divider, bus or store buffer
+-- busy), is after one cycle fetching the specification's next PC, and after three
+-- cycles has the instruction in R, retiring (valid, writing rd) with the
+-- specification's value for rd and the instruction's PC. The architectural state is
+-- symbolic: any PC, any registers (both copies of the register file hold them), any
+-- on-chip memory (both copies); so are the data the bubbles leave in E, M and R
+-- (`ea`, `eb`, `mres`, `rval`: forwarding must not pick them up). The other leftovers
+-- are fixed at 0. What D presents is a hypothesis (`Pp.dWord`, `Pp.dHit`: the word, a
+-- hit), moved into the first cycle by a generic lemma (`Qp.ok`), as in
+-- src/Rv/Proofs.wiz.
+--
+-- One instruction per file (proofs/PipeProofs/Xor.wiz …), each about 20 minutes of `wiz
+-- check`: the `rfl` of the six observed values at the instruction's state is slow as a
+-- whole (FINDINGS.md, H10); scripts/pipe-proofs.sh checks them all. Not part of the
+-- library (`grail build` would take hours).
+
+def Qp.wb : Nat := 9
+def Qp.cfg : Cfg := Cfg.rv32e 11
+def Qp.rf (a : Arch) : BitVec 4 → BitVec 32 := fun (i : BitVec 4) => a.regs (BitVec.ofNat 5 i.toNat)
+def Qp.w (i : Asm) : Nat := Rv.wordAt (Asm.assemble (.cons i .nil)) 0
+def Qp.b (n : Nat) : BitVec n := BitVec.ofNat n 0
+def Qp.b8 (w k : Nat) : BitVec 8 := BitVec.ofNat 8 (Rv.bits w (8 * k) 8)
+def Qp.zm (aw dw : Nat) : BitVec aw → BitVec dw := fun (i : BitVec aw) => BitVec.ofNat dw 0
+
+-- the core with `w` in D at the PC (the on-chip read registers hold its bytes), the
+-- stages behind it empty
+def Qp.at (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) : PpSt 4 9 HwTy.El :=
+  PpSt.mk
+    (PpFe.mk a.pc (BitVec.ofNat 1 1) (Qp.b 2) (Qp.b 32) (Qp.b 1) (Qp.b 32))
+    (PpMem.mk m0 m1 m2 m3 m0 m1 m2 m3 (Qp.b8 w 0) (Qp.b8 w 1) (Qp.b8 w 2) (Qp.b8 w 3) (Qp.b 8) (Qp.b 8) (Qp.b 8) (Qp.b 8)
+      (Qp.rf a) (Qp.rf a)
+      (Qp.zm (L1.bits 9) 128) (Qp.zm (L1.bits 9) (L1.tagW 9)) (Qp.zm (L1.bits 9) (L1.tagW 9)) (Qp.b 128) (Qp.b (L1.tagW 9)) (Qp.b (L1.tagW 9))
+      (Qp.zm (L1.bits 9) 128) (Qp.zm (L1.bits 9) (L1.tagW 9)) (Qp.b 128) (Qp.b (L1.tagW 9)))
+    (PpWr.mk (Qp.b 4) (Qp.b 9) (Qp.b 32) (Qp.b 4) (Qp.b 9) (Qp.b 32)
+      (Qp.b 1) (Qp.b 1) (Qp.b (L1.bits 9)) (Qp.b 128) (Qp.b (L1.tagW 9)) (Qp.b 1) (Qp.b (L1.bits 9)) (Qp.b 128)
+      (Qp.b 1) (Qp.b 1) (Qp.b (L1.bits 9)) (Qp.b 128) (Qp.b (L1.tagW 9)))
+    (PpE.mk (Qp.b 1) (Qp.b 1) (Qp.b 32) (Qp.b 32) (Qp.b 32) ea eb
+      (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1)
+      (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 4) (Qp.b 1))
+    (PpM.mk (Qp.b 1) (Qp.b 1) (Qp.b 32) (Qp.b 5) (Qp.b 1) (Qp.b 1) mres (Qp.b 32) (Qp.b 32) (Qp.b 3)
+      (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 3) (Qp.b 1) (Qp.b 32) (Qp.b 32) (Qp.b 32) (Qp.b 32) (Qp.b 32)
+      (Qp.b 1) (Qp.b 32) (Qp.b 5) (Qp.b 1) (Qp.b 1))
+    (PpR.mk (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 32) (Qp.b 5) (Qp.b 1) rval (Qp.b 3) (Qp.b 32) (Qp.b 1))
+    (PpDiv.mk (Qp.b 1) (Qp.b 5) (Qp.b 32) (Qp.b 32) (Qp.b 32) (Qp.b 1))
+    (PpBus.mk (Qp.b 1) (Qp.b 32) (Qp.b 32) (Qp.b 4) (Qp.b 1) (Qp.b 1) (Qp.b 32) (Qp.b 32) (Qp.b 4) (Qp.b 1) (Qp.b 2)
+      (Qp.b 2) (Qp.b 128) (Qp.b 1) (Qp.b 1) (Qp.b 32))
+    (Qp.b 3)
+
+def Qp.un (v : HwTy.El (PpSt.code 4 9)) : PpSt 4 9 HwTy.El := Bundle.ofEl (PpSt.bundle 4 9) v
+def Qp.step (s : PpSt 4 9 HwTy.El) : PpSt 4 9 HwTy.El := Qp.un (pipeStep (r := HwTy.El) 4 9 .false s In.idle).1
+-- the first cycle with D's word and hit given
+def Qp.stepW (q : BitVec 32 × BitVec 1) (s : PpSt 4 9 HwTy.El) : PpSt 4 9 HwTy.El :=
+  Qp.un (pipeStepW (r := HwTy.El) 4 9 .false q.1 q.2 s In.idle).1
+
+-- what is compared: the next fetch address after one cycle; after three, R's PC,
+-- whether it retires writing rd (valid, write enable, rd), and the value
+structure Qp.Obs where
+  npc : BitVec 32
+  pc : BitVec 32
+  v : BitVec 1
+  we : BitVec 1
+  rd : BitVec 5
+  val : BitVec 32
+
+def Qp.obs (s1 s3 : PpSt 4 9 HwTy.El) : Qp.Obs := Qp.Obs.mk s1.fe.pc s3.rr.pc s3.rr.v s3.rr.we s3.rr.rd s3.rr.val
+def Qp.spec (a : Arch) (w rd : Nat) : Qp.Obs :=
+  Qp.Obs.mk (Rv.exec Qp.cfg a w).pc a.pc (BitVec.ofNat 1 1) (BitVec.ofNat 1 1) (BitVec.ofNat 5 rd) (Rv.reg (Rv.exec Qp.cfg a w) rd)
+
+-- the three cycles, as a function of D's word and hit
+def Qp.G (s : PpSt 4 9 HwTy.El) (q : BitVec 32 × BitVec 1) : Qp.Obs :=
+  Qp.obs (Qp.stepW q s) (Qp.step (Qp.step (Qp.stepW q s)))
+
+-- The glue: if D presents `w` as a hit and the three cycles on it do what the
+-- specification says, the core does.
+def Qp.ok (s : PpSt 4 9 HwTy.El) (o : Qp.Obs) (w : Nat)
+    (hE : Qp.G s (BitVec.ofNat 32 w, BitVec.ofNat 1 1) = o)
+    (h : (Pp.dWord (r := HwTy.El) 4 9 s, Pp.dHit (r := HwTy.El) 4 9 s) = (BitVec.ofNat 32 w, BitVec.ofNat 1 1)) :
+    Qp.obs (Qp.step s) (Qp.step (Qp.step (Qp.step s))) = o :=
+  Eq.trans (Eq.congrArg (Qp.G s) h) hE
+
+-- the claim for an instruction word `w` writing rd
+def Qp.Claim (w rd : Nat) : Prop :=
+  (a : Arch) → (m0 m1 m2 m3 : BitVec 9 → BitVec 8) → (ea eb mres rval : BitVec 32) →
+  (Pp.dWord (r := HwTy.El) 4 9 (Qp.at a w m0 m1 m2 m3 ea eb mres rval), Pp.dHit (r := HwTy.El) 4 9 (Qp.at a w m0 m1 m2 m3 ea eb mres rval))
+    = (BitVec.ofNat 32 w, BitVec.ofNat 1 1) →
+  Qp.obs (Qp.step (Qp.at a w m0 m1 m2 m3 ea eb mres rval)) (Qp.step (Qp.step (Qp.step (Qp.at a w m0 m1 m2 m3 ea eb mres rval))))
+    = Qp.spec a w rd
+

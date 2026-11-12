@@ -1,0 +1,4 @@
+import PipeProofs.Base
+-- OR: proofs/PipeProofs/Base.wiz has the claim
+def Qp.or_ok : Qp.Claim (Qp.w (A.or 7 14 9)) 7 := fun a m0 m1 m2 m3 ea eb mres rval h =>
+  Qp.ok (Qp.at a (Qp.w (A.or 7 14 9)) m0 m1 m2 m3 ea eb mres rval) (Qp.spec a (Qp.w (A.or 7 14 9)) 7) (Qp.w (A.or 7 14 9)) rfl h

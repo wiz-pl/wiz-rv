@@ -245,7 +245,18 @@ def Pp.tagOf {r : HwTy → Type} [Hw r] (wb : Nat) (a : r B32) : r (HwTy.bits (L
 ------------------------------------------------------------------------------------
 -- One cycle
 
-def pipeStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : PpSt ab wb r) (x : In r) :
+-- the word out of the fetch memories for the instruction in D, and whether it is there
+-- (an I-cache hit, or on-chip). (Separate from the step so that a proof can take a
+-- hypothesis about them: proofs/PipeProofs/Base.wiz.)
+def Pp.dWord {r : HwTy → Type} [Hw r] (ab wb : Nat) (s : PpSt ab wb r) : r B32 :=
+  let ω ms := s.ms;
+  let onwi : r B32 := Hw.cat ms.qi3 (Hw.cat ms.qi2 (Hw.cat ms.qi1 ms.qi0));
+  Hw.mux (Pp.isDdr s.fe.pc) (Pp.lineWord ms.icq s.fe.pc) onwi
+def Pp.dHit {r : HwTy → Type} [Hw r] (ab wb : Nat) (s : PpSt ab wb r) : r W1 :=
+  Hw.or (Hw.not (Pp.isDdr s.fe.pc)) (Hw.eq s.ms.itq (Pp.tagOf wb s.fe.pc))
+
+-- one cycle, given the D stage's word and hit
+def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) (ihit : r W1) (s : PpSt ab wb r) (x : In r) :
     r (HwTy.prod (PpSt.code ab wb) Out.code) :=
   let ω fe := s.fe;
   let ω ms := s.ms;
@@ -420,10 +431,6 @@ def pipeStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : PpSt ab w
   ----------------------------------------------------------------- D
   let fz := fe.fz;
   let run := isK fz 0;
-  let isDdrF := Pp.isDdr fe.pc;
-  let onwi : r B32 := Hw.cat ms.qi3 (Hw.cat ms.qi2 (Hw.cat ms.qi1 ms.qi0));
-  let wD : r B32 := Hw.mux isDdrF (Pp.lineWord ms.icq fe.pc) onwi;
-  let ihit := Hw.or (Hw.not isDdrF) (Hw.eq ms.itq (Pp.tagOf wb fe.pc));
   let ω d := decode ab mx wD;
   let immD := Hw.mux (Hw.or d.lui d.auipc) d.immU (Hw.mux d.jal d.immJ (Hw.mux d.branch d.immB (Hw.mux d.store d.immS d.immI)));
   let byp := fun (rs : r B5) (v : r B32) => (Hw.mux (Hw.and rr.we (Hw.eq rr.rd rs)) rr.val v : r B32);
@@ -573,6 +580,10 @@ def Pp.reset {r : HwTy → Type} [Hw r] (ab wb : Nat) (rst : r W1) (c : PpSt ab 
     (PpBus.mk (z bu.sbv) bu.sba bu.sbd bu.sbs (z bu.act) bu.we bu.addr bu.wd bu.strb (z bu.sent) (Hw.mux rst (Hw.lit 2 0) bu.gap) bu.k bu.buf
       (z bu.freq) bu.fI bu.faddr)
     (Hw.mux rst (Hw.lit 3 0) c.trap)
+
+def pipeStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : PpSt ab wb r) (x : In r) :
+    r (HwTy.prod (PpSt.code ab wb) Out.code) :=
+  pipeStepW ab wb mx (Pp.dWord ab wb s) (Pp.dHit ab wb s) s x
 
 ------------------------------------------------------------------------------------
 -- The core as a circuit, with a program in both copies of the on-chip RAM

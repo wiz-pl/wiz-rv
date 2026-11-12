@@ -1,0 +1,4 @@
+import PipeProofs.Base
+-- XOR: proofs/PipeProofs/Base.wiz has the claim
+def Qp.xor_ok : Qp.Claim (Qp.w (A.xor 3 1 2)) 3 := fun a m0 m1 m2 m3 ea eb mres rval h =>
+  Qp.ok (Qp.at a (Qp.w (A.xor 3 1 2)) m0 m1 m2 m3 ea eb mres rval) (Qp.spec a (Qp.w (A.xor 3 1 2)) 3) (Qp.w (A.xor 3 1 2)) rfl h

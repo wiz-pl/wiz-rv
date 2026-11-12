@@ -1,0 +1,4 @@
+import PipeProofs.Base
+-- AND: proofs/PipeProofs/Base.wiz has the claim
+def Qp.and_ok : Qp.Claim (Qp.w (A.and 15 15 1)) 15 := fun a m0 m1 m2 m3 ea eb mres rval h =>
+  Qp.ok (Qp.at a (Qp.w (A.and 15 15 1)) m0 m1 m2 m3 ea eb mres rval) (Qp.spec a (Qp.w (A.and 15 15 1)) 15) (Qp.w (A.and 15 15 1)) rfl h

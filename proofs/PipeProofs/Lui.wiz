@@ -1,0 +1,4 @@
+import PipeProofs.Base
+-- LUI: proofs/PipeProofs/Base.wiz has the claim
+def Qp.lui_ok : Qp.Claim (Qp.w (A.lui 1 74565)) 1 := fun a m0 m1 m2 m3 ea eb mres rval h =>
+  Qp.ok (Qp.at a (Qp.w (A.lui 1 74565)) m0 m1 m2 m3 ea eb mres rval) (Qp.spec a (Qp.w (A.lui 1 74565)) 1) (Qp.w (A.lui 1 74565)) rfl h

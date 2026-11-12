@@ -263,22 +263,44 @@ The lockstep missed it because its DDR model answers with one-cycle pulses (`Ls.
 not with the board's latches. Wanted: the lockstep's bus model through busStep and
 Edge, or the adapter's contract written down where both sides can see it.
 
-### H10. Proofs: the two-cycle claims do not carry over as they stand (gap)
+### H10. Proofs for the pipelined core, at retirement (gap, partly closed)
 
-src/Rv/Proofs.wiz still checks: it is about the multi-cycle core, which is still in the
-tree (`doomTopHalf`, the iCEstick and Arty demos).
+src/Rv/Proofs.wiz still checks. It is about the multi-cycle core, which is still in the
+tree (`doomTopHalf`, the iCEstick and Arty demos). None of its proofs apply to the
+pipelined core as they stand: they talk about phases.
 
-For the pipelined core, the natural restatement is at retirement. With D holding the
-word at the PC and E, M and R empty (bubbles), three cycles later R holds the
-instruction with the specification's PC and rd value, and a fourth writes it. XOR, OR,
-AND, XORI, ORI, ANDI, LUI and AUIPC should go through by `rfl` as before.
+proofs/PipeProofs (Base.wiz and one file per instruction, checked by
+scripts/pipe-proofs.sh) restates them at retirement for the RV32E pipelined core, 2 KB.
+The starting state has an instruction word in D, with E, M and R empty. Symbolic:
+the PC, every register (both copies of the register file), every byte of on-chip
+memory (both copies), and the data the bubbles leave behind (`ea`, `eb`, `mres`,
+`rval`, which forwarding must not pick up). The rest is fixed at 0.
 
-That needs `gate` (H2) in the places where the pipeline ANDs a control bit with data,
-now that forwarding and the stall logic add some. Examples: `Hw.and m.we …` in the
-forwarding selects, and the bypass in D.
+The claim: after one cycle the fetch address is the specification's next PC; after
+three, R holds the instruction's PC, valid and writing rd, with the specification's
+value. As in src/Rv/Proofs.wiz, what D presents is a hypothesis. That is why
+`pipeStep` is now `pipeStepW` applied to the D stage's word and hit (`Pp.dWord`,
+`Pp.dHit`), and a glue lemma (`Qp.ok`) moves the hypothesis into the first cycle.
 
-A claim with instructions in flight (forwarding from M, from R) is the interesting one,
-and it would need a symbolic predecessor. Not done.
+* XOR, OR, AND, LUI, AUIPC: the full claim, kernel-checked. Each is one `rfl` of the
+  six observed values at the instruction's state, about 20 minutes and up to 5 GB of
+  `wiz check`. That is why they are outside the library (`grail build` would take hours).
+* XORI, ORI, ANDI: one `rfl` of the whole record went over heavy's 5 GB memory cap.
+  Each of the six values on its own is an `rfl` of seconds, so these files prove each
+  observed value of the three cycles with D's word given (`Qp.G`, built on the step
+  function). What is missing is the glue from the hypothesis about D. Every way of
+  combining the six field proofs with the hypothesis took more than 20 minutes,
+  whether through the record, through projections of a lemma about any state, or
+  through a congruence lemma on the record's constructor.
+* No `gate` rewrites were needed. The places where the pipeline ANDs a control bit
+  with data are on paths the selects leave unevaluated, and the kernel's evaluation is
+  lazy enough there.
+
+Wanted: whatever makes the whole-record `rfl` cost what its fields cost. That is, the
+conversion check should share the evaluation of the state between projections, as the
+six separate `rfl`s do in seconds. A rewriting tactic would also let the glue go
+through the record's fields. A claim with instructions in flight (forwarding from M or
+R) would need a symbolic predecessor, and is not done.
 
 ### H11. Timing at 100 MHz is thin after the pipeline merge (note)
 
