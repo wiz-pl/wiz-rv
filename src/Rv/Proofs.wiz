@@ -45,3 +45,41 @@ def Pf.bytes (w : Nat) : Pf.Q :=
 -- a state with other read data
 def Pf.setQ (s : St 4 9 HwTy.El) (q : Pf.Q) : St 4 9 HwTy.El :=
   St.mk s.ph s.pc q.1 q.2.1 q.2.2.1 q.2.2.2 s.m0 s.m1 s.m2 s.m3 s.rfa s.rfb s.x1 s.x2 s.acc s.cnt s.srd s.sf3 s.slo s.trap
+
+-- the execute cycle, as a function of the read data
+def Pf.G (a : Arch) (w rd : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc : BitVec 32) (cnt srd : BitVec 5)
+    (sf3 : BitVec 3) (slo : BitVec 2) (q : Pf.Q) : BitVec 3 × BitVec 32 × BitVec 32 :=
+  Pf.core (Pf.step (Pf.setQ (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo)) q)) rd
+
+-- The glue: if memory at PC holds the instruction and the execute cycle on it does what
+-- the specification says, the two cycles from decode do. (For any `w`: the decode
+-- cycle reads the memory at PC whatever the instruction.)
+def Pf.ok (a : Arch) (w rd : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc : BitVec 32) (cnt srd : BitVec 5)
+    (sf3 : BitVec 3) (slo : BitVec 2)
+    (hE : Pf.G a w rd m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo (Pf.bytes w) = Pf.spec a w rd)
+    (h : Pf.fetchQ a m0 m1 m2 m3 = Pf.bytes w) :
+    Pf.core (Pf.step (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo))) rd = Pf.spec a w rd :=
+  Eq.trans (Eq.congrArg (Pf.G a w rd m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo) h) hE
+
+-- The claim for one instruction word `w` writing rd.
+def Pf.Claim (w rd : Nat) : Prop :=
+  (a : Arch) → (m0 m1 m2 m3 : BitVec 9 → BitVec 8) → (x1 x2 acc : BitVec 32) → (cnt srd : BitVec 5) → (sf3 : BitVec 3) → (slo : BitVec 2) →
+  Pf.fetchQ a m0 m1 m2 m3 = Pf.bytes w →
+  Pf.core (Pf.step (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo))) rd = Pf.spec a w rd
+
+def Pf.xor_ok : Pf.Claim (Pf.w (A.xor 3 1 2)) 3 := fun a m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo h =>
+  Pf.ok a (Pf.w (A.xor 3 1 2)) 3 m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo rfl h
+def Pf.or_ok : Pf.Claim (Pf.w (A.or 7 14 9)) 7 := fun a m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo h =>
+  Pf.ok a (Pf.w (A.or 7 14 9)) 7 m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo rfl h
+def Pf.and_ok : Pf.Claim (Pf.w (A.and 15 15 1)) 15 := fun a m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo h =>
+  Pf.ok a (Pf.w (A.and 15 15 1)) 15 m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo rfl h
+def Pf.xori_ok : Pf.Claim (Pf.w (A.xori 2 5 (-1))) 2 := fun a m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo h =>
+  Pf.ok a (Pf.w (A.xori 2 5 (-1))) 2 m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo rfl h
+def Pf.ori_ok : Pf.Claim (Pf.w (A.ori 4 4 1365)) 4 := fun a m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo h =>
+  Pf.ok a (Pf.w (A.ori 4 4 1365)) 4 m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo rfl h
+def Pf.andi_ok : Pf.Claim (Pf.w (A.andi 9 3 (-2048))) 9 := fun a m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo h =>
+  Pf.ok a (Pf.w (A.andi 9 3 (-2048))) 9 m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo rfl h
+def Pf.lui_ok : Pf.Claim (Pf.w (A.lui 1 74565)) 1 := fun a m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo h =>
+  Pf.ok a (Pf.w (A.lui 1 74565)) 1 m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo rfl h
+def Pf.auipc_ok : Pf.Claim (Pf.w (A.auipc 6 1048575)) 6 := fun a m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo h =>
+  Pf.ok a (Pf.w (A.auipc 6 1048575)) 6 m0 m1 m2 m3 x1 x2 acc cnt srd sf3 slo rfl h
