@@ -5,7 +5,7 @@ tests/plockstep.wiz:34:1: info: "47 instructions, 92 cycles, trap 2, out 33 67 2
 tests/plockstep.wiz:36:1: info: "40 instructions, 62 cycles, trap 2, out 7 23 104 1 2 1 0 agrees"
 tests/plockstep.wiz:38:1: info: "300 instructions, 600 cycles, trap 2, out 156 253 0 2 5 9 9 77 agrees"
 tests/plockstep.wiz:42:1: info: .cons "3 instructions, 7 cycles, trap 5, out agrees" (.cons "3 instructions, 7 cycles, trap 6, out agrees" (.cons "3 instructions, 7 cycles, trap 4, out agrees" (.cons "2 instructions, 6 cycles, trap 3, out agrees" (.cons "2 instructions, 6 cycles, trap 1, out agrees" (.cons "1 instructions, 5 cycles, trap 3, out agrees" .nil)))))
-tests/plockstep.wiz:45:1: info: "38 instructions, 118 cycles, trap 2, out 33 135 33 67 33 34 agrees"
+tests/plockstep.wiz:45:1: info: "38 instructions, 128 cycles, trap 2, out 33 135 33 67 33 34 agrees"
 tests/plockstep.wiz:47:1: info: "10 instructions, 14 cycles, trap 2, out 255 255 255 agrees"
 tests/plockstep.wiz:49:1: info: "3 instructions, 7 cycles, trap 2, out agrees"
 tests/plockstep.wiz:51:1: info: "62 instructions, 66 cycles, trap 2, out 252 246 10 128 1 0 0 1 1 0 250 251 1 149 1 0 1 0 6 4 249 69 35 0 agrees"
