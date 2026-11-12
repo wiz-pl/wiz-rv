@@ -189,7 +189,8 @@ structure DSys (h : HwTy) (r : HwTy → Type) where
   oled : RCtl 18 r
   perf : Perf r
   txGo : r W1     -- a byte for the UART's transmitter, registered (the store's strobe was on the
-  txB : r W8      -- critical path into txStep); a store waits while one is pending
+  txB : r W8      -- critical path into txStep); every I/O store waits while the transmitter
+                  -- is busy (not only the UART's: no address decode on the core's stall path)
   deriving Bundle
 
 def dSys (full : Bool) (cc : Circuit CIn.code COut.code) {r : HwTy → Type} [Hw r] (s : DSys cc.st r) (x : DIn r) :
@@ -214,7 +215,7 @@ def dSys (full : Bool) (cc : Circuit CIn.code COut.code) {r : HwTy → Type} [Hw
     (Hw.mux (isK off 112) s.perf.refreshes (Hw.mux (isK off 116) s.perf.odd (Hw.mux (isK off 120) s.perf.lastSum (Hw.mux (isK off 124) s.perf.under (Hw.mux (isK off 128)
       (Hw.cat (Hw.lit 20 0) (Hw.cat s.oled.pins.pmoden (Hw.cat s.oled.pins.vccen (Hw.cat s.oled.pins.res
         (Hw.cat s.oled.pins.dc (Hw.cat s.oled.pins.cs s.oled.sq.pc)))))) (Hw.lit 32 0))))))))))))))))));
-  let cr := Circuit.inst cc s.cpu (CIn.pack (CIn.mk (In.mk (Hw.mux uartA (Hw.and (txIdle s.tx) (Hw.not s.txGo)) (Hw.lit 1 1)) ioIn s.edge.ready s.edge.rvalid s.edge.rdata) rst));
+  let cr := Circuit.inst cc s.cpu (CIn.pack (CIn.mk (In.mk (Hw.and (txIdle s.tx) (Hw.not s.txGo)) ioIn s.edge.ready s.edge.rvalid s.edge.rdata) rst));
   let ω co := COut.unpack (Hw.snd cr);
   let ω o := co.o;
   let ω ev := co.ev;
