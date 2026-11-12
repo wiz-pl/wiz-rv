@@ -207,7 +207,15 @@ sound FIFO still have combinational write ports. Moving them needs forwarding, s
 comes with the single-rate pipeline. Repro: `git show` the commit before this entry, on
 the board; perf line "oled: refreshes R, odd K".
 
-Correction (later the same day): registering the write port is not the whole story.
+Second correction: the "fresh regfb" load that brought the picture back was in fact the
+unregistered build again. My script that restored the registered version never ran (its
+wait loop matched stale shells), and 915bb88 was committed with the combinational write.
+So on the half-rate machine: registered write meant a black panel in 4 of 4 loads, and
+combinational meant a picture with speckles. Not placement after all; the cause of the
+black panel is unexplained. The pipeline merge (bc0ac48) has the write registered again
+at 100 MHz. The paragraph below is the first, wrong, reading.
+
+First correction (later the same day): registering the write port is not the whole story.
 Across builds of the same logic the outcome changed with placement: regfb builds gave a
 black panel with K about 5 per 5 s (three placements) or a picture with K about 85 (one
 placement, as the unregistered build); an Icarus simulation of the same netlist runs
