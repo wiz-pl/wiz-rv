@@ -114,6 +114,11 @@ its demos), a sound module (eight channels mixed into the FIFO), newlib's system
 (app/rvload.wiz) sends both through the boot loader and starts Doom. The shareware
 `doom1.wad` is not in the repository (wad/ is ignored).
 
+On the board (2026-11-12, with wiz-ddr3 f99ab70): the boot loader printed "wiz-rv boot",
+"DDR ok"; rvload loaded doom.bin and the WAD into DDR and Doom started (its whole
+start-up on the console, as in the simulator). `scripts/arty-load.sh` is what was run
+(SRAM load, then rvload when the board says "DDR ok").
+
 Checked so far: the core's bus and the boot loader in the lockstep against the
 specification (with a DDR model), and compiled C (sw/ctest: gcc's output and newlib's
 string functions, 1060 instructions, generated into src/Rv/CTest.wiz by app/bin2wiz); the whole machine but the DDR controller in Icarus
