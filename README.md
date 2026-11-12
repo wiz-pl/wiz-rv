@@ -50,7 +50,7 @@ Xilinx part) and a 32-cycle restoring divider.
 * **E**: the ALU and the barrel shifter. Branches are predicted not taken and resolved
   here; a taken branch or jump is registered and redirects the fetch a cycle later, so
   it costs 2 cycles. Also here: the traps, and the four 16 × 16 partial products of the
-  multiplier (4 DSP48E1). The divider is iterative (33 cycles; E waits). The D-side
+  multiplier (4 DSP48E1). The divider is iterative (34 cycles; E waits). The D-side
   memories are read at the address.
 * **M**: the load data comes from the on-chip RAM's data copy, the D-cache (16 KB,
   write-through, no allocation on a store) or I/O. Also here: the store merge and the
