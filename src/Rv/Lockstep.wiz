@@ -11,10 +11,10 @@ import Text
 def Ls.cfg (ab wb : Nat) : Cfg := Cfg.mk ab (wb + 2) .false
 def Ls.cfgM (ab wb : Nat) (mx : Bool) : Cfg := Cfg.mk ab (wb + 2) mx
 
-def Ls.hw {ω ab wb : Nat} (v : HwTy.El (St.code ab wb)) : St ab wb HwTy.El := Bundle.ofEl (St.bundle ab wb) v
+def Ls.hw {ω ab wb : Nat} (v : HwTy.El (CoreSt.code ab wb)) : CoreSt ab wb HwTy.El := Bundle.ofEl (CoreSt.bundle ab wb) v
 
 -- the registers 1 … n - 1 that differ, as text
-def Ls.regDiff (ab wb : Nat) (s : St ab wb HwTy.El) (a : Arch) : Nat → List String
+def Ls.regDiff (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (a : Arch) : Nat → List String
   | .zero => .nil
   | .succ k =>
     let ω i := Nat.succ k;
@@ -25,18 +25,18 @@ def Ls.regDiff (ab wb : Nat) (s : St ab wb HwTy.El) (a : Arch) : Nat → List St
       else .cons ("x" ++ Nat.repr i ++ ": core " ++ Nat.repr hwA ++ "/" ++ Nat.repr hwB ++ ", spec " ++ Nat.repr sp) .nil;
     List.append (Ls.regDiff ab wb s a k) here
 
-def Ls.compare (ab wb : Nat) (s : St ab wb HwTy.El) (a : Arch) : List String :=
+def Ls.compare (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (a : Arch) : List String :=
   List.append (if Nat.beq s.pc.toNat a.pc.toNat then .nil
       else .cons ("pc: core " ++ Nat.repr s.pc.toNat ++ ", spec " ++ Nat.repr a.pc.toNat) .nil)
     (Ls.regDiff ab wb s a (Rv.pow2 ab - 1))
 
 -- the core's byte at address `x`
-def Ls.byte (ab wb : Nat) (s : St ab wb HwTy.El) (x : Nat) : Nat :=
+def Ls.byte (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (x : Nat) : Nat :=
   let ω ix := BitVec.ofNat wb (Nat.div x 4);
   let ω l := Nat.mod x 4;
   (if Nat.beq l 0 then s.m0 ix else if Nat.beq l 1 then s.m1 ix else if Nat.beq l 2 then s.m2 ix else s.m3 ix).toNat
 
-def Ls.memDiff (ab wb : Nat) (s : St ab wb HwTy.El) (a : Arch) : Nat → List String
+def Ls.memDiff (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (a : Arch) : Nat → List String
   | .zero => .nil
   | .succ k =>
     let ω hw := Ls.byte ab wb s k;
@@ -69,7 +69,7 @@ def Ls.ddrDiff (ddr : BitVec 32 → BitVec 8) (a : Arch) : Nat → List String
       else .cons ("ddr[" ++ Nat.repr k ++ "]: core " ++ Nat.repr hw ++ ", spec " ++ Nat.repr sp) .nil)
       (Ls.ddrDiff ddr a k)
 
-def Ls.finish (ab wb : Nat) (s : St ab wb HwTy.El) (a : Arch) (cyc ins : Nat) (out : List Nat) (ddr : BitVec 32 → BitVec 8) (why : List String) : Ls.Result :=
+def Ls.finish (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (a : Arch) (cyc ins : Nat) (out : List Nat) (ddr : BitVec 32 → BitVec 8) (why : List String) : Ls.Result :=
   let ω o := List.reverse out;
   let ω outP : List String := if Ls.natsEq o (List.reverse a.out) then .nil else .cons "output differs" .nil;
   let ω trapP : List String := if Nat.beq s.trap.toNat a.trap then .nil
@@ -95,7 +95,7 @@ def Ls.ddrStore (m : BitVec 32 → BitVec 8) (a : BitVec 32) (d : BitVec 32) (st
 -- `fuel` cycles at most; `a` is the specification's state for the instruction the core
 -- is on (or will decode next)
 def Ls.go (ab wb : Nat) (mx : Bool) (prog : List Nat) :
-    Nat → Nat → List Nat → List Nat → (BitVec 32 → BitVec 8) → Nat → Nat → HwTy.El (St.code ab wb) → Arch → Ls.Result
+    Nat → Nat → List Nat → List Nat → (BitVec 32 → BitVec 8) → Nat → Nat → HwTy.El (CoreSt.code ab wb) → Arch → Ls.Result
   | cyc, ins, out, inp, ddr, lat, .zero, v, a => Ls.finish ab wb (Ls.hw (ab := ab) (wb := wb) v) a cyc ins out ddr (.cons "out of cycles" .nil)
   | cyc, ins, out, inp, ddr, lat, .succ fuel, v, a =>
     let ω s := Ls.hw (ab := ab) (wb := wb) v;
@@ -127,7 +127,7 @@ def Ls.go (ab wb : Nat) (mx : Bool) (prog : List Nat) :
         Ls.go ab wb mx prog (Nat.succ cyc) ins2 out2 inp2 ddr2 lat2 fuel r.1 a2
 
 def Ls.runIn (ab wb : Nat) (mx : Bool) (prog : List Nat) (input : List Nat) (fuel : Nat) : Ls.Result :=
-  Ls.go ab wb mx prog 0 0 .nil input (fun (x : BitVec 32) => BitVec.ofNat 8 0) Ls.lat fuel (Bundle.toEl (St.bundle ab wb) (St.init ab wb prog))
+  Ls.go ab wb mx prog 0 0 .nil input (fun (x : BitVec 32) => BitVec.ofNat 8 0) Ls.lat fuel (Bundle.toEl (CoreSt.bundle ab wb) (CoreSt.init ab wb prog))
     (Rv.setInp (Arch.start (Ls.cfgM ab wb mx) prog) input)
 def Ls.run (ab wb : Nat) (mx : Bool) (prog : List Nat) (fuel : Nat) : Ls.Result :=
   Ls.runIn ab wb mx prog .nil fuel

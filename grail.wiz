@@ -4,6 +4,8 @@ import Grail
 -- `grail test`: the simulation tests under tests/.
 def package : Package := Package.new "wiz-rv"
   |> Package.lib "lib" "src"
+  |> Package.lib "ddr3" "../wiz-ddr3/src"
+  |> Package.exe "doomgen" "app/doomgen.wiz"
   |> Package.exe "rv" "app/rv.wiz"
   |> Package.exe "rvload" "app/rvload.wiz"
   |> Package.exe "bin2wiz" "app/bin2wiz.wiz"

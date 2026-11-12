@@ -16,20 +16,20 @@ def Pf.rf (a : Arch) : BitVec 4 → BitVec 32 := fun (i : BitVec 4) => a.regs (B
 
 -- the core in its decode phase on the word `w`, at the architectural state `a`
 def Pf.at (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32) (cnt srd : BitVec 5)
-    (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) : St 4 9 HwTy.El :=
-  St.mk (BitVec.ofNat 4 Ph.d) a.pc
+    (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) : CoreSt 4 9 HwTy.El :=
+  CoreSt.mk (BitVec.ofNat 4 Ph.d) a.pc
     (BitVec.ofNat 8 (Rv.bits w 0 8)) (BitVec.ofNat 8 (Rv.bits w 8 8)) (BitVec.ofNat 8 (Rv.bits w 16 8)) (BitVec.ofNat 8 (Rv.bits w 24 8))
     m0 m1 m2 m3 (Pf.rf a) (Pf.rf a) x1 x2 acc dv rm cnt srd sf3 slo sio (BitVec.ofNat 3 0)
     (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0)
     (BitVec.ofNat 4 0) (BitVec.ofNat 4 0) (BitVec.ofNat 1 0)
 
-def Pf.step (s : St 4 9 HwTy.El) : St 4 9 HwTy.El :=
-  Bundle.ofEl (St.bundle 4 9) (coreStep (r := HwTy.El) 4 9 .false s In.idle).1
+def Pf.step (s : CoreSt 4 9 HwTy.El) : CoreSt 4 9 HwTy.El :=
+  Bundle.ofEl (CoreSt.bundle 4 9) (coreStep (r := HwTy.El) 4 9 .false s In.idle).1
 
 -- what is compared: the PC and register rd (core: its register file; spec: x[rd]).
 -- (Not the phase: after the execute cycle it is D, or P when the next PC is in DDR,
 -- which depends on the symbolic PC.)
-def Pf.core (s : St 4 9 HwTy.El) (rd : Nat) : BitVec 32 × BitVec 32 :=
+def Pf.core (s : CoreSt 4 9 HwTy.El) (rd : Nat) : BitVec 32 × BitVec 32 :=
   (s.pc, s.rfa (BitVec.ofNat 4 rd))
 def Pf.spec (a : Arch) (w rd : Nat) : BitVec 32 × BitVec 32 :=
   ((Rv.exec Pf.cfg a w).pc, Rv.reg (Rv.exec Pf.cfg a w) rd)
@@ -47,8 +47,8 @@ def Pf.bytes (w : Nat) : Pf.Q :=
   (BitVec.ofNat 8 (Rv.bits w 0 8), BitVec.ofNat 8 (Rv.bits w 8 8), BitVec.ofNat 8 (Rv.bits w 16 8), BitVec.ofNat 8 (Rv.bits w 24 8))
 
 -- a state with other read data
-def Pf.setQ (s : St 4 9 HwTy.El) (q : Pf.Q) : St 4 9 HwTy.El :=
-  St.mk s.ph s.pc q.1 q.2.1 q.2.2.1 q.2.2.2 s.m0 s.m1 s.m2 s.m3 s.rfa s.rfb s.x1 s.x2 s.acc s.dv s.rm s.cnt s.srd s.sf3 s.slo s.sio s.trap s.busq s.fromBus s.badr s.bwe s.bwd s.bst s.bret s.bsent
+def Pf.setQ (s : CoreSt 4 9 HwTy.El) (q : Pf.Q) : CoreSt 4 9 HwTy.El :=
+  CoreSt.mk s.ph s.pc q.1 q.2.1 q.2.2.1 q.2.2.2 s.m0 s.m1 s.m2 s.m3 s.rfa s.rfb s.x1 s.x2 s.acc s.dv s.rm s.cnt s.srd s.sf3 s.slo s.sio s.trap s.busq s.fromBus s.badr s.bwe s.bwd s.bst s.bret s.bsent
 
 -- the execute cycle, as a function of the read data
 def Pf.G (a : Arch) (w rd : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32) (cnt srd : BitVec 5)

@@ -30,13 +30,13 @@ def B3 : HwTy := HwTy.bits 3
 def B4 : HwTy := HwTy.bits 4
 def B5 : HwTy := HwTy.bits 5
 def B7 : HwTy := HwTy.bits 7
-def B8 : HwTy := HwTy.bits 8
+def W8 : HwTy := HwTy.bits 8
 def B12 : HwTy := HwTy.bits 12
 def B16 : HwTy := HwTy.bits 16
 def B20 : HwTy := HwTy.bits 20
 def B32 : HwTy := HwTy.bits 32
 def B34 : HwTy := HwTy.bits 34
-def Bit : HwTy := HwTy.bit
+def W1 : HwTy := HwTy.bit
 
 def Ph.f : Nat := 0
 def Ph.d : Nat := 1
@@ -48,13 +48,13 @@ def Ph.x : Nat := 6   -- M: the product (one cycle)
 def Ph.v : Nat := 7   -- M: division, one quotient bit per cycle
 def Ph.p : Nat := 8   -- a bus access (DDR), until it is answered
 
-structure St (ab wb : Nat) (r : HwTy → Type) where
+structure CoreSt (ab wb : Nat) (r : HwTy → Type) where
   ph : r B4
   pc : r B32
-  q0 : r B8
-  q1 : r B8
-  q2 : r B8
-  q3 : r B8
+  q0 : r W8
+  q1 : r W8
+  q2 : r W8
+  q3 : r W8
   m0 : r (HwTy.mem wb 8)
   m1 : r (HwTy.mem wb 8)
   m2 : r (HwTy.mem wb 8)
@@ -70,16 +70,16 @@ structure St (ab wb : Nat) (r : HwTy → Type) where
   srd : r B5      -- saved for M and S: rd, funct3, the address's low bits / instr bit 30
   sf3 : r B3
   slo : r B2
-  sio : r Bit     -- saved for M: the load reads the input port
+  sio : r W1     -- saved for M: the load reads the input port
   trap : r B3
   busq : r B32    -- the bus: the word read (used instead of q while `fromBus`)
-  fromBus : r Bit
+  fromBus : r W1
   badr : r B32    -- the request: address, write, data, byte enables, the phase after
-  bwe : r Bit
+  bwe : r W1
   bwd : r B32
   bst : r B4
   bret : r B4
-  bsent : r Bit   -- the request has been taken (`ready` seen)
+  bsent : r W1   -- the request has been taken (`ready` seen)
   deriving Bundle
 
 -- what the core shows: the trap code (0 while running), and a byte written to the
@@ -89,17 +89,17 @@ structure St (ab wb : Nat) (r : HwTy → Type) where
 -- a bus request (DDR: `valid` until `ready`)
 structure Out (r : HwTy → Type) where
   trap : r B3
-  wr : r Bit
-  byte : r B8
-  rd : r Bit
+  wr : r W1
+  byte : r W8
+  rd : r W1
   ioa : r B32
   iod : r B32
-  valid : r Bit
+  valid : r W1
   addr : r B32
-  we : r Bit
+  we : r W1
   wdata : r B32
   wstrb : r B4
-  pend : r Bit    -- a bus access is in progress (phase P)
+  pend : r W1    -- a bus access is in progress (phase P)
   deriving Bundle
 
 -- what the core sees: an I/O store may go ahead (it waits in E until it may); the value
@@ -107,29 +107,29 @@ structure Out (r : HwTy → Type) where
 -- write done; `rvalid` with `rdata`: a read's data). The board latches `ready` and
 -- `rvalid` until the core has seen them (it may run at a lower rate than the bus).
 structure In (r : HwTy → Type) where
-  txReady : r Bit
+  txReady : r W1
   ioIn : r B32
-  ready : r Bit
-  rvalid : r Bit
+  ready : r W1
+  rvalid : r W1
   rdata : r B32
   deriving Bundle
 
 ------------------------------------------------------------------------------------
 -- Helpers
 
-def bitOf {r : HwTy → Type} [Hw r] {ω n : Nat} (i : Nat) (w : r (HwTy.bits n)) : r Bit := Hw.slice i 1 w
-def rep {r : HwTy → Type} [Hw r] (ω n : Nat) (b : r Bit) : r (HwTy.bits n) :=
+def bitOf {r : HwTy → Type} [Hw r] {ω n : Nat} (i : Nat) (w : r (HwTy.bits n)) : r W1 := Hw.slice i 1 w
+def rep {r : HwTy → Type} [Hw r] (ω n : Nat) (b : r W1) : r (HwTy.bits n) :=
   Hw.mux b (Hw.lit n (Nat.pow 2 n - 1)) (Hw.lit n 0)
-def isK {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) (k : Nat) : r Bit := Hw.eq x (Hw.lit n k)
+def isK {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) (k : Nat) : r W1 := Hw.eq x (Hw.lit n k)
 -- `c and x` for a control signal `c` (one that the instruction alone determines) and a
 -- data-dependent `x`, as a multiplexer: at values with `c` known it reduces whatever `x`
 -- is, which the single-instruction proofs need (`Hw.and 0 x` is stuck for a symbolic
 -- `x`; icestick-uart FINDINGS.md, C2). yosys makes the same AND of it.
-def gate {r : HwTy → Type} [Hw r] (c x : r Bit) : r Bit := Hw.mux c x (Hw.lit 1 0)
-def zext32 {r : HwTy → Type} [Hw r] (b : r Bit) : r B32 := Hw.cat (Hw.lit 31 0) b
+def gate {r : HwTy → Type} [Hw r] (c x : r W1) : r W1 := Hw.mux c x (Hw.lit 1 0)
+def zext32 {r : HwTy → Type} [Hw r] (b : r W1) : r B32 := Hw.cat (Hw.lit 31 0) b
 
 -- a register field names a register of the configuration (RV32E: below x16)
-def regOk {r : HwTy → Type} [Hw r] (ab : Nat) (f : r B5) : r Bit :=
+def regOk {r : HwTy → Type} [Hw r] (ab : Nat) (f : r B5) : r W1 :=
   if Nat.lt ab 5 then isK (bitOf 4 f) 0 else Hw.lit 1 1
 def regIx {r : HwTy → Type} [Hw r] (ab : Nat) (f : r B5) : r (HwTy.bits ab) := Hw.slice 0 ab f
 
@@ -141,20 +141,20 @@ structure Dec (r : HwTy → Type) where
   f3 : r B3
   r1 : r B5
   r2 : r B5
-  alt : r Bit      -- bit 30 (SUB, SRA, SRAI)
-  lui : r Bit
-  auipc : r Bit
-  jal : r Bit
-  jalr : r Bit
-  branch : r Bit
-  load : r Bit
-  store : r Bit
-  opimm : r Bit
-  op : r Bit
-  md : r Bit       -- M: OP with funct7 = 1
-  ecall : r Bit
-  ebreak : r Bit
-  legal : r Bit
+  alt : r W1      -- bit 30 (SUB, SRA, SRAI)
+  lui : r W1
+  auipc : r W1
+  jal : r W1
+  jalr : r W1
+  branch : r W1
+  load : r W1
+  store : r W1
+  opimm : r W1
+  op : r W1
+  md : r W1       -- M: OP with funct7 = 1
+  ecall : r W1
+  ebreak : r W1
+  legal : r W1
   immI : r B32
   immS : r B32
   immB : r B32
@@ -179,8 +179,8 @@ def decode {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (w : r B32) : Dec r
   let opimm := isK opc Op.opimm;
   let opRaw := isK opc Op.op;
   let f7one := isK (Hw.slice 25 7 w : r B7) 1;
-  let op : r Bit := if mx then Hw.and opRaw (Hw.not f7one) else opRaw;
-  let md : r Bit := if mx then Hw.and opRaw f7one else Hw.lit 1 0;
+  let op : r W1 := if mx then Hw.and opRaw (Hw.not f7one) else opRaw;
+  let md : r W1 := if mx then Hw.and opRaw f7one else Hw.lit 1 0;
   let fence := isK opc Op.fence;
   let ecall := isK w 115;
   let ebreak := isK w 1048691;
@@ -204,7 +204,7 @@ def decode {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (w : r B32) : Dec r
   let immB : r B32 := Hw.cat (rep 20 sgn) (Hw.cat (bitOf 7 w) (Hw.cat (Hw.slice 25 6 w : r (HwTy.bits 6))
       (Hw.cat (Hw.slice 8 4 w : r (HwTy.bits 4)) (Hw.lit 1 0))));
   let immU : r B32 := Hw.cat (Hw.slice 12 20 w : r B20) (Hw.lit 12 0);
-  let immJ : r B32 := Hw.cat (rep 12 sgn) (Hw.cat (Hw.slice 12 8 w : r B8) (Hw.cat (bitOf 20 w)
+  let immJ : r B32 := Hw.cat (rep 12 sgn) (Hw.cat (Hw.slice 12 8 w : r W8) (Hw.cat (bitOf 20 w)
       (Hw.cat (Hw.slice 21 10 w : r (HwTy.bits 10)) (Hw.lit 1 0))));
   Dec.mk rd f3 r1 r2 (bitOf 30 w) lui auipc jal jalr branch load store opimm op md ecall ebreak legal
     immI immS immB immU immJ
@@ -212,23 +212,23 @@ def decode {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (w : r B32) : Dec r
 ------------------------------------------------------------------------------------
 -- One cycle
 
-def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : St ab wb r) (x : In r) :
-    r (HwTy.prod (St.code ab wb) Out.code) :=
+def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab wb r) (x : In r) :
+    r (HwTy.prod (CoreSt.code ab wb) Out.code) :=
   let ph := s.ph;
   let inF := isK ph Ph.f;
   let inD := isK ph Ph.d;
   let inE := isK ph Ph.e;
   let inM := isK ph Ph.m;
   let inS := isK ph Ph.s;
-  let inX : r Bit := if mx then isK ph Ph.x else Hw.lit 1 0;
-  let inV : r Bit := if mx then isK ph Ph.v else Hw.lit 1 0;
+  let inX : r W1 := if mx then isK ph Ph.x else Hw.lit 1 0;
+  let inV : r W1 := if mx then isK ph Ph.v else Hw.lit 1 0;
   let inP := isK ph Ph.p;
   -- the word read: from block RAM (the q lanes) or from the bus
   let w : r B32 := Hw.mux s.fromBus s.busq (Hw.cat s.q3 (Hw.cat s.q2 (Hw.cat s.q1 s.q0)));
-  let wq0 : r B8 := Hw.slice 0 8 w;
-  let wq1 : r B8 := Hw.slice 8 8 w;
-  let wq2 : r B8 := Hw.slice 16 8 w;
-  let wq3 : r B8 := Hw.slice 24 8 w;
+  let wq0 : r W8 := Hw.slice 0 8 w;
+  let wq1 : r W8 := Hw.slice 8 8 w;
+  let wq2 : r W8 := Hw.slice 16 8 w;
+  let wq3 : r W8 := Hw.slice 24 8 w;
   let ω d := decode ab mx w;
   let a := s.x1;
   let rs2v := s.x2;
@@ -320,10 +320,10 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : St ab wb 
   let sh16 := isK f3 1;
   let laneOn := fun (l : Nat) => Hw.mux sb (isK lo2 l) (Hw.mux sh16 (isK (bitOf 1 sum) (Nat.div l 2)) (Hw.lit 1 1));
   let lane := fun (l : Nat) => gate st (laneOn l);
-  let d0 : r B8 := Hw.slice 0 8 rs2v;
-  let d1 : r B8 := Hw.mux sb d0 (Hw.slice 8 8 rs2v);
-  let d2 : r B8 := Hw.mux (isK f3 2) (Hw.slice 16 8 rs2v) d0;
-  let d3 : r B8 := Hw.mux sb d0 (Hw.mux sh16 d1 (Hw.slice 24 8 rs2v));
+  let d0 : r W8 := Hw.slice 0 8 rs2v;
+  let d1 : r W8 := Hw.mux sb d0 (Hw.slice 8 8 rs2v);
+  let d2 : r W8 := Hw.mux (isK f3 2) (Hw.slice 16 8 rs2v) d0;
+  let d3 : r W8 := Hw.mux sb d0 (Hw.mux sh16 d1 (Hw.slice 24 8 rs2v));
   -- the memory read: the load's address, else the next instruction's
   -- (one address for reading and writing, so that each lane is a single-port RAM: a
   -- store's read is not used, the next cycle fetches again)
@@ -346,7 +346,7 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : St ab wb 
   let rfa := Hw.memWrite s.rfa we wa wd;
   let rfb := Hw.memWrite s.rfb we wa wd;
   Hw.pair
-    (St.pack ab wb (St.mk nph
+    (CoreSt.pack ab wb (CoreSt.mk nph
       (Hw.mux goE npc s.pc)
       (Hw.memRead s.m0 rix) (Hw.memRead s.m1 rix) (Hw.memRead s.m2 rix) (Hw.memRead s.m3 rix)
       (Hw.memWrite s.m0 (lane 0) rix d0) (Hw.memWrite s.m1 (lane 1) rix d1)
@@ -381,8 +381,8 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : St ab wb 
 def Core.lane (prog : List Nat) (wb l : Nat) : HwTy.El (HwTy.mem wb 8) :=
   fun (a : BitVec wb) => BitVec.ofNat 8 (Rv.bits (Rv.wordAt prog a.toNat) (8 * l) 8)
 
-def St.init (ab wb : Nat) (prog : List Nat) : St ab wb HwTy.El :=
-  St.mk (BitVec.ofNat 4 Ph.f) (BitVec.ofNat 32 0)
+def CoreSt.init (ab wb : Nat) (prog : List Nat) : CoreSt ab wb HwTy.El :=
+  CoreSt.mk (BitVec.ofNat 4 Ph.f) (BitVec.ofNat 32 0)
     (BitVec.ofNat 8 0) (BitVec.ofNat 8 0) (BitVec.ofNat 8 0) (BitVec.ofNat 8 0)
     (Core.lane prog wb 0) (Core.lane prog wb 1) (Core.lane prog wb 2) (Core.lane prog wb 3)
     (fun (a : BitVec ab) => BitVec.ofNat 32 0) (fun (a : BitVec ab) => BitVec.ofNat 32 0)
@@ -392,8 +392,8 @@ def St.init (ab wb : Nat) (prog : List Nat) : St ab wb HwTy.El :=
     (BitVec.ofNat 4 0) (BitVec.ofNat 4 0) (BitVec.ofNat 1 0)
 
 def core (ab wb : Nat) (mx : Bool) (prog : List Nat) : Circuit In.code Out.code :=
-  Circuit.mk (St.code ab wb) (Bundle.toEl (St.bundle ab wb) (St.init ab wb prog))
-    (fun s x => coreStep ab wb mx (St.unpack ab wb s) (In.unpack x))
+  Circuit.mk (CoreSt.code ab wb) (Bundle.toEl (CoreSt.bundle ab wb) (CoreSt.init ab wb prog))
+    (fun s x => coreStep ab wb mx (CoreSt.unpack ab wb s) (In.unpack x))
 
 -- the ports with nothing attached: stores may go, loads read -1, no bus
 def In.quiet {r : HwTy → Type} [Hw r] : In r :=

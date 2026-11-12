@@ -68,6 +68,21 @@ def pairs : List Nat → List Nat
 a position counter or an `Option` accumulator, one element per call (`Asm.pack`,
 `Hex.bytesGo`, `Hex.wordsGo`).
 
+### L7. One global namespace: two packages that define the same name cannot be imported together (gap)
+
+```
+-- A/M.wiz: def Foo : Nat := 1          B/N.wiz: def Foo : Nat := 2
+import A.M
+import B.N        -- error: 'Foo' is declared by both module A.M and module B.N
+```
+
+Composing the Doom board top needs wiz-ddr3's controller and this project's core in
+one file. Both had a `St` (the controller's state, the core's), a `Tx` (two UART
+transmitters), and `Bit`/`B8` (the same definitions, `HwTy.bit` and `HwTy.bits 8`,
+still a clash). Here: renamed (`CoreSt`, `UTx`, `W1`, `W8`). Wanted: module-qualified
+names, or at least identical re-definitions accepted, or an import that hides or
+renames.
+
 ## The HDL library
 
 ### H1. Memories (#166) and the fast simulator (#199) do not compose (bug, between PRs)

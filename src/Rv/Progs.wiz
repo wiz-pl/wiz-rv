@@ -212,8 +212,9 @@ def Prog.ddr : List Asm :=
   (A.addi 6 1 256 :: A.jalr 1 6 0 :: P.out 5 :: A.ebreak :: .nil))
 
 ------------------------------------------------------------------------------------
--- The boot loader for the Doom machine (on-chip RAM at 0): it prints "wiz-rv boot",
--- then reads records from the UART:
+-- The boot loader for the Doom machine (on-chip RAM at 0): it prints "wiz-rv boot", waits
+-- for the DDR's calibration and prints "DDR ok" or "DDR fail", then reads records from
+-- the UART:
 --   'L' addr len bytes…   store len bytes from addr (addr, len: 4 bytes each, little-
 --                         endian); answers '.'
 --   'G' addr              answers '!' and jumps to addr
@@ -227,8 +228,12 @@ def Boot.get32 : List Asm :=
   A.label "get32.l" :: A.jal 5 "getb" :: A.sll 10 10 14 :: A.or 11 11 10 :: A.addi 14 14 8 :: A.li 10 32 :: A.blt 14 10 "get32.l" ::
   A.ret :: .nil
 def Prog.boot : List Asm :=
-  List.append (P.port :: A.la 12 "boot.banner" ::
-    A.label "boot.puts" :: A.lbu 10 0 12 :: A.beqz 10 "boot.loop" :: A.sb 10 0 15 :: A.addi 12 12 1 :: A.j "boot.puts" ::
+  List.append (P.port :: A.la 12 "boot.banner" :: A.li 13 0 ::
+    A.label "boot.puts" :: A.lbu 10 0 12 :: A.beqz 10 "boot.said" :: A.sb 10 0 15 :: A.addi 12 12 1 :: A.j "boot.puts" ::
+    -- after the banner: the DDR's calibration (0x80000040: wait for done or failed)
+    A.label "boot.said" :: A.bnez 13 "boot.loop" :: A.li 13 1 ::
+    A.label "boot.ddr" :: A.lw 10 64 15 :: A.beqz 10 "boot.ddr" :: A.andi 10 10 2 :: A.la 12 "boot.ok" ::
+      A.beqz 10 "boot.puts" :: A.la 12 "boot.fail" :: A.j "boot.puts" ::
     A.label "boot.loop" :: A.jal 5 "getb" :: A.li 13 76 :: A.beq 10 13 "boot.load" :: A.li 13 71 :: A.beq 10 13 "boot.go" ::
       A.j "boot.loop" ::
     A.label "boot.load" :: A.call "get32" :: A.mv 12 11 :: A.call "get32" :: A.mv 13 11 ::
@@ -236,7 +241,8 @@ def Prog.boot : List Asm :=
       A.j "boot.copy" ::
     A.label "boot.ack" :: A.li 10 46 :: A.sb 10 0 15 :: A.j "boot.loop" ::
     A.label "boot.go" :: A.call "get32" :: A.li 10 33 :: A.sb 10 0 15 :: A.jalr 0 11 0 :: .nil)
-  (List.append Boot.getb (List.append Boot.get32 (A.string "boot.banner" "wiz-rv boot\n")))
+  (List.append Boot.getb (List.append Boot.get32 (List.append (A.string "boot.banner" "wiz-rv boot\n")
+    (List.append (A.string "boot.ok" "DDR ok\n") (A.string "boot.fail" "DDR fail\n")))))
 
 -- a boot loader session: load `prog` (position-independent) at 0x40000000 and run it
 def Boot.le32 (v : Nat) : List Nat := Rv.bits v 0 8 :: Rv.bits v 8 8 :: Rv.bits v 16 8 :: Rv.bits v 24 8 :: .nil

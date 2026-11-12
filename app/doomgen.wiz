@@ -1,0 +1,86 @@
+import Rv.DoomTop
+import Rv.Progs
+import Ddr3.Tb
+import Sys
+-- `doomgen top`: write build/doom_top.v + build/doom_top.xdc (`doomTop` in wiz-ddr3's
+-- PLL wrapper, for the Arty A7-35T).
+-- `doomgen sim CYCLES`: simulate `doomSim` (the Doom machine with wiz-ddr3's behavioural
+-- DDR3 device, short waits) at values for CYCLES cycles: the boot loader, then a
+-- session that loads `Prog.hello` into DDR over the UART (1 Mbaud: 100 cycles a bit)
+-- and runs it; prints what comes back on the UART. (Not in Verilog: the device's
+-- memory is 2^24 words of 128 bits, which Verilog.emit would initialise word by word.)
+
+def say (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+def ensureDir (p : String) : EIO Unit := do
+  d ← EIO.lift (FS.isDir p);
+  match d with
+  | .true => EIO.pure ()
+  | .false => FS.createDir p
+
+-- the XDC: wiz-ddr3's (DDR3, clock, UART, LEDs) and the Pmods and BTN0 … BTN3
+def Doom.extraPins : String :=
+  Hdl.concat (Hdl.map Xdc.pinLine (List.append (Bd.vec "ja" 0 (Bd.words "G13 B11 A11 D12 D13 B18 A18 K16"))
+    (List.append (Bd.vec "jb" 0 (Bd.words "E15 E16 D15 C15 J17 J18 K15 J15")) (Bd.vec "btn" 0 (Bd.words "D9 C9 B9 B8")))))
+
+-- the RX line: 120000 cycles idle (the calibration first), then each byte as 8N1 at 100 cycles a bit
+def Sim.rxBits (b : Nat) : List Nat := .cons 0 (List.append (Hdl.map (fun (k : Nat) => Nat.mod (Nat.div b (Nat.pow 2 k)) 2)
+  (.cons 0 (.cons 1 (.cons 2 (.cons 3 (.cons 4 (.cons 5 (.cons 6 (.cons 7 .nil))))))))) (.cons 1 .nil))
+def Sim.bits : List Nat → List Nat
+  | .nil => .nil
+  | .cons b bs => List.append (Sim.rxBits b) (Sim.bits bs)
+
+-- the UART receiver on the TX line: a falling edge, then the middle of each bit
+structure UDec where
+  ph : Nat     -- 0 idle; else cycles to the next sample
+  k : Nat      -- bits so far
+  v : Nat
+  out : List Nat
+def UDec.step (d : UDec) (line : Nat) : UDec :=
+  if Nat.beq d.ph 0 then (if Nat.beq line 0 then UDec.mk 150 0 0 d.out else d)
+  else if Nat.beq d.ph 1 then
+    (if Nat.lt d.k 8 then UDec.mk 100 (Nat.succ d.k) (d.v + line * Nat.pow 2 d.k) d.out
+     else UDec.mk 0 0 0 (.cons d.v d.out))
+  else UDec.mk (d.ph - 1) d.k d.v d.out
+
+def Sim.go (c : Circuit SimIn.code TOut.code) : Nat → Nat → List Nat → HwTy.El c.st → UDec → UDec
+  | .zero, _, _, _, d => d
+  | .succ n, cyc, rx, s, d =>
+    let ω bit : Nat := (if Nat.lt cyc 120000 then 1 else (match rx with
+      | .cons b _ => b
+      | .nil => 1));
+    let ω rx2 : List Nat := if Bool.and (Bool.not (Nat.lt cyc 120000)) (Nat.beq (Nat.mod (cyc - 120000) 100) 99)
+      then (match rx with
+        | .cons _ bs => bs
+        | .nil => .nil) else rx;
+    let ω r := Circuit.stepEl c s (Bundle.toEl SimIn.bundle (SimIn.mk (BitVec.ofNat 1 bit)));
+    let ω o := Bundle.ofEl TOut.bundle r.2;
+    Sim.go c n (Nat.succ cyc) rx2 r.1 (UDec.step d o.uart_tx.toNat)
+
+def Sim.text : List Nat → String
+  | .nil => ""
+  | .cons c cs => Sim.text cs ++ String.mk (.cons (Char.mk (if Nat.beq c 13 then 92 else c)) .nil)
+
+def toNatS : List Char → Nat → Nat
+  | .nil, acc => acc
+  | .cons c cs, acc => toNatS cs (acc * 10 + (Char.code c - 48))
+
+def sim (n : Nat) : EIO Unit := do
+  let c := doomSim Timing.sim MParams.default (Asm.assemble Prog.boot);
+  let d := Sim.go c n 0 (Sim.bits (Boot.session (Asm.assemble Prog.hello))) c.init (UDec.mk 0 0 0 .nil);
+  say ("doom_sim, " ++ Nat.repr n ++ " cycles: \"" ++ Sim.text d.out ++ "\"")
+
+def top : EIO Unit := do
+  ensureDir "build";
+  let prog := Asm.assemble Prog.boot;
+  let nt := Circuit.netlist "doom_top" (doomTop Timing.arty prog);
+  say ("doom_top: " ++ Nat.repr (List.length nt.nodes) ++ " nodes, errors: " ++ Nat.repr (List.length nt.errors));
+  FS.writeFile "build/doom_top.v" (Verilog.emitTop nt Board.clocking);
+  FS.writeFile "build/doom_top.xdc" (Board.xdc ++ Doom.extraPins)
+
+def main : IO Unit := EIO.toIO (do
+  args ← EIO.lift IO.args;
+  match args with
+  | .cons "top" .nil => top
+  | .cons "sim" (.cons n .nil) => sim (toNatS (String.chars n) 0)
+  | _ => EIO.fail "usage: doomgen top | sim CYCLES")

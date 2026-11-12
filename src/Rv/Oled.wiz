@@ -47,17 +47,17 @@ def Rom.tree {r : HwTy → Type} [Hw r] (w : Nat) {ω n : Nat} (a : r (HwTy.bits
   Rom.at w a (RomT.build k es)
 
 structure Spi (r : HwTy → Type) where
-  sclk : r Bit
-  mosi : r Bit
+  sclk : r W1
+  mosi : r W1
   sh : r D7
   cnt : r D4
   deriving Bundle
 
 def Spi.init : Spi HwTy.El := Spi.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 7 0) (BitVec.ofNat 4 0)
 
-def spiReady {r : HwTy → Type} [Hw r] (s : Spi r) : r Bit := eqLit s.cnt 0
+def spiReady {r : HwTy → Type} [Hw r] (s : Spi r) : r W1 := eqLit s.cnt 0
 
-def spiStep {r : HwTy → Type} [Hw r] (s : Spi r) (load : r Bit) (d : r D8) : r Spi.code :=
+def spiStep {r : HwTy → Type} [Hw r] (s : Spi r) (load : r W1) (d : r D8) : r Spi.code :=
   let busy := bnot (spiReady s);
   let go := band (spiReady s) load;
   let fall := band busy s.sclk;
@@ -229,23 +229,23 @@ def RProg.cmdsOf : List RStep → List Nat
 -- the sequencer: program counter, the wait
 structure RSeq (r : HwTy → Type) where
   pc : r D7w
-  armed : r Bit
+  armed : r W1
   wait : r D21
   deriving Bundle
 
 -- the pins, as levels: PMODEN, VCCEN (high: on), RES, CS, D/C
 structure RPins (r : HwTy → Type) where
-  pmoden : r Bit
-  vccen : r Bit
-  res : r Bit
-  cs : r Bit
-  dc : r Bit
+  pmoden : r W1
+  vccen : r W1
+  res : r W1
+  cs : r W1
+  dc : r W1
   deriving Bundle
 
 -- the frame timer, a tick not yet taken, the frame counter
 structure RFrame (fl : Nat) (r : HwTy → Type) where
   timer : r (HwTy.bits fl)
-  pend : r Bit
+  pend : r W1
   t : r D11
   deriving Bundle
 
@@ -253,7 +253,7 @@ structure RFrame (fl : Nat) (r : HwTy → Type) where
 structure RGen (r : HwTy → Type) where
   x : r D7w
   y : r D6
-  half : r Bit
+  half : r W1
   lo : r D8
   deriving Bundle
 
@@ -272,21 +272,21 @@ def RCtl.init (c : RgbCfg) : RCtl c.frameLog HwTy.El :=
     (RGen.mk (BitVec.ofNat 7 0) (BitVec.ofNat 6 0) (BitVec.ofNat 1 0) (BitVec.ofNat 8 0))
     Spi.init
 
-def rctlShowing {r : HwTy → Type} [Hw r] {ω fl : Nat} (s : RCtl fl r) : r Bit :=
+def rctlShowing {r : HwTy → Type} [Hw r] {ω fl : Nat} (s : RCtl fl r) : r W1 :=
   bnot (Hw.ult s.sq.pc (Hw.lit 7 RProg.frameAt))
 
 -- the step's decoded entry
 structure ROp (r : HwTy → Type) where
-  cmd : r Bit
-  vdd : r Bit
-  resLo : r Bit
-  resHi : r Bit
-  vcc : r Bit
-  wait : r Bit
-  blank : r Bit
-  frame : r Bit
-  pix : r Bit
-  again : r Bit
+  cmd : r W1
+  vdd : r W1
+  resLo : r W1
+  resHi : r W1
+  vcc : r W1
+  wait : r W1
+  blank : r W1
+  frame : r W1
+  pix : r W1
+  again : r W1
 
 def ROp.of {r : HwTy → Type} [Hw r] (e : r D9) : ROp r :=
   let code := Hw.slice 0 4 e;

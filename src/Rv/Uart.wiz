@@ -7,22 +7,22 @@ import Rv.Core
 def B9 : HwTy := HwTy.bits 9
 def B10 : HwTy := HwTy.bits 10
 
-def hi {r : HwTy → Type} [Hw r] : r Bit := Hw.lit 1 1
-def lo {r : HwTy → Type} [Hw r] : r Bit := Hw.lit 1 0
-def band {r : HwTy → Type} [Hw r] (a b : r Bit) : r Bit := Hw.and a b
-def bor {r : HwTy → Type} [Hw r] (a b : r Bit) : r Bit := Hw.or a b
-def bnot {r : HwTy → Type} [Hw r] (a : r Bit) : r Bit := Hw.not a
-def eqLit {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) (k : Nat) : r Bit := Hw.eq x (Hw.lit n k)
+def hi {r : HwTy → Type} [Hw r] : r W1 := Hw.lit 1 1
+def lo {r : HwTy → Type} [Hw r] : r W1 := Hw.lit 1 0
+def band {r : HwTy → Type} [Hw r] (a b : r W1) : r W1 := Hw.and a b
+def bor {r : HwTy → Type} [Hw r] (a b : r W1) : r W1 := Hw.or a b
+def bnot {r : HwTy → Type} [Hw r] (a : r W1) : r W1 := Hw.not a
+def eqLit {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) (k : Nat) : r W1 := Hw.eq x (Hw.lit n k)
 def inc {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) : r (HwTy.bits n) := Hw.add x (Hw.lit n 1)
 def dec {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) : r (HwTy.bits n) := Hw.sub x (Hw.lit n 1)
-def frame9 {r : HwTy → Type} [Hw r] (d : r B8) : r B9 := Hw.cat (Hw.lit 1 1) d
-def shiftIn9 {r : HwTy → Type} [Hw r] (x : r B9) (b : r Bit) : r B9 := Hw.cat b (Hw.slice 1 8 x)
-def shiftIn8 {r : HwTy → Type} [Hw r] (x : r B8) (b : r Bit) : r B8 := Hw.cat b (Hw.slice 1 7 x)
+def frame9 {r : HwTy → Type} [Hw r] (d : r W8) : r B9 := Hw.cat (Hw.lit 1 1) d
+def shiftIn9 {r : HwTy → Type} [Hw r] (x : r B9) (b : r W1) : r B9 := Hw.cat b (Hw.slice 1 8 x)
+def shiftIn8 {r : HwTy → Type} [Hw r] (x : r W8) (b : r W1) : r W8 := Hw.cat b (Hw.slice 1 7 x)
 
 -- The baud divider: a 10-bit counter that counts 0 … n-1 (n ≤ 1024); `tick` is high in
 -- the last cycle of each period.
 
-def baudStep {r : HwTy → Type} [Hw r] (n : Nat) (c : r B10) : r (HwTy.prod B10 Bit) :=
+def baudStep {r : HwTy → Type} [Hw r] (n : Nat) (c : r B10) : r (HwTy.prod B10 W1) :=
   let t := Hw.label "tick" (eqLit c (n - 1));
   Hw.pair (Hw.mux t (Hw.lit 10 0) (inc c)) t
 
@@ -34,23 +34,23 @@ def baudStep {r : HwTy → Type} [Hw r] (n : Nat) (c : r B10) : r (HwTy.prod B10
 --
 -- `start` with `data` is taken when idle and ignored otherwise.
 
-structure Tx (r : HwTy → Type) where
-  line : r Bit
+structure UTx (r : HwTy → Type) where
+  line : r W1
   left : r B4
   cnt : r B10
   sh : r B9
   deriving Bundle
 
-def Tx.init : Tx HwTy.El := Tx.mk (BitVec.ofNat 1 1) (BitVec.ofNat 4 0) (BitVec.ofNat 10 0) (BitVec.ofNat 9 511)
+def UTx.init : UTx HwTy.El := UTx.mk (BitVec.ofNat 1 1) (BitVec.ofNat 4 0) (BitVec.ofNat 10 0) (BitVec.ofNat 9 511)
 
-def txIdle {r : HwTy → Type} [Hw r] (s : Tx r) : r Bit := eqLit s.left 0
+def txIdle {r : HwTy → Type} [Hw r] (s : UTx r) : r W1 := eqLit s.left 0
 
-def txStep {r : HwTy → Type} [Hw r] (n : Nat) (s : Tx r) (start : r Bit) (d : r B8) : r Tx.code :=
+def txStep {r : HwTy → Type} [Hw r] (n : Nat) (s : UTx r) (start : r W1) (d : r W8) : r UTx.code :=
   let idle := txIdle s;
   let go := band idle start;
   let b := baudStep n s.cnt;
   let tick := band (bnot idle) (Hw.snd b);
-  Tx.pack (Tx.mk
+  UTx.pack (UTx.mk
     (Hw.mux go lo (Hw.mux tick (Hw.slice 0 1 s.sh) s.line))
     (Hw.mux go (Hw.lit 4 10) (Hw.mux tick (dec s.left) s.left))
     (Hw.mux go (Hw.lit 10 0) (Hw.fst b))
@@ -68,17 +68,17 @@ def txStep {r : HwTy → Type} [Hw r] (n : Nat) (s : Tx r) (start : r Bit) (d : 
 structure Rx (r : HwTy → Type) where
   ph : r B4
   cnt : r B10
-  sh : r B8
+  sh : r W8
   deriving Bundle
 
 structure Byte (r : HwTy → Type) where
-  valid : r Bit
-  data : r B8
+  valid : r W1
+  data : r W8
   deriving Bundle
 
 def Rx.init : Rx HwTy.El := Rx.mk (BitVec.ofNat 4 0) (BitVec.ofNat 10 0) (BitVec.ofNat 8 0)
 
-def rxStep {r : HwTy → Type} [Hw r] (n : Nat) (s : Rx r) (rx : r Bit) : r (HwTy.prod Rx.code Byte.code) :=
+def rxStep {r : HwTy → Type} [Hw r] (n : Nat) (s : Rx r) (rx : r W1) : r (HwTy.prod Rx.code Byte.code) :=
   let idle := eqLit s.ph 0;
   let inStart := eqLit s.ph 10;
   let inStop := eqLit s.ph 1;
@@ -96,11 +96,11 @@ def rxStep {r : HwTy → Type} [Hw r] (n : Nat) (s : Rx r) (rx : r Bit) : r (HwT
 -- two flip-flops before anything looks at it. Both idle high.
 
 structure Sync (r : HwTy → Type) where
-  ff1 : r Bit
-  ff2 : r Bit
+  ff1 : r W1
+  ff2 : r W1
   deriving Bundle
 
 def Sync.init : Sync HwTy.El := Sync.mk (BitVec.ofNat 1 1) (BitVec.ofNat 1 1)
-def syncStep {r : HwTy → Type} [Hw r] (s : Sync r) (pin : r Bit) : r Sync.code := Sync.pack (Sync.mk pin s.ff1)
+def syncStep {r : HwTy → Type} [Hw r] (s : Sync r) (pin : r W1) : r Sync.code := Sync.pack (Sync.mk pin s.ff1)
 
 ------------------------------------------------------------------------------------

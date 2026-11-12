@@ -9,6 +9,7 @@ import Rv.Board
 --   0x80000014  cycles, high
 --   0x80000030  sound data     write: an 8-bit unsigned sample into the FIFO (4096)
 --   0x80000034  sound free     read: free places in the FIFO
+--   0x80000040  DDR status     read: bit 0 calibration done, bit 1 it failed
 --   0x81000000  framebuffer    96 × 64 RGB 565, halfword stores (sw/hw.h)
 --
 -- The sound FIFO is played at 11025 Hz (a sample every 4535 cycles) as 8-bit PWM on
@@ -29,34 +30,35 @@ def Doom.baud : Nat := 50
 def Doom.sndDiv : Nat := 4535
 
 structure DIn (r : HwTy → Type) where
-  uart_rx : r Bit
+  uart_rx : r W1
   btn : r B4
-  ready : r Bit
-  rvalid : r Bit
+  ready : r W1
+  rvalid : r W1
   rdata : r B32
+  ddr : r B2      -- DDR calibration: bit 0 done, bit 1 failed
   deriving Bundle
 
 structure DOut (r : HwTy → Type) where
-  uart_tx : r Bit
+  uart_tx : r W1
   led : r B4
-  ja : r B8
-  jb : r B8
-  valid : r Bit
+  ja : r W8
+  jb : r W8
+  valid : r W1
   addr : r B32
-  we : r Bit
+  we : r W1
   wdata : r B32
   wstrb : r B4
-  pend : r Bit
+  pend : r W1
   deriving Bundle
 
 structure Snd (r : HwTy → Type) where
   fifo : r (HwTy.mem 12 8)
   wp : r B13
   rp : r B13
-  smp : r B8      -- the FIFO's read register (at rp)
-  cur : r B8      -- the sample playing
+  smp : r W8      -- the FIFO's read register (at rp)
+  cur : r W8      -- the sample playing
   div : r B13
-  pwm : r B8
+  pwm : r W8
   deriving Bundle
 
 structure Fb (r : HwTy → Type) where
@@ -66,12 +68,12 @@ structure Fb (r : HwTy → Type) where
   deriving Bundle
 
 structure DSys (r : HwTy → Type) where
-  cpu : St 5 12 r
+  cpu : CoreSt 5 12 r
   sync : Sync r
   rx : Rx r
-  tx : Tx r
-  full : r Bit
-  byte : r B8
+  tx : UTx r
+  full : r W1
+  byte : r W8
   cyc : r B64
   snd : Snd r
   fb : Fb r
@@ -82,7 +84,7 @@ def dSys {r : HwTy → Type} [Hw r] (s : DSys r) (x : DIn r) : r (HwTy.prod DSys
   let rr := rxStep Doom.baud s.rx s.sync.ff2;
   let ω got := Byte.unpack (Hw.snd rr);
   let ω o0 := Out.unpack (Hw.snd (coreStep 5 12 .true s.cpu In.quiet));
-  let off : r B8 := Hw.slice 0 8 o0.ioa;
+  let off : r W8 := Hw.slice 0 8 o0.ioa;
   let fbA := bitOf 24 o0.ioa;
   let uartA := Hw.and (isK off 0) (Hw.not fbA);
   let ω sn := s.snd;
@@ -90,12 +92,12 @@ def dSys {r : HwTy → Type} [Hw r] (s : DSys r) (x : DIn r) : r (HwTy.prod DSys
   let free : r B32 := Hw.sub (Hw.lit 32 4096) (Hw.cat (Hw.lit 19 0) count);
   let ioIn : r B32 := Hw.mux uartA (Hw.mux s.full (Hw.cat (Hw.lit 24 0) s.byte) (Hw.lit 32 4294967295))
     (Hw.mux (isK off 16) (Hw.slice 0 32 s.cyc) (Hw.mux (isK off 20) (Hw.slice 32 32 s.cyc)
-    (Hw.mux (isK off 52) free (Hw.lit 32 0))));
+    (Hw.mux (isK off 52) free (Hw.mux (isK off 64) (Hw.cat (Hw.lit 30 0) x.ddr) (Hw.lit 32 0)))));
   let cr := coreStep 5 12 .true s.cpu (In.mk (Hw.mux uartA (txIdle s.tx) (Hw.lit 1 1)) ioIn x.ready x.rvalid x.rdata);
   let ω o := Out.unpack (Hw.snd cr);
   let rst := bitOf 0 x.btn;
-  let ω c := St.unpack 5 12 (Hw.fst cr);
-  let c2 := St.mk (Hw.mux rst (Hw.lit 4 Ph.f) c.ph) (Hw.mux rst (Hw.lit 32 0) c.pc) c.q0 c.q1 c.q2 c.q3
+  let ω c := CoreSt.unpack 5 12 (Hw.fst cr);
+  let c2 := CoreSt.mk (Hw.mux rst (Hw.lit 4 Ph.f) c.ph) (Hw.mux rst (Hw.lit 32 0) c.pc) c.q0 c.q1 c.q2 c.q3
     c.m0 c.m1 c.m2 c.m3 c.rfa c.rfb c.x1 c.x2 c.acc c.dv c.rm c.cnt c.srd c.sf3 c.slo c.sio (Hw.mux rst (Hw.lit 3 0) c.trap)
     c.busq c.fromBus c.badr c.bwe c.bwd c.bst c.bret c.bsent;
   -- sound: a write at 0x30 while there is room; a sample every `sndDiv` cycles
@@ -114,7 +116,7 @@ def dSys {r : HwTy → Type} [Hw r] (s : DSys r) (x : DIn r) : r (HwTy.prod DSys
       c2
       (Sync.unpack (syncStep s.sync x.uart_rx))
       (Rx.unpack (Hw.fst rr))
-      (Tx.unpack (txStep Doom.baud s.tx (Hw.and o.wr uartA) o.byte))
+      (UTx.unpack (txStep Doom.baud s.tx (Hw.and o.wr uartA) o.byte))
       (Hw.mux got.valid hi (Hw.mux (Hw.and o.rd uartA) lo s.full))
       (Hw.mux got.valid got.data s.byte)
       (inc s.cyc)
@@ -140,7 +142,7 @@ def dSys {r : HwTy → Type} [Hw r] (s : DSys r) (x : DIn r) : r (HwTy.prod DSys
       o.valid o.addr o.we o.wdata o.wstrb o.pend))
 
 def DSys.init (prog : List Nat) : DSys HwTy.El :=
-  DSys.mk (St.init 5 12 prog) Sync.init Rx.init Tx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 64 0)
+  DSys.mk (CoreSt.init 5 12 prog) Sync.init Rx.init UTx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 64 0)
     (Snd.mk (fun (a : BitVec 12) => BitVec.ofNat 8 128) (BitVec.ofNat 13 0) (BitVec.ofNat 13 0) (BitVec.ofNat 8 128)
       (BitVec.ofNat 8 128) (BitVec.ofNat 13 0) (BitVec.ofNat 8 0))
     (Fb.mk (fun (a : BitVec 13) => BitVec.ofNat 16 0) (BitVec.ofNat 16 0) (BitVec.ofNat 3 0))
@@ -156,29 +158,29 @@ def doomSys (prog : List Nat) : Circuit DIn.code DOut.code :=
 -- `ready`, `rvalid` and the data are kept until the core has left its bus phase.
 
 structure BusA (r : HwTy → Type) where
-  acc : r Bit
-  gotR : r Bit
-  gotV : r Bit
+  acc : r W1
+  gotR : r W1
+  gotV : r W1
   data : r B32
   deriving Bundle
 
 -- the cache's side (wiz-ddr3 CReq / CResp)
 structure CacheReq (r : HwTy → Type) where
-  valid : r Bit
+  valid : r W1
   addr : r (HwTy.bits 28)
-  we : r Bit
+  we : r W1
   wdata : r B32
   wstrb : r B4
   deriving Bundle
 structure CacheResp (r : HwTy → Type) where
-  ready : r Bit
-  rvalid : r Bit
+  ready : r W1
+  rvalid : r W1
   rdata : r B32
   deriving Bundle
 
 -- core request (from DOut) and the cache's answer → the adapter's next state, the
 -- request to the cache, the answer to the core (ready, rvalid, rdata)
-def busStep {r : HwTy → Type} [Hw r] (s : BusA r) (valid pend we : r Bit) (addr wdata : r B32) (wstrb : r B4)
+def busStep {r : HwTy → Type} [Hw r] (s : BusA r) (valid pend we : r W1) (addr wdata : r B32) (wstrb : r B4)
     (c : CacheResp r) : r (HwTy.prod BusA.code (HwTy.prod CacheReq.code CacheResp.code)) :=
   Hw.pair
     (BusA.pack (BusA.mk
@@ -203,14 +205,14 @@ structure SimDdr (ab : Nat) (r : HwTy → Type) where
   deriving Bundle
 
 structure SimIn (r : HwTy → Type) where
-  uart_rx : r Bit
+  uart_rx : r W1
   deriving Bundle
 
 def ddrModel {r : HwTy → Type} [Hw r] (ab : Nat) (s : SimDdr ab r) (q : CacheReq r) : r (HwTy.prod (SimDdr.code ab) CacheResp.code) :=
   let go := Hw.and q.valid (isK s.wait 2);
   let ix : r (HwTy.bits ab) := Hw.slice 2 ab q.addr;
   let old := Hw.memRead s.m ix;
-  let ml := fun (l : Nat) => Hw.mux (bitOf l q.wstrb) (Hw.slice (8 * l) 8 q.wdata) (Hw.slice (8 * l) 8 old : r B8);
+  let ml := fun (l : Nat) => Hw.mux (bitOf l q.wstrb) (Hw.slice (8 * l) 8 q.wdata) (Hw.slice (8 * l) 8 old : r W8);
   let nw : r B32 := Hw.cat (ml 3) (Hw.cat (ml 2) (Hw.cat (ml 1) (ml 0)));
   Hw.pair
     (SimDdr.pack ab (SimDdr.mk (Hw.memWrite s.m (Hw.and go q.we) ix nw)
@@ -218,10 +220,10 @@ def ddrModel {r : HwTy → Type} [Hw r] (ab : Nat) (s : SimDdr ab r) (q : CacheR
     (CacheResp.pack (CacheResp.mk go (Hw.and go (Hw.not q.we)) old))
 
 structure SimOut (r : HwTy → Type) where
-  uart_tx : r Bit
+  uart_tx : r W1
   led : r B4
-  ja : r B8
-  jb : r B8
+  ja : r W8
+  jb : r W8
   deriving Bundle
 
 def simTop (ab : Nat) (prog : List Nat) : Circuit SimIn.code SimOut.code :=
@@ -234,7 +236,7 @@ def simTop (ab : Nat) (prog : List Nat) : Circuit SimIn.code SimOut.code :=
       let ω bs := BusA.unpack (Hw.fst (Hw.snd s));
       let ω ds := SimDdr.unpack ab (Hw.snd (Hw.snd s));
       let rx := (SimIn.unpack x).uart_rx;
-      let quiet := DIn.pack (DIn.mk rx (Hw.lit 4 0) (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 32 0));
+      let quiet := DIn.pack (DIn.mk rx (Hw.lit 4 0) (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 32 0) (Hw.lit 2 1));
       let ω o0 := DOut.unpack (Hw.snd (Circuit.inst h hs quiet));
       let ω q := CacheReq.unpack (Hw.fst (Hw.snd (busStep bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb
         (CacheResp.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 32 0)))));
@@ -242,7 +244,7 @@ def simTop (ab : Nat) (prog : List Nat) : Circuit SimIn.code SimOut.code :=
       let ω resp := CacheResp.unpack (Hw.snd dr);
       let br := busStep bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb resp;
       let ω toCore := CacheResp.unpack (Hw.snd (Hw.snd br));
-      let hr := Circuit.inst h hs (DIn.pack (DIn.mk rx (Hw.lit 4 0) toCore.ready toCore.rvalid toCore.rdata));
+      let hr := Circuit.inst h hs (DIn.pack (DIn.mk rx (Hw.lit 4 0) toCore.ready toCore.rvalid toCore.rdata (Hw.lit 2 1)));
       let ω o := DOut.unpack (Hw.snd hr);
       Hw.pair (Hw.pair (Hw.fst hr) (Hw.pair (Hw.fst br) (Hw.fst dr)))
         (SimOut.pack (SimOut.mk o.uart_tx o.led o.ja o.jb)))
