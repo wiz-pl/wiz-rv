@@ -87,3 +87,13 @@ grail build          # check the library, compile the driver
 grail test           # the specification tests and the lockstep simulations
 .grail/bin/rv all    # Verilog, synthesis, place and route
 ```
+
+## Next
+
+* **Doom on the Arty** (doomgeneric, bare-metal RV32IM): a GCC toolchain (Nix
+  `pkgsCross.riscv32-embedded`) and a small runtime (crt0, linker script, newlib's
+  syscalls on the UART); peripherals on the I/O space: a timer, the UART, an SPI master
+  for the PmodOLEDrgb (SSD1331, 96 × 64, 16-bit colour) and a QSPI flash reader for the
+  WAD; instruction and data caches; a block-RAM heap for bring-up, then DDR3 (the
+  Arty's 256 MB) as its own milestone.
+* Proofs beyond the bitwise instructions need bit-vector rewriting (FINDINGS.md, H2).
