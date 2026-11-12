@@ -19,6 +19,14 @@
 #define SND_RATE      11025u               /* the FIFO is played at this rate (PWM on JB1) */
 #define SND_FIFO      4096u
 
+#define PERF_INSTR    IO(0x50)             /* performance counters (free-running) */
+#define PERF_BUS      IO(0x54)             /* cycles waiting for DDR (fetch, load, store) */
+#define PERF_MEM      IO(0x58)             /* load cycles (M) */
+#define PERF_LONG     IO(0x5c)             /* shift / multiply / divide cycles */
+#define PERF_FETCH    IO(0x60)             /* refetch after a store (F) */
+#define CACHE_HITS    IO(0x64)
+#define CACHE_MISSES  IO(0x68)
+
 #define OLED_FB       ((volatile uint16_t *)0x81000000u)   /* 96 x 64 RGB565, row-major */
 #define OLED_W        96
 #define OLED_H        64

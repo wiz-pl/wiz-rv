@@ -17,7 +17,22 @@ void DG_Init(void) {}
 
 /* OLED pixel (x, y) covers frame columns [x*320/96, (x+1)*320/96) and rows
    [y*200/64, (y+1)*200/64): average 2 x 2 samples of that block */
+/* every 5 s: the performance counters' increments (cycles at 50 MHz) */
+static void perf_report(void) {
+  static uint64_t last; static uint32_t frames, l_i, l_b, l_m, l_l, l_f, l_h, l_x;
+  frames++;
+  uint64_t now = hw_cycles();
+  if (now - last < 5ull * HW_CLOCK_HZ) return;
+  uint32_t i = PERF_INSTR, b = PERF_BUS, m = PERF_MEM, l = PERF_LONG, f = PERF_FETCH, h = CACHE_HITS, x = CACHE_MISSES;
+  uint32_t cyc = (uint32_t)(now - last);
+  printf("perf: %u frames, cycles %u, instr %u (CPI x100 %u), bus %u, M %u, long %u, F %u, cache hits %u misses %u\n",
+         (unsigned)frames, (unsigned)cyc, (unsigned)(i - l_i), (unsigned)(i - l_i ? (uint64_t)cyc * 100 / (i - l_i) : 0),
+         (unsigned)(b - l_b), (unsigned)(m - l_m), (unsigned)(l - l_l), (unsigned)(f - l_f), (unsigned)(h - l_h), (unsigned)(x - l_x));
+  last = now; frames = 0; l_i = i; l_b = b; l_m = m; l_l = l; l_f = f; l_h = h; l_x = x;
+}
+
 void DG_DrawFrame(void) {
+  perf_report();
   const uint32_t *fb = DG_ScreenBuffer;
   for (int y = 0; y < OLED_H; y++) {
     int r0 = y * DOOMGENERIC_RESY / OLED_H, r1 = ((y + 1) * DOOMGENERIC_RESY / OLED_H + r0) / 2;
