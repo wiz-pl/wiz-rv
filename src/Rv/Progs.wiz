@@ -191,3 +191,8 @@ def Prog.demo (stack : Nat) : List Asm :=
     (List.append (A.string "failed" "FAIL\n")
     (List.append (A.string "ptext" "primes up to 1000:\n")
     (A.string "prompt" "\n> "))))))))))))
+
+-- the input port with nothing waiting: every load size gives -1 (and rd = x0 is fine)
+def Prog.ioload : List Asm :=
+  P.port :: A.lw 1 0 15 :: A.lb 2 4 15 :: A.lhu 3 8 15 :: A.lw 0 0 15 ::
+  A.srli 4 1 24 :: P.out 4 :: P.out 2 :: P.out 3 :: A.ebreak :: .nil

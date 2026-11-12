@@ -41,7 +41,7 @@ Xilinx part) and a 32-cycle restoring divider.
 
 | design | part | logic | block RAM | Fmax (nextpnr) |
 |---|---|---|---|---|
-| RV32E, 2 KB | iCE40-HX1K (tq144) | 1020 / 1280 LCs (79 %) | 8 / 16 | 40 MHz |
+| RV32E, 2 KB, LEDs (`rv32e_hx1k`) | iCE40-HX1K (tq144, iCEstick pins) | 1036 / 1280 LCs (80 %) | 8 / 16 | 37 MHz |
 | RV32IM, 16 KB, UART (`rv32im_arty_uart`) | Artix-7 XC7A35T (Arty A7-35T) | about 970 LUTs, 300 FFs, 10 DSP48E1 | 4 RAMB36E1 + 12 RAM32M (the register file) | 78.9 MHz: run at half rate, 50 MHz (FINDINGS.md, H5) |
 
 (The Arty build is artix-target's openXC7 flow: yosys, nextpnr-xilinx, Project X-Ray.)

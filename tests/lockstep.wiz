@@ -40,6 +40,8 @@ def trapsE : List String :=
   (.cons (report 4 Prog.trapIllegal 50) (.cons (report 4 Prog.trapEcall 50) (.cons (report 4 Prog.x16 50) .nil)))))
 #eval trapsE
 -- RV32I: x16 is a register
+def ioE : String := report 4 Prog.ioload 100
+#eval ioE
 def x16I : String := report 5 Prog.x16 50
 #eval x16I
 def aluI : String := report 5 Prog.alu 400
