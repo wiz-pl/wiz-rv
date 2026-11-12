@@ -1,6 +1,7 @@
 -- test: check
 import Rv.Lockstep
 import Rv.Progs
+import Rv.CTest
 -- The core against the specification, in lockstep (src/Rv/Lockstep.wiz), on the test
 -- programs: RV32E (16 registers, the HX1K configuration) and RV32I (32), 1 KB of
 -- memory. Each line: instructions, cycles, trap code, the bytes output, and "agrees"
@@ -60,3 +61,11 @@ def bootE : String := (fun (r : Ls.Result) => Nat.repr r.instrs ++ " instruction
       | .nil => "agrees"
       | ps => "DISAGREES" ++ lines ps)) (Ls.runIn 4 12 .false (Asm.assemble Prog.boot) (Boot.session (Asm.assemble Prog.hello)) 6000)
 #eval bootE
+-- compiled C (sw/ctest, gcc for RV32IM, newlib's string functions on misaligned
+-- buffers, division, a 64-bit product), in the on-chip RAM
+def ctestE : String := (fun (r : Ls.Result) => Nat.repr r.instrs ++ " instructions, out \""
+    ++ String.mk (List.map Char.mk r.out) ++ "\" "
+    ++ (match r.problems with
+      | .nil => "agrees"
+      | ps => "DISAGREES" ++ lines ps)) (Ls.run 5 12 .true (Hex.words CTest.hex) 40000)
+#eval ctestE
