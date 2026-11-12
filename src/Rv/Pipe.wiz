@@ -475,6 +475,29 @@ def pipeStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : PpSt ab w
     (Out.pack (Out.mk s.trap (gate goSt m.io) (Hw.slice 0 8 m.sd) (gate goM (gate m.load m.io)) m.addr m.sd
       (gate live (Hw.not bu.sent)) bu.addr bu.we bu.wd bu.strb live))
 
+-- the core's reset: the front end restarts at 0, the stages are emptied, the divider,
+-- the bus and the trap code are cleared; memories and data registers keep their contents
+def Pp.reset {r : HwTy → Type} [Hw r] (ab wb : Nat) (rst : r W1) (c : PpSt ab wb r) : PpSt ab wb r :=
+  let ω fe := c.fe;
+  let ω e := c.e;
+  let ω m := c.m;
+  let ω rr := c.rr;
+  let ω dv := c.dv;
+  let ω bu := c.bus;
+  let z := fun (x : r W1) => (Hw.mux rst (Hw.lit 1 0) x : r W1);
+  PpSt.mk
+    (PpFe.mk fe.pc (z fe.v) (Hw.mux rst (Hw.lit 2 3) fe.fz) (Hw.mux rst (Hw.lit 32 0) fe.rpc))
+    c.ms c.wr
+    (PpE.mk (z e.v) (z e.imiss) e.pc e.ins e.imm e.a e.b e.lui e.auipc e.jal e.jalr e.branch e.load e.store e.arith e.op e.md
+      e.legal e.ecall e.ebreak e.u1 e.u2)
+    (PpM.mk (z m.v) (z m.imiss) m.pc m.rd (z m.we) (z m.late) m.res m.addr m.sd m.f3 m.load m.store m.io m.ddr m.trap m.mul
+      m.p0 m.p1 m.p2 m.p3 m.corr)
+    (PpR.mk (z rr.v) (z rr.imiss) (z rr.miss) (z rr.smc) rr.pc rr.rd (z rr.we) rr.val rr.trap rr.addr)
+    (PpDiv.mk (z dv.on) dv.cnt dv.acc dv.dvs dv.rm)
+    (PpBus.mk (z bu.sbv) bu.sba bu.sbd bu.sbs (z bu.act) bu.we bu.addr bu.wd bu.strb (z bu.sent) (z bu.gap) bu.k bu.buf
+      (z bu.freq) bu.fI bu.faddr)
+    (Hw.mux rst (Hw.lit 3 0) c.trap)
+
 ------------------------------------------------------------------------------------
 -- The core as a circuit, with a program in both copies of the on-chip RAM
 

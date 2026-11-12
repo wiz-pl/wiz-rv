@@ -13,7 +13,7 @@ def ensureDir (p : String) : EIO Unit := do
   | .true => EIO.pure ()
   | .false => FS.createDir p
 
-def arty : EIO Unit := do
+def genArty : EIO Unit := do
   ensureDir "build";
   let n := Circuit.netlist "p_arty" (pArty 5 12 .true Arty.n (Asm.assemble (Prog.demo 16380)));
   say ("p_arty: " ++ Nat.repr (List.length n.nodes) ++ " nodes, " ++ Nat.repr (List.length n.regs) ++ " registers, "
@@ -24,5 +24,5 @@ def arty : EIO Unit := do
 def main : IO Unit := EIO.toIO (do
   args ← EIO.lift IO.args;
   match args with
-  | .cons "arty" .nil => arty
+  | .cons "arty" .nil => genArty
   | _ => EIO.fail "usage: pgen arty")

@@ -4,7 +4,8 @@ import Ddr3.Board
 import Ddr3.Model
 -- The Doom board top for the Arty A7-35T (`doomTop`): wiz-ddr3's PLL wrapper
 -- (`Board.clocking`: the circuit at 100 MHz, the PHY's clocks), its PHY, controller and
--- 8 KB write-back cache, and the Doom machine (`doomSys`, src/Rv/Doom.wiz) at half rate
+-- 8 KB write-back cache, and the Doom machine (`doomSys`, src/Rv/Doom.wiz) with the
+-- pipelined core at the full 100 MHz (`doomTopHalf`: the multi-cycle core at half rate)
 -- behind the bus adapter (`busStep`).
 --
 -- The core is held in reset until the DDR's calibration has finished (done or failed);
@@ -34,7 +35,8 @@ structure TOut (r : HwTy → Type) where
 -- the parts common to both: the cache, the controller, the adapter and the machine, given
 -- the controller's PHY input; the next state of these, the controller's DFI output, the
 -- board's outputs
-def Top.half (prog : List Nat) : Circuit DIn.code DOut.code := Circuit.half (doomSys prog)
+def Top.half (prog : List Nat) : Circuit DIn.code DOut.code := doomHalf prog
+def Top.full (prog : List Nat) : Circuit DIn.code DOut.code := doomFull prog
 
 structure TSt (h : HwTy) (r : HwTy → Type) where
   ctrl : r St.code
@@ -110,10 +112,12 @@ structure SSt (h : HwTy) (r : HwTy → Type) where
   phy : r PhyIn.code
   deriving Bundle
 
-def doomTop (t : Timing) (prog : List Nat) : Circuit TIn.code (HwTy.prod Ddr3Pads.code TOut.code) := Top.board t (Top.half prog)
+def doomTop (t : Timing) (prog : List Nat) : Circuit TIn.code (HwTy.prod Ddr3Pads.code TOut.code) := Top.board t (Top.full prog)
+-- the multi-cycle core at half rate (before the pipeline)
+def doomTopHalf (t : Timing) (prog : List Nat) : Circuit TIn.code (HwTy.prod Ddr3Pads.code TOut.code) := Top.board t (Top.half prog)
 
 def doomSim (t : Timing) (mp : MParams) (prog : List Nat) : Circuit SimIn.code TOut.code :=
-  let ω h := Top.half prog;
+  let ω h := Top.full prog;
   let ω hst := h.st;
   Circuit.mk (SSt.code hst)
     (Bundle.toEl (SSt.bundle hst) (SSt.mk (Top.init t h) Model.init (HwTy.unpack PhyIn.code 0)))
