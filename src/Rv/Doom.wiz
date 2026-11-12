@@ -67,7 +67,19 @@ structure Fb (r : HwTy → Type) where
   pre : r B3      -- the controller's clock enable: every 8th cycle
   deriving Bundle
 
+-- the bus at the edge of the half-rate part, in registers: the answer as it came in, the
+-- request's valid and pending as they go out (so that every path between the two
+-- rates is register to register: FINDINGS.md, H5)
+structure Edge (r : HwTy → Type) where
+  ready : r W1
+  rvalid : r W1
+  rdata : r B32
+  valid : r W1
+  pend : r W1
+  deriving Bundle
+
 structure DSys (r : HwTy → Type) where
+  edge : Edge r
   cpu : CoreSt 5 12 r
   sync : Sync r
   rx : Rx r
@@ -93,7 +105,7 @@ def dSys {r : HwTy → Type} [Hw r] (s : DSys r) (x : DIn r) : r (HwTy.prod DSys
   let ioIn : r B32 := Hw.mux uartA (Hw.mux s.full (Hw.cat (Hw.lit 24 0) s.byte) (Hw.lit 32 4294967295))
     (Hw.mux (isK off 16) (Hw.slice 0 32 s.cyc) (Hw.mux (isK off 20) (Hw.slice 32 32 s.cyc)
     (Hw.mux (isK off 52) free (Hw.mux (isK off 64) (Hw.cat (Hw.lit 30 0) x.ddr) (Hw.lit 32 0)))));
-  let cr := coreStep 5 12 .true s.cpu (In.mk (Hw.mux uartA (txIdle s.tx) (Hw.lit 1 1)) ioIn x.ready x.rvalid x.rdata);
+  let cr := coreStep 5 12 .true s.cpu (In.mk (Hw.mux uartA (txIdle s.tx) (Hw.lit 1 1)) ioIn s.edge.ready s.edge.rvalid s.edge.rdata);
   let ω o := Out.unpack (Hw.snd cr);
   let rst := bitOf 0 x.btn;
   let ω c := CoreSt.unpack 5 12 (Hw.fst cr);
@@ -113,6 +125,9 @@ def dSys {r : HwTy → Type} [Hw r] (s : DSys r) (x : DIn r) : r (HwTy.prod DSys
   let oledNext := rctlStep Doom.oled RProg.tree ol s.fb.q;
   Hw.pair
     (DSys.pack (DSys.mk
+      -- (the answer is latched only while the core is in its bus phase, so a new access
+      -- never sees the last one's: there is always a cycle outside P between two)
+      (Edge.mk (Hw.and x.ready o0.pend) (Hw.and x.rvalid o0.pend) x.rdata o.valid o.pend)
       c2
       (Sync.unpack (syncStep s.sync x.uart_rx))
       (Rx.unpack (Hw.fst rr))
@@ -139,10 +154,11 @@ def dSys {r : HwTy → Type} [Hw r] (s : DSys r) (x : DIn r) : r (HwTy.prod DSys
       (Hw.cat ol.pins.pmoden (Hw.cat ol.pins.vccen (Hw.cat ol.pins.res (Hw.cat ol.pins.dc
         (Hw.cat ol.spi.sclk (Hw.cat (Hw.lit 1 0) (Hw.cat ol.spi.mosi ol.pins.cs)))))))
       (Hw.cat (Hw.lit 7 0) (Hw.ult sn.pwm sn.cur))
-      o.valid o.addr o.we o.wdata o.wstrb o.pend))
+      s.edge.valid o.addr o.we o.wdata o.wstrb s.edge.pend))
 
 def DSys.init (prog : List Nat) : DSys HwTy.El :=
-  DSys.mk (CoreSt.init 5 12 prog) Sync.init Rx.init UTx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 64 0)
+  DSys.mk (Edge.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0))
+    (CoreSt.init 5 12 prog) Sync.init Rx.init UTx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 64 0)
     (Snd.mk (fun (a : BitVec 12) => BitVec.ofNat 8 128) (BitVec.ofNat 13 0) (BitVec.ofNat 13 0) (BitVec.ofNat 8 128)
       (BitVec.ofNat 8 128) (BitVec.ofNat 13 0) (BitVec.ofNat 8 0))
     (Fb.mk (fun (a : BitVec 13) => BitVec.ofNat 16 0) (BitVec.ofNat 16 0) (BitVec.ofNat 3 0))
@@ -154,11 +170,19 @@ def doomSys (prog : List Nat) : Circuit DIn.code DOut.code :=
 ------------------------------------------------------------------------------------
 -- The bus adapter, at the full rate, between the core (at half rate: it sees the bus
 -- only every other cycle, and holds its request) and the cache (whose `ready` and
--- `rvalid` last one cycle): the request goes to the cache until it is taken (`acc`);
--- `ready`, `rvalid` and the data are kept until the core has left its bus phase.
+-- `rvalid` last one cycle). Both directions go through registers, so that every path
+-- between the half-rate part and the full-rate part is a register, a few LUTs and a
+-- register (one period: FINDINGS.md, H5): the request is copied once into `rv` …
+-- `rst` (`acc`: this request has been copied) and offered to the cache until it is
+-- taken; `ready`, `rvalid` and the data are kept until the core has left its bus phase.
 
 structure BusA (r : HwTy → Type) where
   acc : r W1
+  rv : r W1
+  ra : r B32
+  rwe : r W1
+  rwd : r B32
+  rst : r B4
   gotR : r W1
   gotV : r W1
   data : r B32
@@ -179,20 +203,26 @@ structure CacheResp (r : HwTy → Type) where
   deriving Bundle
 
 -- core request (from DOut) and the cache's answer → the adapter's next state, the
--- request to the cache, the answer to the core (ready, rvalid, rdata)
+-- request to the cache, the answer to the core (ready, rvalid, rdata); the last two
+-- depend only on the adapter's state
 def busStep {r : HwTy → Type} [Hw r] (s : BusA r) (valid pend we : r W1) (addr wdata : r B32) (wstrb : r B4)
     (c : CacheResp r) : r (HwTy.prod BusA.code (HwTy.prod CacheReq.code CacheResp.code)) :=
+  let take := gate valid (Hw.and (Hw.not s.acc) (Hw.not s.rv));
+  let taken := Hw.and s.rv c.ready;
   Hw.pair
     (BusA.pack (BusA.mk
-      (gate pend (Hw.or s.acc c.ready))
-      (gate pend (Hw.or s.gotR c.ready))
+      (gate pend (Hw.or s.acc take))
+      (Hw.mux take (Hw.lit 1 1) (Hw.mux taken (Hw.lit 1 0) s.rv))
+      (Hw.mux take addr s.ra) (Hw.mux take we s.rwe) (Hw.mux take wdata s.rwd) (Hw.mux take wstrb s.rst)
+      (gate pend (Hw.or s.gotR taken))
       (gate pend (Hw.or s.gotV c.rvalid))
       (Hw.mux c.rvalid c.rdata s.data)))
     (Hw.pair
-      (CacheReq.pack (CacheReq.mk (Hw.and valid (Hw.not s.acc)) (Hw.slice 0 28 addr) we wdata wstrb))
-      (CacheResp.pack (CacheResp.mk (Hw.or s.gotR c.ready) (Hw.or s.gotV c.rvalid) (Hw.mux c.rvalid c.rdata s.data))))
+      (CacheReq.pack (CacheReq.mk s.rv (Hw.slice 0 28 s.ra) s.rwe s.rwd s.rst))
+      (CacheResp.pack (CacheResp.mk s.gotR s.gotV s.data)))
 
-def BusA.init : BusA HwTy.El := BusA.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0)
+def BusA.init : BusA HwTy.El := BusA.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0)
+  (BitVec.ofNat 32 0) (BitVec.ofNat 4 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0)
 
 ------------------------------------------------------------------------------------
 -- For simulation: the machine at half rate, the adapter, and in place of the cache and

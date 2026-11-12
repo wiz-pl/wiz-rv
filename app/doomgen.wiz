@@ -78,9 +78,24 @@ def top : EIO Unit := do
   FS.writeFile "build/doom_top.v" (Verilog.emitTop nt Board.clocking);
   FS.writeFile "build/doom_top.xdc" (Board.xdc ++ Doom.extraPins)
 
+def stub : EIO Unit := do
+  ensureDir "build";
+  let nt := Circuit.netlist "stub_top" (stubTop Timing.arty);
+  say ("stub_top: " ++ Nat.repr (List.length nt.nodes) ++ " nodes, errors: " ++ Nat.repr (List.length nt.errors));
+  FS.writeFile "build/stub_top.v" (Verilog.emitTop nt Board.clocking);
+  FS.writeFile "build/stub_top.xdc" (Board.xdc ++ Doom.extraPins)
+
+-- the machine with the simple DDR model (src/Rv/Doom.wiz, `simTop`), for Icarus Verilog
+def simv : EIO Unit := do
+  ensureDir "build";
+  let n := Circuit.netlist "doom_sim" (simTop 14 (Asm.assemble Prog.boot));
+  FS.writeFile "build/doom_sim.v" (Verilog.emit n)
+
 def main : IO Unit := EIO.toIO (do
   args ← EIO.lift IO.args;
   match args with
   | .cons "top" .nil => top
+  | .cons "stub" .nil => stub
+  | .cons "simv" .nil => simv
   | .cons "sim" (.cons n .nil) => sim (toNatS (String.chars n) 0)
   | _ => EIO.fail "usage: doomgen top | sim CYCLES")

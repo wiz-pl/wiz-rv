@@ -44,9 +44,8 @@ structure TSt (h : HwTy) (r : HwTy → Type) where
   beat : r (HwTy.bits 27)
   deriving Bundle
 
-def Top.core {r : HwTy → Type} [Hw r] (t : Timing) (prog : List Nat) (s : TSt (Top.half prog).st r) (phyIn : r PhyIn.code)
-    (rx : r W1) (btn : r B4) : r (HwTy.prod (TSt.code (Top.half prog).st) (HwTy.prod Dfi.code TOut.code)) :=
-  let ω h := Top.half prog;
+def Top.core {r : HwTy → Type} [Hw r] (t : Timing) (h : Circuit DIn.code DOut.code) (s : TSt h.st r) (phyIn : r PhyIn.code)
+    (rx : r W1) (btn : r B4) : r (HwTy.prod (TSt.code h.st) (HwTy.prod Dfi.code TOut.code)) :=
   let ω cs := St.unpack s.ctrl;
   let ω bs := s.bus;
   -- the machine's bus request comes from its state: ask with no answer first
@@ -70,14 +69,14 @@ def Top.core {r : HwTy → Type} [Hw r] (t : Timing) (prog : List Nat) (s : TSt 
     toCore.ready toCore.rvalid toCore.rdata (Hw.cat po.calFail po.calDone)));
   let ω o := DOut.unpack (Hw.snd hr);
   Hw.pair
-    (TSt.pack (Top.half prog).st (TSt.mk (Hw.fst co) (Hw.fst cr) (BusA.unpack (Hw.fst br)) (Hw.fst hr) (inc s.beat)))
+    (TSt.pack h.st (TSt.mk (Hw.fst co) (Hw.fst cr) (BusA.unpack (Hw.fst br)) (Hw.fst hr) (inc s.beat)))
     (Hw.pair (Hw.snd (Hw.snd co))
       (TOut.pack (TOut.mk o.uart_tx
         (Hw.cat (bitOf 26 s.beat) (Hw.cat (bitOf 0 o.led) (Hw.cat po.calFail po.calDone)))
         o.ja o.jb)))
 
-def Top.init (t : Timing) (prog : List Nat) : HwTy.El (TSt.code (Top.half prog).st) :=
-  Bundle.toEl (TSt.bundle (Top.half prog).st) (TSt.mk (Ctrl.init t) C.init (BusA.init) (Top.half prog).init (BitVec.ofNat 27 0))
+def Top.init (t : Timing) (h : Circuit DIn.code DOut.code) : HwTy.El (TSt.code h.st) :=
+  Bundle.toEl (TSt.bundle h.st) (TSt.mk (Ctrl.init t) C.init (BusA.init) h.init (BitVec.ofNat 27 0))
 
 -- the board: the PHY between the controller and the pins (its input registered, as in
 -- wiz-ddr3's memory test), its reset held until the PLL has locked for 255 cycles
@@ -87,17 +86,17 @@ structure BSt (h : HwTy) (r : HwTy → Type) where
   rstCnt : r W8
   deriving Bundle
 
-def doomTop (t : Timing) (prog : List Nat) : Circuit TIn.code (HwTy.prod Ddr3Pads.code TOut.code) :=
-  let ω hst := (Top.half prog).st;
+def Top.board (t : Timing) (h : Circuit DIn.code DOut.code) : Circuit TIn.code (HwTy.prod Ddr3Pads.code TOut.code) :=
+  let ω hst := h.st;
   Circuit.mk (BSt.code hst)
-    (Bundle.toEl (BSt.bundle hst) (BSt.mk (Top.init t prog) (BitVec.ofNat 128 0, (BitVec.ofNat 1 0, BitVec.ofNat 2 0)) (BitVec.ofNat 8 0)))
+    (Bundle.toEl (BSt.bundle hst) (BSt.mk (Top.init t h) (HwTy.unpack PhyIn.code 0) (BitVec.ofNat 8 0)))
     (fun s x =>
       let ω b := BSt.unpack hst s;
       let ω i := TIn.unpack x;
       let ω ts := TSt.unpack hst b.top;
       let ω cs := St.unpack ts.ctrl;
       let phyRst := Hw.not (isK b.rstCnt 255);
-      let tr := Top.core t prog ts b.phy i.uart_rx i.btn;
+      let tr := Top.core t h ts b.phy i.uart_rx i.btn;
       let ω dfi := Dfi.unpack (Hw.fst (Hw.snd tr));
       let phy := Phy.io (PhyClk.mk i.sys4x i.sys4xDqs i.ref200) phyRst cs.rstN dfi;
       Hw.pair (BSt.pack hst (BSt.mk (Hw.fst tr) (Hw.snd phy) (Hw.mux phyRst (Hw.mux i.locked (inc b.rstCnt) b.rstCnt) b.rstCnt)))
@@ -110,13 +109,41 @@ structure SSt (h : HwTy) (r : HwTy → Type) where
   phy : r PhyIn.code
   deriving Bundle
 
+def doomTop (t : Timing) (prog : List Nat) : Circuit TIn.code (HwTy.prod Ddr3Pads.code TOut.code) := Top.board t (Top.half prog)
+
 def doomSim (t : Timing) (mp : MParams) (prog : List Nat) : Circuit SimIn.code TOut.code :=
-  let ω hst := (Top.half prog).st;
+  let ω h := Top.half prog;
+  let ω hst := h.st;
   Circuit.mk (SSt.code hst)
-    (Bundle.toEl (SSt.bundle hst) (SSt.mk (Top.init t prog) Model.init (BitVec.ofNat 128 0, (BitVec.ofNat 1 0, BitVec.ofNat 2 0))))
+    (Bundle.toEl (SSt.bundle hst) (SSt.mk (Top.init t h) Model.init (HwTy.unpack PhyIn.code 0)))
     (fun s x =>
       let ω b := SSt.unpack hst s;
-      let tr := Top.core t prog (TSt.unpack hst b.top) b.phy (SimIn.unpack x).uart_rx (Hw.lit 4 0);
+      let tr := Top.core t h (TSt.unpack hst b.top) b.phy (SimIn.unpack x).uart_rx (Hw.lit 4 0);
       let mo := Model.step t mp (MSt.unpack b.model) (Dfi.unpack (Hw.fst (Hw.snd tr)));
       Hw.pair (SSt.pack hst (SSt.mk (Hw.fst tr) (Hw.fst mo) (Hw.fst (Hw.snd mo))))
         (Hw.snd (Hw.snd tr)))
+
+-- For checking the timing of the full-rate part alone (FINDINGS.md, H5): the machine
+-- replaced by registers that make bus requests (an LFSR) and absorb the answers
+structure Stub (r : HwTy → Type) where
+  lfsr : r B32
+  valid : r W1
+  addr : r B32
+  we : r W1
+  acc : r B32
+  deriving Bundle
+def stubStep {r : HwTy → Type} [Hw r] (s : Stub r) (x : DIn r) : r (HwTy.prod Stub.code DOut.code) :=
+      let next := Hw.xor (Hw.cat (Hw.slice 0 31 s.lfsr : r (HwTy.bits 31)) (Hw.xor (bitOf 31 s.lfsr) (bitOf 21 s.lfsr))) (Hw.cat (Hw.lit 31 0) x.uart_rx);
+      let busy := Hw.and s.valid (Hw.not x.ready);
+      Hw.pair
+        (Stub.pack (Stub.mk next (Hw.mux busy (Hw.lit 1 1) (bitOf 3 s.lfsr))
+          (Hw.mux busy s.addr (Hw.cat (Hw.lit 6 16) (Hw.slice 0 26 s.lfsr : r (HwTy.bits 26))))
+          (Hw.mux busy s.we (bitOf 5 s.lfsr))
+          (Hw.mux x.rvalid (Hw.xor s.acc x.rdata) s.acc)))
+        (DOut.pack (DOut.mk (bitOf 0 s.acc) (Hw.slice 1 4 s.acc) (Hw.slice 8 8 s.acc) (Hw.slice 16 8 s.acc)
+          s.valid s.addr s.we s.lfsr (Hw.slice 4 4 s.lfsr) s.valid))
+def stubSys : Circuit DIn.code DOut.code :=
+  Circuit.bundled Stub.bundle DIn.bundle DOut.bundle
+    (Stub.mk (BitVec.ofNat 32 2463534242) (BitVec.ofNat 1 0) (BitVec.ofNat 32 1073741824) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0))
+    stubStep
+def stubTop (t : Timing) : Circuit TIn.code (HwTy.prod Ddr3Pads.code TOut.code) := Top.board t stubSys
