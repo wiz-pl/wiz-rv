@@ -167,6 +167,29 @@ two periods, and the UART divider is computed for 50 MHz. The timing report stil
 checks those paths against 10 ns. Wanted: black-box instances of vendor primitives (a
 PLL, at least), more than one clock domain, or `set_multicycle_path` from the enable.
 
+### H6. Checking a half-rate design's timing: what the open flow gives (gap)
+
+The Doom board top runs the core under a half-rate clock enable (H5) next to wiz-ddr3's
+full-rate cache, controller and PHY. nextpnr reports one critical path per clock (58.4
+MHz here, the core's 2-cycle execute path). Its `set_multicycle_path` (this openXC7
+build: by destination cell only, `-to [get_cells -filter {NAME =~ …}]`) changed the
+reported Fmax in proportion to the multiplier rather than relaxing the tagged paths,
+so it could not separate the classes. What was done instead:
+
+* the full-rate part alone, with the core replaced by a register stub (`stubTop`):
+  115 MHz, so every path inside it meets 10 ns;
+* the boundary built from registers in both directions (`busStep`, `Edge`), so that a
+  crossing path is a register, a few LUTs and a register;
+* the crossings measured on nextpnr's SDF (scripts/sdfcross.py): worst 6.0 ns into the
+  half-rate part, 6.8 ns out of it, within three cells; every path of the design is at
+  most 17.1 ns, under the 20 ns of the 2-cycle paths.
+
+Caveats: nextpnr's SDF gives each LUT of a fractured pair all of the pair's inputs, so
+a deeper search follows false arcs between unrelated logic; and the half-rate cells are
+found from their enable's connection to the toggle, which misses flip-flops whose
+enable yosys folded into the D logic. Wanted: multicycle constraints that work, or more
+than one clock domain in the HDL (H5), so that the tools check this.
+
 ## Compiler and run time
 
 ### S1. A program that imports the core takes 12 to 15 minutes to compile (slow)
