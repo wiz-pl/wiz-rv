@@ -115,7 +115,8 @@ its demos), a sound module (eight channels mixed into the FIFO), newlib's system
 `doom1.wad` is not in the repository (wad/ is ignored).
 
 Checked so far: the core's bus and the boot loader in the lockstep against the
-specification (with a DDR model); the whole machine but the DDR controller in Icarus
+specification (with a DDR model), and compiled C (sw/ctest: gcc's output and newlib's
+string functions, 1060 instructions, generated into src/Rv/CTest.wiz by app/bin2wiz); the whole machine but the DDR controller in Icarus
 Verilog (`simTop`: it boots, loads a program into DDR over the UART, runs it);
 Doom itself on a host instruction-set simulator of the machine (sw/iss/iss.c: frames as
 images, sound as a WAV file): the demo loop at about 3.7 frames a second at the core's
