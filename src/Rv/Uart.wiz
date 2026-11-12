@@ -4,7 +4,6 @@ import Rv.Core
 -- ten-bit baud counters), with its small vocabulary from src/Arty/Gates.wiz. `n` is the
 -- number of clock cycles per bit.
 
-def B4 : HwTy := HwTy.bits 4
 def B9 : HwTy := HwTy.bits 9
 def B10 : HwTy := HwTy.bits 10
 

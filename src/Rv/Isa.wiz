@@ -12,7 +12,8 @@ import Int
 --
 -- `Cfg.rbits` is 5 for RV32I (32 registers) and 4 for RV32E (16 registers; an
 -- instruction naming x16 … x31 is illegal). FENCE is a no-op (one hart, no caches).
--- Misaligned loads and stores trap (the ISA allows it).
+-- Misaligned loads and stores trap (the ISA allows it). Memory: the on-chip memory
+-- from address 0 (wrapping), and DDR from 0x40000000 (initially zero).
 --
 -- Output: a store to an address with bit 31 set writes nothing to memory; the low byte
 -- of the stored value goes to the output port (`out`). Input: a load (of any size)
@@ -95,7 +96,11 @@ def Op.system : Nat := 115   -- 1110011
 def Rv.reg (s : Arch) (i : Nat) : BitVec 32 :=
   if Nat.beq i 0 then Rv.w32 0 else s.regs (BitVec.ofNat 5 i)
 
-def Rv.maddr (c : Cfg) (a : BitVec 32) : BitVec 32 := Rv.w32 (Nat.mod a.toNat (Rv.pow2 c.mbits))
+-- on-chip memory wraps at its size; DDR (bit 30 set, bit 31 clear: 0x40000000 …
+-- 0x7fffffff) is addressed in full
+def Rv.isDdr (a : BitVec 32) : Bool := Bool.and (Rv.bit a.toNat 30) (Bool.not (Rv.bit a.toNat 31))
+def Rv.maddr (c : Cfg) (a : BitVec 32) : BitVec 32 :=
+  if Rv.isDdr a then a else Rv.w32 (Nat.mod a.toNat (Rv.pow2 c.mbits))
 def Rv.byte (c : Cfg) (s : Arch) (a : BitVec 32) : Nat := (s.mem (Rv.maddr c a)).toNat
 def Rv.plus (a : BitVec 32) (k : Nat) : BitVec 32 := BitVec.add a (Rv.w32 k)
 -- `n` bytes from `a`, little-endian

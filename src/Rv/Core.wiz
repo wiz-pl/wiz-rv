@@ -17,6 +17,8 @@ import Rv.Isa
 --   M  memory: the loaded word is in `q`; write rd; read the word at PC
 --   S  shift: one place per cycle, `cnt` left; then write rd
 --   H  stopped (the trap code is in `trap`)
+--   P  a bus access (DDR: the fetch or load before D or M, a store before F), until
+--      it is answered
 --   X  (M) the product is written
 --   V  (M) division: one quotient bit per cycle, 32 cycles, then the result is written
 -- So an instruction takes 2 cycles (D, E), a load 3, a store 3, a shift 3 + its amount,
@@ -25,6 +27,7 @@ import Rv.Isa
 
 def B2 : HwTy := HwTy.bits 2
 def B3 : HwTy := HwTy.bits 3
+def B4 : HwTy := HwTy.bits 4
 def B5 : HwTy := HwTy.bits 5
 def B7 : HwTy := HwTy.bits 7
 def B8 : HwTy := HwTy.bits 8
@@ -43,9 +46,10 @@ def Ph.s : Nat := 4
 def Ph.h : Nat := 5
 def Ph.x : Nat := 6   -- M: the product (one cycle)
 def Ph.v : Nat := 7   -- M: division, one quotient bit per cycle
+def Ph.p : Nat := 8   -- a bus access (DDR), until it is answered
 
 structure St (ab wb : Nat) (r : HwTy → Type) where
-  ph : r B3
+  ph : r B4
   pc : r B32
   q0 : r B8
   q1 : r B8
@@ -68,23 +72,45 @@ structure St (ab wb : Nat) (r : HwTy → Type) where
   slo : r B2
   sio : r Bit     -- saved for M: the load reads the input port
   trap : r B3
+  busq : r B32    -- the bus: the word read (used instead of q while `fromBus`)
+  fromBus : r Bit
+  badr : r B32    -- the request: address, write, data, byte enables, the phase after
+  bwe : r Bit
+  bwd : r B32
+  bst : r B4
+  bret : r B4
+  bsent : r Bit   -- the request has been taken (`ready` seen)
   deriving Bundle
 
 -- what the core shows: the trap code (0 while running), and a byte written to the
 -- output port (`wr` for one cycle)
+-- what the core shows: the trap code (0 while running); an I/O store (`wr` for one
+-- cycle, at `ioa` with `iod`; `byte` its low byte) or load (`rd`, its value is `ioIn`);
+-- a bus request (DDR: `valid` until `ready`)
 structure Out (r : HwTy → Type) where
   trap : r B3
   wr : r Bit
   byte : r B8
-  take : r Bit    -- the input byte is taken
+  rd : r Bit
+  ioa : r B32
+  iod : r B32
+  valid : r Bit
+  addr : r B32
+  we : r Bit
+  wdata : r B32
+  wstrb : r B4
   deriving Bundle
 
--- what the core sees of the ports: the output can take a byte (a store to the output
--- port waits until it can), an input byte is waiting (and which)
+-- what the core sees: an I/O store may go ahead (it waits in E until it may); the value
+-- of an I/O load at `ioa`; the bus's answer (`ready`: the request is taken, and for a
+-- write done; `rvalid` with `rdata`: a read's data). The board latches `ready` and
+-- `rvalid` until the core has seen them (it may run at a lower rate than the bus).
 structure In (r : HwTy → Type) where
   txReady : r Bit
-  rxFull : r Bit
-  rxByte : r B8
+  ioIn : r B32
+  ready : r Bit
+  rvalid : r Bit
+  rdata : r B32
   deriving Bundle
 
 ------------------------------------------------------------------------------------
@@ -195,7 +221,13 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : St ab wb 
   let inS := isK ph Ph.s;
   let inX : r Bit := if mx then isK ph Ph.x else Hw.lit 1 0;
   let inV : r Bit := if mx then isK ph Ph.v else Hw.lit 1 0;
-  let w : r B32 := Hw.cat s.q3 (Hw.cat s.q2 (Hw.cat s.q1 s.q0));
+  let inP := isK ph Ph.p;
+  -- the word read: from block RAM (the q lanes) or from the bus
+  let w : r B32 := Hw.mux s.fromBus s.busq (Hw.cat s.q3 (Hw.cat s.q2 (Hw.cat s.q1 s.q0)));
+  let wq0 : r B8 := Hw.slice 0 8 w;
+  let wq1 : r B8 := Hw.slice 8 8 w;
+  let wq2 : r B8 := Hw.slice 16 8 w;
+  let wq3 : r B8 := Hw.slice 24 8 w;
   let ω d := decode ab mx w;
   let a := s.x1;
   let rs2v := s.x2;
@@ -244,12 +276,12 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : St ab wb 
   let resE := Hw.mux d.lui d.immU (Hw.mux d.auipc pcImm (Hw.mux (Hw.or d.jal d.jalr) pcInc aluRes));
   -- the loaded value
   let slo := s.slo;
-  let byte := Hw.mux (bitOf 1 slo) (Hw.mux (bitOf 0 slo) s.q3 s.q2) (Hw.mux (bitOf 0 slo) s.q1 s.q0);
-  let half : r B16 := Hw.mux (bitOf 1 slo) (Hw.cat s.q3 s.q2) (Hw.cat s.q1 s.q0);
+  let byte := Hw.mux (bitOf 1 slo) (Hw.mux (bitOf 0 slo) wq3 wq2) (Hw.mux (bitOf 0 slo) wq1 wq0);
+  let half : r B16 := Hw.mux (bitOf 1 slo) (Hw.cat wq3 wq2) (Hw.cat wq1 wq0);
   let sx := Hw.not (bitOf 2 s.sf3);
   let ldm := Hw.mux (bitOf 1 s.sf3) w (Hw.mux (bitOf 0 s.sf3)
     (Hw.cat (rep 16 (Hw.and sx (bitOf 15 half))) half) (Hw.cat (rep 24 (Hw.and sx (bitOf 7 byte))) byte));
-  let ldv := Hw.mux s.sio (Hw.mux x.rxFull (Hw.cat (Hw.lit 24 0) x.rxByte) (Hw.lit 32 4294967295)) ldm;
+  let ldv := Hw.mux s.sio s.acc ldm;
   let sNZ := Hw.not (isK s.srd 0);
   let sDone := isK s.cnt 0;
   let wM := gate inM sNZ;
@@ -280,11 +312,13 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : St ab wb 
   let left := isK s.sf3 1;
   let sh := Hw.mux left (Hw.cat (Hw.slice 0 31 s.acc : r (HwTy.bits 31)) (Hw.lit 1 0))
     (Hw.cat (Hw.and (bitOf 0 slo) (bitOf 31 s.acc)) (Hw.slice 1 31 s.acc : r (HwTy.bits 31)));
-  -- memory: stores in E (not to the output port), byte lanes
-  let st := gate goE (gate d.store (Hw.not io));
+  -- memory: stores in E (not to I/O, not to DDR), byte lanes
+  let ddrS := Hw.and (bitOf 30 sum) (Hw.not io);
+  let st := gate goE (gate d.store (Hw.and (Hw.not io) (Hw.not ddrS)));
   let sb := isK f3 0;
   let sh16 := isK f3 1;
-  let lane := fun (l : Nat) => gate st (Hw.mux sb (isK lo2 l) (Hw.mux sh16 (isK (bitOf 1 sum) (Nat.div l 2)) (Hw.lit 1 1)));
+  let laneOn := fun (l : Nat) => Hw.mux sb (isK lo2 l) (Hw.mux sh16 (isK (bitOf 1 sum) (Nat.div l 2)) (Hw.lit 1 1));
+  let lane := fun (l : Nat) => gate st (laneOn l);
   let d0 : r B8 := Hw.slice 0 8 rs2v;
   let d1 : r B8 := Hw.mux sb d0 (Hw.slice 8 8 rs2v);
   let d2 : r B8 := Hw.mux (isK f3 2) (Hw.slice 16 8 rs2v) d0;
@@ -294,11 +328,20 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : St ab wb 
   -- store's read is not used, the next cycle fetches again)
   let raddr := Hw.mux (gate goE (Hw.or d.load d.store)) sum (Hw.mux goE npc s.pc);
   let rix : r (HwTy.bits wb) := Hw.slice 2 wb raddr;
-  let nph : r B3 := Hw.mux inF (Hw.lit 3 Ph.d) (Hw.mux inD (Hw.lit 3 Ph.e)
-    (Hw.mux inE (Hw.mux trapE (Hw.lit 3 Ph.h) (Hw.mux wait (Hw.lit 3 Ph.e) (Hw.mux d.md (Hw.mux (bitOf 2 f3) (Hw.lit 3 Ph.v) (Hw.lit 3 Ph.x)) (Hw.mux d.load (Hw.lit 3 Ph.m) (Hw.mux shift (Hw.lit 3 Ph.s)
-      (Hw.mux d.store (Hw.lit 3 Ph.f) (Hw.lit 3 Ph.d)))))))
-    (Hw.mux inM (Hw.lit 3 Ph.d) (Hw.mux inS (Hw.mux sDone (Hw.lit 3 Ph.d) (Hw.lit 3 Ph.s))
-    (Hw.mux inX (Hw.lit 3 Ph.d) (Hw.mux inV (Hw.mux sDone (Hw.lit 3 Ph.d) (Hw.lit 3 Ph.v)) ph))))));
+  let nphB : r B4 := Hw.mux inF (Hw.lit 4 Ph.d) (Hw.mux inD (Hw.lit 4 Ph.e)
+    (Hw.mux inE (Hw.mux trapE (Hw.lit 4 Ph.h) (Hw.mux wait (Hw.lit 4 Ph.e) (Hw.mux d.md (Hw.mux (bitOf 2 f3) (Hw.lit 4 Ph.v) (Hw.lit 4 Ph.x)) (Hw.mux d.load (Hw.lit 4 Ph.m) (Hw.mux shift (Hw.lit 4 Ph.s)
+      (Hw.mux d.store (Hw.lit 4 Ph.f) (Hw.lit 4 Ph.d)))))))
+    (Hw.mux inM (Hw.lit 4 Ph.d) (Hw.mux inS (Hw.mux sDone (Hw.lit 4 Ph.d) (Hw.lit 4 Ph.s))
+    (Hw.mux inX (Hw.lit 4 Ph.d) (Hw.mux inV (Hw.mux sDone (Hw.lit 4 Ph.d) (Hw.lit 4 Ph.v)) ph))))));
+  -- the bus (DDR: bit 30 set, bit 31 clear): a fetch or load from DDR, instead of the
+  -- block RAM, and a store to DDR, wait in P for the answer
+  let ddrR := Hw.and (bitOf 30 raddr) (Hw.not (bitOf 31 raddr));
+  let readNext := Hw.or (isK nphB Ph.d) (isK nphB Ph.m);
+  let busRd := gate readNext ddrR;
+  let busWr := gate goE (gate d.store ddrS);
+  let enterP := Hw.or busRd busWr;
+  let done := Hw.mux s.bwe x.ready x.rvalid;
+  let nph : r B4 := Hw.mux inP (Hw.mux done s.bret ph) (Hw.mux enterP (Hw.lit 4 Ph.p) nphB);
   let rfa := Hw.memWrite s.rfa we wa wd;
   let rfb := Hw.memWrite s.rfb we wa wd;
   Hw.pair
@@ -309,7 +352,7 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : St ab wb 
       (Hw.memWrite s.m2 (lane 2) rix d2) (Hw.memWrite s.m3 (lane 3) rix d3)
       rfa rfb
       (Hw.memRead s.rfa (regIx ab d.r1)) (Hw.memRead s.rfb (regIx ab d.r2))
-      (Hw.mux inE (Hw.mux d.md absA a) (Hw.mux inS sh (Hw.mux inV accN s.acc)))
+      (Hw.mux inE (Hw.mux (gate d.load io) x.ioIn (Hw.mux d.md absA a)) (Hw.mux inS sh (Hw.mux inV accN s.acc)))
       (Hw.mux inE absB s.dv)
       (Hw.mux inE (Hw.lit 32 0) (Hw.mux inV rmN s.rm))
       (Hw.mux inE (Hw.mux d.md (Hw.lit 5 31) (Hw.slice 0 5 b)) (Hw.mux (Hw.or inS inV) (Hw.sub s.cnt (Hw.lit 5 1)) s.cnt))
@@ -317,8 +360,18 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : St ab wb 
       (Hw.mux inE f3 s.sf3)
       (Hw.mux inE (Hw.mux d.md (Hw.cat negA negQ) (Hw.mux d.load lo2 (Hw.cat (Hw.lit 1 0) d.alt))) s.slo)
       (Hw.mux inE (gate d.load io) s.sio)
-      (Hw.mux trapE code s.trap)))
-    (Out.pack (Out.mk s.trap (gate goE (gate d.store io)) (Hw.slice 0 8 rs2v) (gate inM (gate s.sio x.rxFull))))
+      (Hw.mux trapE code s.trap)
+      (Hw.mux (gate inP x.rvalid) x.rdata s.busq)
+      (Hw.mux (gate inP (gate (Hw.not s.bwe) x.rvalid)) (Hw.lit 1 1)
+        (Hw.mux (Hw.and (Hw.not inP) (gate readNext (Hw.not ddrR))) (Hw.lit 1 0) s.fromBus))
+      (Hw.mux enterP (Hw.mux busWr sum raddr) s.badr)
+      (Hw.mux enterP busWr s.bwe)
+      (Hw.mux enterP (Hw.cat d3 (Hw.cat d2 (Hw.cat d1 d0))) s.bwd)
+      (Hw.mux enterP (Hw.cat (laneOn 3) (Hw.cat (laneOn 2) (Hw.cat (laneOn 1) (laneOn 0)))) s.bst)
+      (Hw.mux enterP (Hw.mux busWr (Hw.lit 4 Ph.f) nphB) s.bret)
+      (Hw.mux inP (Hw.or s.bsent x.ready) (Hw.lit 1 0))))
+    (Out.pack (Out.mk s.trap (gate goE (gate d.store io)) (Hw.slice 0 8 rs2v) (gate goE (gate d.load io)) sum rs2v
+      (gate inP (Hw.not s.bsent)) s.badr s.bwe s.bwd s.bst))
 
 ------------------------------------------------------------------------------------
 -- The core as a circuit, with a program in memory from address 0
@@ -328,16 +381,22 @@ def Core.lane (prog : List Nat) (wb l : Nat) : HwTy.El (HwTy.mem wb 8) :=
   fun (a : BitVec wb) => BitVec.ofNat 8 (Rv.bits (Rv.wordAt prog a.toNat) (8 * l) 8)
 
 def St.init (ab wb : Nat) (prog : List Nat) : St ab wb HwTy.El :=
-  St.mk (BitVec.ofNat 3 Ph.f) (BitVec.ofNat 32 0)
+  St.mk (BitVec.ofNat 4 Ph.f) (BitVec.ofNat 32 0)
     (BitVec.ofNat 8 0) (BitVec.ofNat 8 0) (BitVec.ofNat 8 0) (BitVec.ofNat 8 0)
     (Core.lane prog wb 0) (Core.lane prog wb 1) (Core.lane prog wb 2) (Core.lane prog wb 3)
     (fun (a : BitVec ab) => BitVec.ofNat 32 0) (fun (a : BitVec ab) => BitVec.ofNat 32 0)
     (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0)
     (BitVec.ofNat 5 0) (BitVec.ofNat 5 0) (BitVec.ofNat 3 0) (BitVec.ofNat 2 0) (BitVec.ofNat 1 0) (BitVec.ofNat 3 0)
+    (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0)
+    (BitVec.ofNat 4 0) (BitVec.ofNat 4 0) (BitVec.ofNat 1 0)
 
 def core (ab wb : Nat) (mx : Bool) (prog : List Nat) : Circuit In.code Out.code :=
   Circuit.mk (St.code ab wb) (Bundle.toEl (St.bundle ab wb) (St.init ab wb prog))
     (fun s x => coreStep ab wb mx (St.unpack ab wb s) (In.unpack x))
 
+-- the ports with nothing attached: stores may go, loads read -1, no bus
+def In.quiet {r : HwTy → Type} [Hw r] : In r :=
+  In.mk (Hw.lit 1 1) (Hw.lit 32 4294967295) (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 32 0)
+
 -- the ports at values: always ready, nothing to read
-def In.idle : In HwTy.El := In.mk (BitVec.ofNat 1 1) (BitVec.ofNat 1 0) (BitVec.ofNat 8 0)
+def In.idle : In HwTy.El := In.mk (BitVec.ofNat 1 1) (BitVec.ofNat 32 4294967295) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0)

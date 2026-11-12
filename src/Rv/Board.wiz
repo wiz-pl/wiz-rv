@@ -18,7 +18,7 @@ structure Sys (ab wb : Nat) (r : HwTy → Type) where
 -- LED1 … LED4: the low four bits of the last byte written; LED5 (green): stopped
 def sysStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : Sys ab wb r) (x : Pins r) :
     r (HwTy.prod (Sys.code ab wb) Leds.code) :=
-  let cr := coreStep ab wb mx s.cpu (In.mk (Hw.lit 1 1) (Hw.lit 1 0) (Hw.lit 8 0));
+  let cr := coreStep ab wb mx s.cpu In.quiet;
   let ω o := Out.unpack (Hw.snd cr);
   let latch := Hw.mux o.wr (Hw.slice 0 5 o.byte) s.latch;
   Hw.pair (Sys.pack ab wb (Sys.mk (St.unpack ab wb (Hw.fst cr)) latch))
@@ -72,21 +72,27 @@ def aStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (n : Nat)
     (s : ASys ab wb r) (x : APins r) : r (HwTy.prod (ASys.code ab wb) ABoard.code) :=
   let rr := rxStep n s.rx s.sync.ff2;
   let ω got := Byte.unpack (Hw.snd rr);
-  let cr := coreStep ab wb mx s.cpu (In.mk (txIdle s.tx) s.full s.byte);
+  let ω o0 := Out.unpack (Hw.snd (coreStep ab wb mx s.cpu In.quiet));
+  -- the UART at offset 0: an input byte or -1; a store waits for the transmitter
+  let uartA := isK (Hw.slice 0 8 o0.ioa : r B8) 0;
+  let cr := coreStep ab wb mx s.cpu (In.mk (Hw.mux uartA (txIdle s.tx) (Hw.lit 1 1))
+    (Hw.mux s.full (Hw.cat (Hw.lit 24 0) s.byte) (Hw.lit 32 4294967295)) (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 32 0));
   let ω o := Out.unpack (Hw.snd cr);
+  let take := Hw.and o.rd uartA;
   let rst := bitOf 0 x.btn;
   let ω c := St.unpack ab wb (Hw.fst cr);
   -- the reset: the phase, the PC and the trap code only (no reset on the memories'
   -- read registers, which are block RAM's output latches)
-  let c2 := St.mk (Hw.mux rst (Hw.lit 3 Ph.f) c.ph) (Hw.mux rst (Hw.lit 32 0) c.pc) c.q0 c.q1 c.q2 c.q3
-    c.m0 c.m1 c.m2 c.m3 c.rfa c.rfb c.x1 c.x2 c.acc c.dv c.rm c.cnt c.srd c.sf3 c.slo c.sio (Hw.mux rst (Hw.lit 3 0) c.trap);
+  let c2 := St.mk (Hw.mux rst (Hw.lit 4 Ph.f) c.ph) (Hw.mux rst (Hw.lit 32 0) c.pc) c.q0 c.q1 c.q2 c.q3
+    c.m0 c.m1 c.m2 c.m3 c.rfa c.rfb c.x1 c.x2 c.acc c.dv c.rm c.cnt c.srd c.sf3 c.slo c.sio (Hw.mux rst (Hw.lit 3 0) c.trap)
+    c.busq c.fromBus c.badr c.bwe c.bwd c.bst c.bret c.bsent;
   Hw.pair
     (ASys.pack ab wb (ASys.mk
       c2
       (Sync.unpack (syncStep s.sync x.uart_rx))
       (Rx.unpack (Hw.fst rr))
-      (Tx.unpack (txStep n s.tx o.wr o.byte))
-      (Hw.mux got.valid hi (Hw.mux o.take lo s.full))
+      (Tx.unpack (txStep n s.tx (Hw.and o.wr uartA) o.byte))
+      (Hw.mux got.valid hi (Hw.mux take lo s.full))
       (Hw.mux got.valid got.data s.byte)
       (inc s.beat)
       (Hw.mux rst lo (Hw.mux o.wr hi s.sent))

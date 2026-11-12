@@ -196,3 +196,17 @@ def Prog.demo (stack : Nat) : List Asm :=
 def Prog.ioload : List Asm :=
   P.port :: A.lw 1 0 15 :: A.lb 2 4 15 :: A.lhu 3 8 15 :: A.lw 0 0 15 ::
   A.srli 4 1 24 :: P.out 4 :: P.out 2 :: P.out 3 :: A.ebreak :: .nil
+
+-- DDR (0x40000000): stores and loads of every size, then a routine copied into DDR and
+-- called there (fetches over the bus)
+def D.routine : List Nat := Asm.assemble (A.addi 5 5 7 :: A.slli 5 5 1 :: A.ret :: .nil)
+def D.copyWords : Nat → List Nat → List Asm
+  | _, .nil => .nil
+  | k, .cons w ws => List.append (A.li 7 (Int.ofNat w) :: A.sw 7 (Int.ofNat (256 + 4 * k)) 1 :: .nil) (D.copyWords (Nat.succ k) ws)
+def Prog.ddr : List Asm :=
+  List.append (P.port :: A.lui 1 262144 :: A.li 2 (-2023406815) ::
+    A.sw 2 0 1 :: A.lw 3 0 1 :: P.out 3 :: A.lbu 3 3 1 :: P.out 3 :: A.sb 2 5 1 :: A.sh 2 10 1 ::
+    A.lw 3 4 1 :: A.srli 3 3 8 :: P.out 3 :: A.lh 3 10 1 :: A.srli 3 3 8 :: P.out 3 :: A.lw 3 8 1 :: A.srli 3 3 16 :: P.out 3 ::
+    A.li 5 10 :: .nil)
+  (List.append (D.copyWords 0 D.routine)
+  (A.addi 6 1 256 :: A.jalr 1 6 0 :: P.out 5 :: A.ebreak :: .nil))

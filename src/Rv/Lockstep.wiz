@@ -58,35 +58,67 @@ def Ls.natsEq : List Nat → List Nat → Bool
   | .cons a as, .cons b bs => Bool.and (Nat.beq a b) (Ls.natsEq as bs)
   | _, _ => .false
 
-def Ls.finish (ab wb : Nat) (s : St ab wb HwTy.El) (a : Arch) (cyc ins : Nat) (out : List Nat) (why : List String) : Ls.Result :=
+-- DDR bytes 0x40000000 … + n - 1 that differ
+def Ls.ddrDiff (ddr : BitVec 32 → BitVec 8) (a : Arch) : Nat → List String
+  | .zero => .nil
+  | .succ k =>
+    let ω x := Rv.w32 (1073741824 + k);
+    let ω hw := (ddr x).toNat;
+    let ω sp := (a.mem x).toNat;
+    List.append (if Nat.beq hw sp then .nil
+      else .cons ("ddr[" ++ Nat.repr k ++ "]: core " ++ Nat.repr hw ++ ", spec " ++ Nat.repr sp) .nil)
+      (Ls.ddrDiff ddr a k)
+
+def Ls.finish (ab wb : Nat) (s : St ab wb HwTy.El) (a : Arch) (cyc ins : Nat) (out : List Nat) (ddr : BitVec 32 → BitVec 8) (why : List String) : Ls.Result :=
   let ω o := List.reverse out;
   let ω outP : List String := if Ls.natsEq o (List.reverse a.out) then .nil else .cons "output differs" .nil;
   let ω trapP : List String := if Nat.beq s.trap.toNat a.trap then .nil
     else .cons ("trap: core " ++ Nat.repr s.trap.toNat ++ ", spec " ++ Nat.repr a.trap) .nil;
   Ls.Result.mk cyc ins s.trap.toNat o
     (List.append why (List.append trapP (List.append outP (List.append (Ls.compare ab wb s a)
-      (Ls.memDiff ab wb s a (Rv.pow2 (wb + 2)))))))
+      (List.append (Ls.memDiff ab wb s a (Rv.pow2 (wb + 2))) (Ls.ddrDiff ddr a 256))))))
+
+-- The bus: a DDR model (bytes, initially zero) that answers a request `lat` cycles
+-- after it is made.
+def Ls.lat : Nat := 3
+def Ls.ddrWord (m : BitVec 32 → BitVec 8) (a : BitVec 32) : BitVec 32 :=
+  let ω b := Nat.mul (Nat.div a.toNat 4) 4;
+  Rv.w32 ((m (Rv.w32 b)).toNat + 256 * (m (Rv.w32 (b + 1))).toNat + 65536 * (m (Rv.w32 (b + 2))).toNat
+    + 16777216 * (m (Rv.w32 (b + 3))).toNat)
+def Ls.ddrStore (m : BitVec 32 → BitVec 8) (a : BitVec 32) (d : BitVec 32) (st : BitVec 4) : BitVec 32 → BitVec 8 :=
+  fun (x : BitVec 32) =>
+    let ω b := Nat.mul (Nat.div a.toNat 4) 4;
+    let ω k := x.toNat - b;
+    if Bool.and (Bool.not (Nat.lt x.toNat b)) (Bool.and (Nat.lt x.toNat (b + 4)) (Rv.bit st.toNat k))
+    then BitVec.ofNat 8 (Rv.bits d.toNat (8 * k) 8) else m x
 
 -- `fuel` cycles at most; `a` is the specification's state for the instruction the core
 -- is on (or will decode next)
 def Ls.go (ab wb : Nat) (mx : Bool) (prog : List Nat) :
-    Nat → Nat → List Nat → Nat → HwTy.El (St.code ab wb) → Arch → Ls.Result
-  | cyc, ins, out, .zero, v, a => Ls.finish ab wb (Ls.hw (ab := ab) (wb := wb) v) a cyc ins out (.cons "out of cycles" .nil)
-  | cyc, ins, out, .succ fuel, v, a =>
+    Nat → Nat → List Nat → (BitVec 32 → BitVec 8) → Nat → Nat → HwTy.El (St.code ab wb) → Arch → Ls.Result
+  | cyc, ins, out, ddr, lat, .zero, v, a => Ls.finish ab wb (Ls.hw (ab := ab) (wb := wb) v) a cyc ins out ddr (.cons "out of cycles" .nil)
+  | cyc, ins, out, ddr, lat, .succ fuel, v, a =>
     let ω s := Ls.hw (ab := ab) (wb := wb) v;
     let ω ph := s.ph.toNat;
-    if Nat.beq ph Ph.h then Ls.finish ab wb s a cyc ins out .nil
+    if Nat.beq ph Ph.h then Ls.finish ab wb s a cyc ins out ddr .nil
     else
       let ω bad : List String := if Nat.beq ph Ph.d then Ls.compare ab wb s a else .nil;
       match bad with
-      | .cons p ps => Ls.finish ab wb s a cyc ins out (.cons ("after " ++ Nat.repr ins ++ " instructions") bad)
+      | .cons p ps => Ls.finish ab wb s a cyc ins out ddr (.cons ("after " ++ Nat.repr ins ++ " instructions") bad)
       | .nil =>
-        let ω r := coreStep (r := HwTy.El) ab wb mx (Ls.hw (ab := ab) (wb := wb) v) In.idle;
+        let ω req := Bool.and (Nat.beq ph Ph.p) (Bool.not (BitVec.isTrue s.bsent));
+        let ω ans := Bool.and req (Nat.beq lat 0);
+        let ω wr := Bool.and ans (BitVec.isTrue s.bwe);
+        let ω inp : In HwTy.El := In.mk (BitVec.ofNat 1 1) (BitVec.ofNat 32 4294967295)
+          (Bool.toBits ans) (Bool.toBits (Bool.and ans (Bool.not (BitVec.isTrue s.bwe)))) (Ls.ddrWord ddr s.badr);
+        let ω r := coreStep (r := HwTy.El) ab wb mx s inp;
         let ω o := Bundle.ofEl Out.bundle r.2;
         let ω out2 : List Nat := if BitVec.isTrue o.wr then .cons o.byte.toNat out else out;
         let ω a2 := if Nat.beq ph Ph.d then Rv.step (Ls.cfgM ab wb mx) a else a;
         let ω ins2 := if Nat.beq ph Ph.d then Nat.succ ins else ins;
-        Ls.go ab wb mx prog (Nat.succ cyc) ins2 out2 fuel r.1 a2
+        let ω ddr2 := if wr then Ls.ddrStore ddr s.badr s.bwd s.bst else ddr;
+        let ω lat2 := if req then (if Nat.beq lat 0 then Ls.lat else lat - 1) else Ls.lat;
+        Ls.go ab wb mx prog (Nat.succ cyc) ins2 out2 ddr2 lat2 fuel r.1 a2
 
 def Ls.run (ab wb : Nat) (mx : Bool) (prog : List Nat) (fuel : Nat) : Ls.Result :=
-  Ls.go ab wb mx prog 0 0 .nil fuel (Bundle.toEl (St.bundle ab wb) (St.init ab wb prog)) (Arch.start (Ls.cfgM ab wb mx) prog)
+  Ls.go ab wb mx prog 0 0 .nil (fun (x : BitVec 32) => BitVec.ofNat 8 0) Ls.lat fuel (Bundle.toEl (St.bundle ab wb) (St.init ab wb prog)) (Arch.start (Ls.cfgM ab wb mx) prog)
