@@ -42,7 +42,7 @@ Xilinx part) and a 32-cycle restoring divider.
 | design | part | logic | block RAM | Fmax (nextpnr) |
 |---|---|---|---|---|
 | RV32E, 2 KB | iCE40-HX1K (tq144) | 1020 / 1280 LCs (79 %) | 8 / 16 | 40 MHz |
-| RV32IM, 16 KB, UART (`rv32im_arty_uart`) | Artix-7 XC7A35T (Arty A7-35T) | about 970 LUTs, 295 FFs, 10 DSP48E1 | 4 RAMB36E1 + 12 RAM32M (the register file) | 79 MHz: run at half rate (FINDINGS.md, H5) |
+| RV32IM, 16 KB, UART (`rv32im_arty_uart`) | Artix-7 XC7A35T (Arty A7-35T) | about 970 LUTs, 300 FFs, 10 DSP48E1 | 4 RAMB36E1 + 12 RAM32M (the register file) | 78.9 MHz: run at half rate, 50 MHz (FINDINGS.md, H5) |
 
 (The Arty build is artix-target's openXC7 flow: yosys, nextpnr-xilinx, Project X-Ray.)
 
@@ -64,6 +64,8 @@ primes up to 1000:
 and then echoes what is typed. The self-test compares 40 M results computed on the
 board with the specification's (`Rv.muldiv`, evaluated when the program is assembled).
 On the host: `picocom -b 115200 /dev/serial/by-id/usb-Digilent_*-if01-port0`, then BTN0.
+It ran on the user's Arty A7-35T on 2026-11-12 (loaded by artix-target): the 711 bytes
+above, byte for byte, then the echo.
 
 Lockstep (`tests/lockstep.wiz`): the core and the specification agree, instruction by
 instruction (PC and every register at each instruction boundary, all memory and the
