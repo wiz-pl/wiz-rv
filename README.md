@@ -169,6 +169,17 @@ On the board (2026-11-12, with wiz-ddr3 f99ab70): the boot loader printed "wiz-r
 start-up on the console, as in the simulator). `scripts/arty-load.sh` is what was run
 (SRAM load, then rvload when the board says "DDR ok").
 
+With the pipelined core at 100 MHz (2026-11-12, doom_top at 100.12 MHz in nextpnr): Doom's
+demo loop at about 15 frames a second (69 to 83 frames per 5 s), about 278 M instructions
+per 500 M cycles, so CPI about 1.8. (The perf line's "CPI x100" divides the 50 MHz cycle
+counter by the instruction count: 89 there is 1.78.) The multi-cycle core at half rate
+managed about 4 frames a second, at CPI 3.9 in 50 MHz cycles. A bus access is under way in about half of the
+cycles, and the front end waits for a miss or a restart in about a quarter. The OLED
+streamer's "odd" count rose by about 25 to 30 per 5 s, out of about 120 refreshes. It
+counts a refresh whose checksum changed with no framebuffer write since the last
+refresh, so a write during the previous refresh, after its pixel was sent, also counts.
+With Doom drawing faster, that artefact grows. It needs a look at the panel.
+
 Checked so far: the core's bus and the boot loader in the lockstep against the
 specification (with a DDR model), and compiled C (sw/ctest: gcc's output and newlib's
 string functions, 1060 instructions, generated into src/Rv/CTest.wiz by app/bin2wiz); the whole machine but the DDR controller in Icarus
