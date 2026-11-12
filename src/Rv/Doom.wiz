@@ -282,7 +282,9 @@ def dSys (full : Bool) (cc : Circuit CIn.code COut.code) {r : HwTy → Type} [Hw
       (Hw.cat ol.pins.pmoden (Hw.cat ol.pins.vccen (Hw.cat ol.pins.res (Hw.cat ol.pins.dc
         (Hw.cat ol.spi.sclk (Hw.cat (Hw.lit 1 0) (Hw.cat ol.spi.mosi ol.pins.cs)))))))
       -- (silence, 128, drives the pin low: no 195 kHz switching on the Pmod when quiet)
-      (Hw.cat (Hw.lit 7 0) (Hw.ult (Hw.slice lob 8 sn.pwm : r W8) sn.cur))
+      -- (JB1 the PWM, JB2 its complement: a piezo from JB1 to GND, or across JB1 and JB2
+      -- for twice the swing)
+      (Hw.cat (Hw.lit 6 0) (Hw.cat (Hw.not (Hw.ult (Hw.slice lob 8 sn.pwm : r W8) sn.cur)) (Hw.ult (Hw.slice lob 8 sn.pwm : r W8) sn.cur)))
       s.edge.valid o.addr o.we o.wdata o.wstrb s.edge.pend))
 
 def DSys.init (cc : Circuit CIn.code COut.code) : DSys cc.st HwTy.El :=

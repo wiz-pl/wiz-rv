@@ -17,6 +17,7 @@ void DG_Init(void) {}
 
 /* OLED pixel (x, y) covers frame columns [x*320/96, (x+1)*320/96) and rows
    [y*200/64, (y+1)*200/64): average 2 x 2 samples of that block */
+void mus_stats(unsigned *on, unsigned *notes, int *vol, unsigned *regs);
 static uint32_t sw_w;   /* framebuffer writes made by DG_DrawFrame */
 /* every 5 s: the performance counters' increments (cycles at 50 MHz) */
 static void perf_report(void) {
@@ -32,6 +33,7 @@ static void perf_report(void) {
          (unsigned)(b - l_b), (unsigned)(m - l_m), (unsigned)(l - l_l), (unsigned)(f - l_f), (unsigned)(h - l_h), (unsigned)(x - l_x), (unsigned)(w - l_w), (unsigned)sw_w);
   l_w = w; sw_w = 0;
   printf("oled: refreshes %u, odd %u, last sum %08x; sound underruns %u\n", (unsigned)PERF_REFRESH, (unsigned)PERF_ODD, (unsigned)PERF_SUM, (unsigned)PERF_UNDER);
+  { unsigned on, notes, regs; int vol; mus_stats(&on, &notes, &vol, &regs); printf("music: registered %u (last %u bytes), playing %u, notes %u, volume %d\n", regs & 255, regs >> 8, on, notes, vol); }
   { uint32_t o = PERF_OLED; printf("oled pins: pmoden %u vccen %u res %u dc %u cs %u, pc %u\n", (unsigned)(o >> 11) & 1, (unsigned)(o >> 10) & 1, (unsigned)(o >> 9) & 1, (unsigned)(o >> 8) & 1, (unsigned)(o >> 7) & 1, (unsigned)o & 127); }
   last = now; frames = 0; l_i = i; l_b = b; l_m = m; l_l = l; l_f = f; l_h = h; l_x = x;
 }

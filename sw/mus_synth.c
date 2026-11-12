@@ -3,6 +3,9 @@
    headers: it needs SND_RATE, <stdint.h>, <string.h>. */
 /* music: MUS (a MIDI-like score: 16 channels, 15 the percussion; events at 140 Hz) */
 #define MUSV 6
+#ifndef MUS_OCT
+#define MUS_OCT 1      /* transpose (a piezo has little below about 500 Hz) */
+#endif
 typedef struct {
   int chan, note;        /* chan -1: free */
   uint32_t phase, step;  /* a square wave: the top bit of phase */
@@ -24,10 +27,11 @@ static void notes_init(void) {
   static const uint32_t semi[12] = { 65536, 69433, 73562, 77936, 82570, 87480, 92682, 98193,
     104032, 110218, 116772, 123715 };
   for (int n = 0; n < 128; n++) {
-    int o = n / 12 - 5, k = n % 12;   /* note 60 (C4): 261.63 Hz */
+    int o = n / 12 - 5 + MUS_OCT, k = n % 12;   /* note 60 (C4): 261.63 Hz, MUS_OCT octaves up */
     uint64_t f = (uint64_t)26163 * semi[k];                  /* Hz × 100 × 65536 */
     f = o >= 0 ? f << o : f >> -o;
-    notestep[n] = (uint32_t)((f << 16) / (100ull * SND_RATE));  /* (f / 100 / 65536) × 2^32 / rate */
+    uint64_t st = (f << 16) / (100ull * SND_RATE);  /* (f / 100 / 65536) × 2^32 / rate */
+    notestep[n] = st >= (1ull << 31) ? 0 : (uint32_t)st;   /* (above half the rate: silent) */
   }
 }
 
@@ -96,6 +100,6 @@ static int mus_sample(void) {
     if (v->env <= 0) v->chan = -1;
   }
   /* 6 voices at full velocity and volume: ±144 (mix1 clips); a typical score peaks about ±70 */
-  return acc / (127 * 4096 / 24) * mus_volume / 127;
+  return acc / (127 * 4096 / 24) * mus_volume * 3 / (2 * 127);   /* (× 1.5: the piezo's balance) */
 }
 

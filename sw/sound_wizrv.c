@@ -42,11 +42,17 @@ static uint8_t mix1(void) {
     if (!c->data) continue;
     uint32_t k = c->pos >> 16;
     if (k >= c->len) { c->data = NULL; continue; }
+#ifndef MUSIC_TEST
     acc += ((int)c->data[k] - 128) * c->vol / 128;
+#endif
     c->pos += c->step;
   }
-  acc += 128;
-  return (uint8_t)(acc < 0 ? 0 : acc > 255 ? 255 : acc);
+  /* the master gain (× 1.5), then a soft limit: linear to ±80, above that compressed
+     smoothly towards ±127 (no hard wrap or flat clipping on loud mixes) */
+  int x = acc * 3 / 2, m = x < 0 ? -x : x;
+  if (m > 80) m = 80 + (m - 80) * 47 / (m - 80 + 47);
+  x = x < 0 ? -m : m;
+  return (uint8_t)(x + 128);
 }
 
 static void snd_update(void) {
@@ -95,12 +101,21 @@ sound_module_t DG_sound_module = {
 
 static boolean mus_init(void) { notes_init(); mus_on = 0; for (int i = 0; i < MUSV; i++) vo[i].chan = -1; return true; }
 static void mus_shutdown(void) { mus_on = 0; }
-static void mus_vol(int v) { mus_volume = v; }
+static void mus_vol(int v) {
+#ifdef MUSIC_TEST
+  v = 127;
+#endif
+  mus_volume = v;
+}
+/* for the perf line: playing, notes started so far, the volume, registrations */
+static unsigned mus_regs, mus_len;
+void mus_stats(unsigned *on, unsigned *notes, int *vol, unsigned *regs) { *on = mus_on; *notes = vage; *vol = mus_volume; *regs = mus_regs | (mus_len << 8); }
 static void mus_pause(void) { mus_paused = 1; }
 static void mus_resume(void) { mus_paused = 0; }
 /* a MUS lump: "MUS\x1a", score length, score start (16 bits each), … */
 static void *mus_register(void *d, int n) {
   const uint8_t *b = d;
+  mus_regs++; mus_len = n;
   if (n < 16 || memcmp(b, "MUS\x1a", 4)) return NULL;
   return d;
 }
