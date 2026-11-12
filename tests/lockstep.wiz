@@ -55,11 +55,12 @@ def mulI : String := report 5 Prog.muldivShort 400
 def mulIM : String := reportM 5 .true Prog.muldivShort 3000
 #eval mulIM
 -- the Doom machine's boot loader (on-chip RAM, 16 KB), loading a program into DDR over
--- the UART and running it there
+-- the UART and running it there (the specification models every I/O load as the UART's:
+-- the boot loader's read of the DDR status takes the first byte, 1: "DDR ok")
 def bootE : String := (fun (r : Ls.Result) => Nat.repr r.instrs ++ " instructions, out " ++ showBytes r.out
     ++ (match r.problems with
       | .nil => "agrees"
-      | ps => "DISAGREES" ++ lines ps)) (Ls.runIn 4 12 .false (Asm.assemble Prog.boot) (Boot.session (Asm.assemble Prog.hello)) 6000)
+      | ps => "DISAGREES" ++ lines ps)) (Ls.runIn 4 12 .false (Asm.assemble Prog.boot) (.cons 1 (Boot.session (Asm.assemble Prog.hello))) 6000)
 #eval bootE
 -- compiled C (sw/ctest, gcc for RV32IM, newlib's string functions on misaligned
 -- buffers, division, a 64-bit product), in the on-chip RAM

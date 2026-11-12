@@ -3,7 +3,7 @@ import Rv.Asm
 import Text
 -- Lockstep simulation: the core (`core ab wb prog`, on values, cycle by cycle) against
 -- the specification (`Rv.step`, instruction by instruction). Whenever the core is in its
--- decode phase it is at an instruction boundary, and its PC and every register (both
+-- execute phase it is at an instruction boundary (the registers are those before it), and its PC and every register (both
 -- copies of the register file) must be the specification's; when it stops, its trap
 -- code and PC; at the end, the bytes written to the output port and every byte of
 -- memory.
@@ -102,24 +102,26 @@ def Ls.go (ab wb : Nat) (mx : Bool) (prog : List Nat) :
     let ω ph := s.ph.toNat;
     if Nat.beq ph Ph.h then Ls.finish ab wb s a cyc ins out ddr .nil
     else
-      let ω bad : List String := if Nat.beq ph Ph.d then Ls.compare ab wb s a else .nil;
+      -- (at E: every instruction passes E once; D can repeat after a cache miss)
+      let ω bad : List String := if Nat.beq ph Ph.e then Ls.compare ab wb s a else .nil;
       match bad with
       | .cons p ps => Ls.finish ab wb s a cyc ins out ddr (.cons ("after " ++ Nat.repr ins ++ " instructions") bad)
       | .nil =>
-        let ω req := Bool.and (Nat.beq ph Ph.p) (Bool.not (BitVec.isTrue s.bsent));
+        let ω q := Bundle.ofEl Out.bundle (coreStep (r := HwTy.El) ab wb mx s In.idle).2;
+        let ω req := BitVec.isTrue q.valid;
         let ω ans := Bool.and req (Nat.beq lat 0);
-        let ω wr := Bool.and ans (BitVec.isTrue s.bwe);
+        let ω wr := Bool.and ans (BitVec.isTrue q.we);
         let ω ioIn : BitVec 32 := (match inp with
           | .cons c cs => BitVec.ofNat 32 c
           | .nil => BitVec.ofNat 32 4294967295);
         let ω port : In HwTy.El := In.mk (BitVec.ofNat 1 1) ioIn
-          (Bool.toBits ans) (Bool.toBits (Bool.and ans (Bool.not (BitVec.isTrue s.bwe)))) (Ls.ddrWord ddr s.badr);
+          (Bool.toBits ans) (Bool.toBits (Bool.and ans (Bool.not (BitVec.isTrue q.we)))) (Ls.ddrWord ddr q.addr);
         let ω r := coreStep (r := HwTy.El) ab wb mx s port;
         let ω o := Bundle.ofEl Out.bundle r.2;
         let ω out2 : List Nat := if BitVec.isTrue o.wr then .cons o.byte.toNat out else out;
-        let ω a2 := if Nat.beq ph Ph.d then Rv.step (Ls.cfgM ab wb mx) a else a;
-        let ω ins2 := if Nat.beq ph Ph.d then Nat.succ ins else ins;
-        let ω ddr2 := if wr then Ls.ddrStore ddr s.badr s.bwd s.bst else ddr;
+        let ω a2 := if Nat.beq ph Ph.e then Rv.step (Ls.cfgM ab wb mx) a else a;
+        let ω ins2 := if Nat.beq ph Ph.e then Nat.succ ins else ins;
+        let ω ddr2 := if wr then Ls.ddrStore ddr q.addr q.wdata q.wstrb else ddr;
         let ω lat2 := if req then (if Nat.beq lat 0 then Ls.lat else lat - 1) else Ls.lat;
         let ω inp2 : List Nat := (match BitVec.isTrue o.rd, inp with
           | .true, .cons c cs => cs

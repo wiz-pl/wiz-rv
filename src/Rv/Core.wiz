@@ -47,6 +47,16 @@ def Ph.h : Nat := 5
 def Ph.x : Nat := 6   -- M: the product (one cycle)
 def Ph.v : Nat := 7   -- M: division, one quotient bit per cycle
 def Ph.p : Nat := 8   -- a bus access (DDR), until it is answered
+def Ph.q : Nat := 9   -- after a cache line was filled: read it again
+
+-- The L1 cache in front of DDR (unified: the core reads one word at a time, an
+-- instruction or data): 2^lb lines of 16 bytes in block RAM, direct-mapped, write-through
+-- without allocation (a store to a line that is present updates it). A tag is the
+-- valid bit and address bits 27 … 4 + lb. 16 KB (lb = 10) for the Doom machine (wb = 12);
+-- one line for the smaller configurations, which have no DDR.
+def L1.bits (wb : Nat) : Nat := if Nat.lt wb 12 then 1 else 10
+def L1.tagW (wb : Nat) : Nat := Nat.add 1 (24 - L1.bits wb)
+def B128 : HwTy := HwTy.bits 128
 
 structure CoreSt (ab wb : Nat) (r : HwTy → Type) where
   ph : r B4
@@ -80,6 +90,18 @@ structure CoreSt (ab wb : Nat) (r : HwTy → Type) where
   bst : r B4
   bret : r B4
   bsent : r W1   -- the request has been taken (`ready` seen)
+  ra : r B32      -- the address the memories were last read at (q, l1q, l1t)
+  l1q : r B128    -- the L1's read registers: the line, its tag
+  l1t : r (HwTy.bits (L1.tagW wb))
+  l1d : r (HwTy.mem (L1.bits wb) 128)
+  l1tag : r (HwTy.mem (L1.bits wb) (L1.tagW wb))
+  fromL1 : r W1   -- the word read is the L1's (DDR)
+  rmode : r W1    -- the bus phase is a line fill: word rk of the line at rline, into rbuf
+  rk : r B2
+  rgap : r W1     -- (a cycle without a request between two words)
+  rbuf : r B128
+  rline : r B32
+  bnew : r W1     -- the first cycle of a store's bus phase (the L1 is updated then)
   deriving Bundle
 
 -- what the core shows: the trap code (0 while running), and a byte written to the
@@ -223,8 +245,17 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
   let inX : r W1 := if mx then isK ph Ph.x else Hw.lit 1 0;
   let inV : r W1 := if mx then isK ph Ph.v else Hw.lit 1 0;
   let inP := isK ph Ph.p;
-  -- the word read: from block RAM (the q lanes) or from the bus
-  let w : r B32 := Hw.mux s.fromBus s.busq (Hw.cat s.q3 (Hw.cat s.q2 (Hw.cat s.q1 s.q0)));
+  let inQ := isK ph Ph.q;
+  -- the L1: a hit is the tag read with the line equal to the address's
+  let lb := L1.bits wb;
+  let l1idx := fun (a : r B32) => (Hw.slice 4 lb a : r (HwTy.bits lb));
+  let l1tagOf := fun (a : r B32) => (Hw.cat (Hw.lit 1 1) (Hw.slice (4 + lb) (24 - lb) a : r (HwTy.bits (24 - lb))) : r (HwTy.bits (L1.tagW wb)));
+  let hit := Hw.eq s.l1t (l1tagOf s.ra);
+  let l1w : r B32 := Hw.mux (bitOf 3 s.ra) (Hw.mux (bitOf 2 s.ra) (Hw.slice 96 32 s.l1q) (Hw.slice 64 32 s.l1q))
+    (Hw.mux (bitOf 2 s.ra) (Hw.slice 32 32 s.l1q) (Hw.slice 0 32 s.l1q));
+  let miss := gate (Hw.or inD inM) (gate s.fromL1 (Hw.not hit));
+  -- the word read: from block RAM (the q lanes), the L1, or the bus
+  let w : r B32 := Hw.mux s.fromL1 l1w (Hw.mux s.fromBus s.busq (Hw.cat s.q3 (Hw.cat s.q2 (Hw.cat s.q1 s.q0))));
   let wq0 : r W8 := Hw.slice 0 8 w;
   let wq1 : r W8 := Hw.slice 8 8 w;
   let wq2 : r W8 := Hw.slice 16 8 w;
@@ -285,7 +316,7 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
   let ldv := Hw.mux s.sio s.acc ldm;
   let sNZ := Hw.not (isK s.srd 0);
   let sDone := isK s.cnt 0;
-  let wM := gate inM sNZ;
+  let wM := gate inM (gate (Hw.not miss) sNZ);
   let wS := gate inS (Hw.and sDone sNZ);
   -- M: the operands' signs and magnitudes (E), the product (X), a division step (V)
   let signed := Hw.not (bitOf 0 f3);
@@ -327,22 +358,38 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
   -- the memory read: the load's address, else the next instruction's
   -- (one address for reading and writing, so that each lane is a single-port RAM: a
   -- store's read is not used, the next cycle fetches again)
-  let raddr := Hw.mux (gate goE (Hw.or d.load d.store)) sum (Hw.mux goE npc s.pc);
+  let raddr := Hw.mux inQ s.rline (Hw.mux (gate goE (Hw.or d.load d.store)) sum (Hw.mux goE npc s.pc));
   let rix : r (HwTy.bits wb) := Hw.slice 2 wb raddr;
   let nphB : r B4 := Hw.mux inF (Hw.lit 4 Ph.d) (Hw.mux inD (Hw.lit 4 Ph.e)
     (Hw.mux inE (Hw.mux trapE (Hw.lit 4 Ph.h) (Hw.mux wait (Hw.lit 4 Ph.e) (Hw.mux d.md (Hw.mux (bitOf 2 f3) (Hw.lit 4 Ph.v) (Hw.lit 4 Ph.x)) (Hw.mux d.load (Hw.lit 4 Ph.m) (Hw.mux shift (Hw.lit 4 Ph.s)
       (Hw.mux d.store (Hw.lit 4 Ph.f) (Hw.lit 4 Ph.d)))))))
     (Hw.mux inM (Hw.lit 4 Ph.d) (Hw.mux inS (Hw.mux sDone (Hw.lit 4 Ph.d) (Hw.lit 4 Ph.s))
     (Hw.mux inX (Hw.lit 4 Ph.d) (Hw.mux inV (Hw.mux sDone (Hw.lit 4 Ph.d) (Hw.lit 4 Ph.v)) ph))))));
-  -- the bus (DDR: bit 30 set, bit 31 clear): a fetch or load from DDR, instead of the
-  -- block RAM, and a store to DDR, wait in P for the answer
+  -- DDR (bit 30 set, bit 31 clear): a fetch or load reads the L1 (a miss in D or M fills
+  -- the line over the bus, word by word, then reads it again: P, Q); a store goes to the
+  -- bus (write-through) and updates the line if it is present
   let ddrR := Hw.and (bitOf 30 raddr) (Hw.not (bitOf 31 raddr));
   let readNext := Hw.or (isK nphB Ph.d) (isK nphB Ph.m);
-  let busRd := gate readNext ddrR;
+  let busRd := Hw.lit 1 0;
   let busWr := gate goE (gate d.store ddrS);
-  let enterP := Hw.or busRd busWr;
-  let done := Hw.mux s.bwe x.ready x.rvalid;
-  let nph : r B4 := Hw.mux inP (Hw.mux done s.bret ph) (Hw.mux enterP (Hw.lit 4 Ph.p) nphB);
+  let enterP := Hw.or miss busWr;
+  -- (not in the gap: an answer the board still shows from the word before)
+  let fillWord := gate inP (gate s.rmode (gate (Hw.not s.rgap) x.rvalid));
+  let fillDone := gate fillWord (isK s.rk 3);
+  let done := Hw.mux s.rmode fillDone (Hw.mux s.bwe x.ready x.rvalid);
+  let nph : r B4 := Hw.mux inP (Hw.mux done (Hw.mux s.rmode (Hw.lit 4 Ph.q) s.bret) ph)
+    (Hw.mux inQ s.bret (Hw.mux enterP (Hw.lit 4 Ph.p) nphB));
+  -- the L1's writes: a filled line (and its tag), or a store's bytes into a present line
+  let rk := s.rk;
+  let fillLine : r B128 := Hw.cat (Hw.mux (isK rk 3) x.rdata (Hw.slice 96 32 s.rbuf : r B32))
+    (Hw.cat (Hw.mux (isK rk 2) x.rdata (Hw.slice 64 32 s.rbuf : r B32))
+    (Hw.cat (Hw.mux (isK rk 1) x.rdata (Hw.slice 32 32 s.rbuf : r B32)) (Hw.mux (isK rk 0) x.rdata (Hw.slice 0 32 s.rbuf : r B32))));
+  let storeHit := gate inP (gate s.bnew (gate s.bwe hit));
+  let sbyte := fun (j : Nat) => (Hw.mux (Hw.and (isK (Hw.slice 2 2 s.ra : r B2) (Nat.div j 4)) (bitOf (Nat.mod j 4) s.bst))
+    (Hw.slice (8 * Nat.mod j 4) 8 s.bwd) (Hw.slice (8 * j) 8 s.l1q) : r W8);
+  let w4 := fun (k : Nat) => (Hw.cat (sbyte (4 * k + 3)) (Hw.cat (sbyte (4 * k + 2)) (Hw.cat (sbyte (4 * k + 1)) (sbyte (4 * k)))) : r B32);
+  let stLine : r B128 := Hw.cat (w4 3) (Hw.cat (w4 2) (Hw.cat (w4 1) (w4 0)));
+  let l1wIdx := Hw.mux fillDone (l1idx s.rline) (l1idx s.ra);
   let rfa := Hw.memWrite s.rfa we wa wd;
   let rfb := Hw.memWrite s.rfb we wa wd;
   Hw.pair
@@ -366,13 +413,27 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
       (Hw.mux (gate inP (gate (Hw.not s.bwe) x.rvalid)) (Hw.lit 1 1)
         (Hw.mux (Hw.and (Hw.not inP) (gate readNext (Hw.not ddrR))) (Hw.lit 1 0) s.fromBus))
       (Hw.mux enterP (Hw.mux busWr sum raddr) s.badr)
-      (Hw.mux enterP busWr s.bwe)
+      (Hw.mux enterP (Hw.mux miss (Hw.lit 1 0) busWr) s.bwe)
       (Hw.mux enterP (Hw.cat d3 (Hw.cat d2 (Hw.cat d1 d0))) s.bwd)
       (Hw.mux enterP (Hw.cat (laneOn 3) (Hw.cat (laneOn 2) (Hw.cat (laneOn 1) (laneOn 0)))) s.bst)
-      (Hw.mux enterP (Hw.mux busWr (Hw.lit 4 Ph.f) nphB) s.bret)
-      (Hw.mux inP (Hw.or s.bsent x.ready) (Hw.lit 1 0))))
+      (Hw.mux enterP (Hw.mux miss ph (Hw.mux busWr (Hw.lit 4 Ph.f) nphB)) s.bret)
+      (Hw.mux inP (Hw.mux (Hw.or fillWord s.rgap) (Hw.lit 1 0) (Hw.or s.bsent x.ready)) (Hw.lit 1 0))
+      (Hw.mux inQ s.rline raddr)
+      (Hw.memRead s.l1d (l1idx raddr))
+      (Hw.memRead s.l1tag (l1idx raddr))
+      (Hw.memWrite s.l1d (Hw.or fillDone storeHit) l1wIdx (Hw.mux fillDone fillLine stLine))
+      (Hw.memWrite s.l1tag fillDone (l1idx s.rline) (l1tagOf s.rline))
+      (Hw.mux inQ (Hw.lit 1 1) (Hw.mux (gate (Hw.not enterP) readNext) ddrR s.fromL1))
+      (Hw.mux enterP miss (Hw.mux fillDone (Hw.lit 1 0) s.rmode))
+      (Hw.mux enterP (Hw.lit 2 0) (Hw.mux fillWord (Hw.add rk (Hw.lit 2 1)) rk))
+      (gate inP fillWord)
+      (Hw.mux fillWord fillLine s.rbuf)
+      (Hw.mux (gate enterP miss) s.ra s.rline)
+      busWr))
     (Out.pack (Out.mk s.trap (gate goE (gate d.store io)) (Hw.slice 0 8 rs2v) (gate goE (gate d.load io)) sum rs2v
-      (gate inP (Hw.not s.bsent)) s.badr s.bwe s.bwd s.bst inP))
+      (gate inP (Hw.and (Hw.not s.bsent) (Hw.not s.rgap)))
+      (Hw.mux s.rmode (Hw.cat (Hw.slice 4 28 s.rline : r (HwTy.bits 28)) (Hw.cat s.rk (Hw.lit 2 0))) s.badr)
+      s.bwe s.bwd s.bst (gate inP (Hw.not s.rgap))))
 
 ------------------------------------------------------------------------------------
 -- The core as a circuit, with a program in memory from address 0
@@ -390,6 +451,9 @@ def CoreSt.init (ab wb : Nat) (prog : List Nat) : CoreSt ab wb HwTy.El :=
     (BitVec.ofNat 5 0) (BitVec.ofNat 5 0) (BitVec.ofNat 3 0) (BitVec.ofNat 2 0) (BitVec.ofNat 1 0) (BitVec.ofNat 3 0)
     (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0)
     (BitVec.ofNat 4 0) (BitVec.ofNat 4 0) (BitVec.ofNat 1 0)
+    (BitVec.ofNat 32 0) (BitVec.ofNat 128 0) (BitVec.ofNat (L1.tagW wb) 0)
+    (fun (a : BitVec (L1.bits wb)) => BitVec.ofNat 128 0) (fun (a : BitVec (L1.bits wb)) => BitVec.ofNat (L1.tagW wb) 0)
+    (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 2 0) (BitVec.ofNat 1 0) (BitVec.ofNat 128 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0)
 
 def core (ab wb : Nat) (mx : Bool) (prog : List Nat) : Circuit In.code Out.code :=
   Circuit.mk (CoreSt.code ab wb) (Bundle.toEl (CoreSt.bundle ab wb) (CoreSt.init ab wb prog))

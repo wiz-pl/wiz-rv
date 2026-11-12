@@ -133,7 +133,7 @@ def dSys {r : HwTy → Type} [Hw r] (s : DSys r) (x : DIn r) : r (HwTy.prod DSys
   let ω c := CoreSt.unpack 5 12 (Hw.fst cr);
   let c2 := CoreSt.mk (Hw.mux rst (Hw.lit 4 Ph.f) c.ph) (Hw.mux rst (Hw.lit 32 0) c.pc) c.q0 c.q1 c.q2 c.q3
     c.m0 c.m1 c.m2 c.m3 c.rfa c.rfb c.x1 c.x2 c.acc c.dv c.rm c.cnt c.srd c.sf3 c.slo c.sio (Hw.mux rst (Hw.lit 3 0) c.trap)
-    c.busq c.fromBus c.badr c.bwe c.bwd c.bst c.bret c.bsent;
+    c.busq c.fromBus c.badr c.bwe c.bwd c.bst c.bret c.bsent c.ra c.l1q c.l1t c.l1d c.l1tag c.fromL1 c.rmode c.rk c.rgap c.rbuf c.rline c.bnew;
   -- sound: a write at 0x30 while there is room; a sample every `sndDiv` cycles
   let sw := Hw.and o.wr (Hw.and (isK off 48) (Hw.and (Hw.not fbA) (Hw.ult count (Hw.lit 13 4096))));
   let tick := isK sn.div (Doom.sndDiv - 1);
