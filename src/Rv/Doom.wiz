@@ -64,6 +64,8 @@ structure Snd (r : HwTy → Type) where
   cur : r W8      -- the sample playing
   div : r B13
   pwm : r W8
+  we : r W1       -- the core's write, registered (as the framebuffer's: FINDINGS.md, H7)
+  wd : r W8
   deriving Bundle
 
 structure Fb (r : HwTy → Type) where
@@ -109,6 +111,7 @@ structure Perf (r : HwTy → Type) where
   lastFbw : r B32
   refreshes : r B32
   odd : r B32     -- refreshes whose checksum differed from the one before with no write between
+  under : r B32   -- sound ticks with the FIFO empty
   deriving Bundle
 
 structure DSys (r : HwTy → Type) where
@@ -142,7 +145,9 @@ def dSys {r : HwTy → Type} [Hw r] (s : DSys r) (x : DIn r) : r (HwTy.prod DSys
     (Hw.mux (isK off 80) s.perf.instr (Hw.mux (isK off 84) s.perf.bus (Hw.mux (isK off 88) s.perf.mem
     (Hw.mux (isK off 92) s.perf.long (Hw.mux (isK off 96) s.perf.fetch
     (Hw.mux (isK off 100) s.edge.hits (Hw.mux (isK off 104) s.edge.misses (Hw.mux (isK off 108) s.perf.fbw
-    (Hw.mux (isK off 112) s.perf.refreshes (Hw.mux (isK off 116) s.perf.odd (Hw.mux (isK off 120) s.perf.lastSum (Hw.lit 32 0))))))))))))))));
+    (Hw.mux (isK off 112) s.perf.refreshes (Hw.mux (isK off 116) s.perf.odd (Hw.mux (isK off 120) s.perf.lastSum (Hw.mux (isK off 124) s.perf.under (Hw.mux (isK off 128)
+      (Hw.cat (Hw.lit 20 0) (Hw.cat s.oled.pins.pmoden (Hw.cat s.oled.pins.vccen (Hw.cat s.oled.pins.res
+        (Hw.cat s.oled.pins.dc (Hw.cat s.oled.pins.cs s.oled.sq.pc)))))) (Hw.lit 32 0))))))))))))))))));
   let cr := coreStep 5 12 .true s.cpu (In.mk (Hw.mux uartA (txIdle s.tx) (Hw.lit 1 1)) ioIn s.edge.ready s.edge.rvalid s.edge.rdata);
   let ω o := Out.unpack (Hw.snd cr);
   let rst := bitOf 0 x.btn;
@@ -183,15 +188,16 @@ def dSys {r : HwTy → Type} [Hw r] (s : DSys r) (x : DIn r) : r (HwTy.prod DSys
       (Hw.mux got.valid got.data s.byte)
       (inc s.cyc)
       (Snd.mk
-        (Hw.memWrite sn.fifo sw (Hw.slice 0 12 sn.wp) (Hw.slice 0 8 o.iod))
-        (Hw.mux sw (inc sn.wp) sn.wp)
+        (Hw.memWrite sn.fifo sn.we (Hw.slice 0 12 sn.wp) sn.wd)
+        (Hw.mux sn.we (inc sn.wp) sn.wp)
         (Hw.mux (Hw.and tick have) (inc sn.rp) sn.rp)
         (Hw.memRead sn.fifo (Hw.slice 0 12 sn.rp))
         (Hw.mux tick (Hw.mux have sn.smp (Hw.lit 8 128)) sn.cur)
         (Hw.mux tick (Hw.lit 13 0) (inc sn.div))
-        (inc sn.pwm))
+        (inc sn.pwm)
+        sw (Hw.slice 0 8 o.iod))
       (Fb.mk
-        (Hw.memWrite s.fb.pix s.fb.we s.fb.wa s.fb.wd)
+        (Hw.memWrite s.fb.pix fw (Hw.slice 1 13 o.ioa) (Hw.slice 0 16 o.iod))
         (Hw.memRead s.fb.pix idx)
         (inc s.fb.pre)
         (Hw.and s.fb.we (Hw.eq s.fb.wa idx))
@@ -208,14 +214,15 @@ def dSys {r : HwTy → Type} [Hw r] (s : DSys r) (x : DIn r) : r (HwTy.prod DSys
         (Hw.mux frameGo pf.sum pf.lastSum)
         (Hw.mux frameGo pf.fbw pf.lastFbw)
         (Hw.mux frameGo (inc pf.refreshes) pf.refreshes)
-        (Hw.mux oddNow (inc pf.odd) pf.odd))))
+        (Hw.mux oddNow (inc pf.odd) pf.odd)
+        (Hw.mux (Hw.and tick (Hw.not have)) (inc pf.under) pf.under))))
     (DOut.pack (DOut.mk s.tx.line
       -- LD4: a byte was … (heartbeat: bit 25 of the cycle counter), LD5 … LD7: the trap code
       (Hw.cat s.cpu.trap (bitOf 25 s.cyc))
       (Hw.cat ol.pins.pmoden (Hw.cat ol.pins.vccen (Hw.cat ol.pins.res (Hw.cat ol.pins.dc
         (Hw.cat ol.spi.sclk (Hw.cat (Hw.lit 1 0) (Hw.cat ol.spi.mosi ol.pins.cs)))))))
       -- (silence, 128, drives the pin low: no 195 kHz switching on the Pmod when quiet)
-      (Hw.cat (Hw.lit 7 0) (Hw.and (Hw.ult sn.pwm sn.cur) (Hw.not (isK sn.cur 128))))
+      (Hw.cat (Hw.lit 7 0) (Hw.ult sn.pwm sn.cur))
       s.edge.valid o.addr o.we o.wdata o.wstrb s.edge.pend))
 
 def DSys.init (prog : List Nat) : DSys HwTy.El :=
@@ -223,12 +230,12 @@ def DSys.init (prog : List Nat) : DSys HwTy.El :=
       (BitVec.ofNat 32 0) (BitVec.ofNat 32 0))
     (CoreSt.init 5 12 prog) Sync.init Rx.init UTx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 64 0)
     (Snd.mk (fun (a : BitVec 12) => BitVec.ofNat 8 128) (BitVec.ofNat 13 0) (BitVec.ofNat 13 0) (BitVec.ofNat 8 128)
-      (BitVec.ofNat 8 128) (BitVec.ofNat 13 0) (BitVec.ofNat 8 0))
+      (BitVec.ofNat 8 128) (BitVec.ofNat 13 0) (BitVec.ofNat 8 0) (BitVec.ofNat 1 0) (BitVec.ofNat 8 0))
     (Fb.mk (fun (a : BitVec 13) => BitVec.ofNat 16 0) (BitVec.ofNat 16 0) (BitVec.ofNat 3 0) (BitVec.ofNat 1 0) (BitVec.ofNat 16 0)
       (BitVec.ofNat 1 0) (BitVec.ofNat 13 0) (BitVec.ofNat 16 0))
     (RCtl.init Doom.oled)
     (Perf.mk (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0)
-      (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0))
+      (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0))
 
 def doomSys (prog : List Nat) : Circuit DIn.code DOut.code :=
   Circuit.bundled DSys.bundle DIn.bundle DOut.bundle (DSys.init prog) dSys

@@ -207,6 +207,18 @@ sound FIFO still have combinational write ports. Moving them needs forwarding, s
 comes with the single-rate pipeline. Repro: `git show` the commit before this entry, on
 the board; perf line "oled: refreshes R, odd K".
 
+Correction (later the same day): registering the write port is not the whole story.
+Across builds of the same logic the outcome changed with placement: regfb builds gave a
+black panel with K about 5 per 5 s (three placements) or a picture with K about 85 (one
+placement, as the unregistered build); an Icarus simulation of the same netlist runs
+the OLED init and streams correctly, and yosys maps the RAMs identically. So the
+half-rate scheme (H5, H6) is timing-marginal somewhere in the OLED controller or the
+streamer's read path as well, and the open flow's reports can't pin it down: nextpnr's
+single-clock report gives 55-58 MHz, and scripts/sdfsta.py follows false arcs. Once,
+synth_xilinx died on `Assert memory_strings.count(...MEMID...)` in OPT_CLEAN on this
+design; the rerun passed (yosys 0.70, intermittent). The fix is the single-rate 100 MHz core with
+every RAM port from registers and timing closed (the pipeline branch).
+
 ## Compiler and run time
 
 ### S1. A program that imports the core takes 12 to 15 minutes to compile (slow)

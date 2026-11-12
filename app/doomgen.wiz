@@ -21,7 +21,7 @@ def ensureDir (p : String) : EIO Unit := do
 -- the Pmods' outputs at low slew and drive (the OLED's SPI picked up glitches)
 def Doom.slow : List XdcPin → List XdcPin
   | .nil => .nil
-  | .cons p ps => .cons (XdcPin.mk p.port p.pin "IOSTANDARD LVCMOS33 SLEW SLOW DRIVE 4") (Doom.slow ps)
+  | .cons p ps => .cons (XdcPin.mk p.port p.pin "IOSTANDARD LVCMOS33") (Doom.slow ps)
 
 -- the XDC: wiz-ddr3's (DDR3, clock, UART, LEDs) and the Pmods and BTN0 … BTN3
 def Doom.extraPins : String :=
