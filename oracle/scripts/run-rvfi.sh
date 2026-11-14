@@ -7,7 +7,9 @@
 #   oracle/scripts/run-rvfi.sh --fixture alu --sby --jobs 2
 #   oracle/scripts/run-rvfi.sh --instruction add --sby
 #   oracle/scripts/run-rvfi.sh --all-insns
-#   oracle/scripts/run-rvfi.sh --pipe --fixture hazard      # pipeline retirement shim
+#   oracle/scripts/run-rvfi.sh --pipe --fixture hazard      # pipeline rvfi adapter (lint)
+#   oracle/scripts/run-rvfi.sh --pipe --instruction add --sby  # riscv-formal insn_add
+#   oracle/scripts/run-rvfi.sh --pipe --all-insns              # all 37 base-I checks
 #   oracle/scripts/run-rvfi.sh --fixture alu --sby --checks 'insn_add_ch0 insn_lw_ch0'
 #   oracle/scripts/run-rvfi.sh --list
 #
@@ -18,11 +20,15 @@
 # checks/genchecks.py, and runs the generated checks with `sby -f` (a simple
 # --jobs pool; no make dependency).
 #
-# --pipe selects the pipelined core and its retirement shim (mkrvfi_pipe.py):
-# the wrapper and lint are produced, but the riscv-formal instruction checks are
-# *not* wired for the pipeline in this branch (the shim's pc_wdata/mem fields are
-# decoded from the ISA, and R carries no instruction word), so --sby is a clean
-# SKIP with that explanation.  The sequence trace is `oracle.py rvfi --pipe`.
+# --pipe selects the pipelined core (Rv.Pipe.pipeRvfiCore, emitted by
+# oracle/wiz/emit_pipe.wiz), whose outputs are the rvfi retirement port
+# (Pp.rvfi): mkrvfi_pipe.py only adds an adapter that ties the bus/I/O inputs and
+# adds rvfi_order/mode/ixl.  With --instruction <name> it emits a core whose lane
+# memory is that instruction repeated and runs the riscv-formal insn check at the
+# pipeline's retirement cycle (4); --pipe --all-insns runs every base-I check.
+# Without --instruction the fixture program is a sequence trace (`--sby` is then a
+# clean SKIP: the instruction under test would not be at the check cycle).  The
+# sequence trace itself is `oracle.py rvfi --pipe`.
 #
 # Missing tools are a clean SKIP (exit 0); a failing check is a FAIL (exit 1)
 # and the script prints the check name and the failing assertion lines from the
@@ -76,41 +82,67 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$PIPE" = 1 ]; then
-  if [ -n "$INSTRUCTION" ] || [ "$ALL_INSNS" = 1 ]; then
-    echo "run-rvfi.sh: --pipe does not support --instruction/--all-insns" >&2
-    exit 2
-  fi
   EMIT=oracle/.build/emit_pipe
   if [ ! -x "$EMIT" ]; then
     echo "SKIP rvfi pipe core: $EMIT not built"
     echo "     build it: light wiz build oracle/wiz/emit_pipe.wiz -I oracle/wiz -I src -o $EMIT"
     exit 0
   fi
-  if [ -z "$VERILOG" ]; then
+  if [ -n "$VERILOG" ]; then
+    echo "run-rvfi.sh: --pipe emits its own core; do not pass --verilog" >&2
+    exit 2
+  fi
+  if [ "$ALL_INSNS" = 1 ]; then
+    rc=0
+    for name in $(python3 oracle/scripts/formal_insns.py --list); do
+      echo "=== instruction $name ==="
+      oracle/scripts/run-rvfi.sh --pipe --instruction "$name" --sby --jobs 1 || rc=1
+    done
+    exit $rc
+  fi
+  if [ -n "$INSTRUCTION" ]; then
+    # The pipeline retires at R, one cycle after the multi-cycle core's completion:
+    # every base-I class (ALU, branch/jump, load) has its first beat at cycle 4.
+    FIX=oracle/.build/formal-$INSTRUCTION.hex
+    python3 oracle/scripts/formal_insns.py --name "$INSTRUCTION" --out "$FIX" >/dev/null
+    DEPTH=4
+    VERILOG=oracle/.build/rvfi-pipe-formal-$INSTRUCTION.v
+    "$EMIT" "$FIX" "$FORMAL_MBITS" > "$VERILOG"
+    echo "# pipe core: formal-$INSTRUCTION, $FORMAL_MBITS address bits -> $VERILOG (check cycle $DEPTH)"
+    [ -z "$CHECKS" ] && CHECKS="insn_${INSTRUCTION}_ch0"
+  else
     VERILOG=oracle/.build/rvfi-pipe-$FIXTURE.v
     "$EMIT" "oracle/fixtures/$FIXTURE.hex" 0 > "$VERILOG"
     echo "# pipe core: $FIXTURE, the fixture's address bits -> $VERILOG"
   fi
+  # the pipeline's check cycles differ from the multi-cycle core's
+  [ "$CFG" = oracle/riscv-formal/checks.cfg ] && CFG=oracle/riscv-formal/checks-pipe.cfg
   if [ "$OUT" = "build/rvfi.v" ]; then OUT=build/rvfi_pipe.v; fi
   python3 oracle/scripts/mkrvfi_pipe.py --verilog "$VERILOG" --out "$OUT"
   if command -v iverilog >/dev/null 2>&1; then
     echo "$ iverilog -g2005 -Wall -o /dev/null $VERILOG $OUT"
     if iverilog -g2005 -Wall -o /dev/null "$VERILOG" "$OUT"; then
-      echo "PASS iverilog lint (pipeline shim + core)"
+      echo "PASS iverilog lint (rvfi adapter + core)"
     else
-      echo "FAIL iverilog lint (pipeline shim + core)" >&2
+      echo "FAIL iverilog lint (rvfi adapter + core)" >&2
       exit 1
     fi
   else
     echo "SKIP iverilog lint: iverilog not on PATH"
     echo "     nix shell nixpkgs#iverilog -c oracle/scripts/run-rvfi.sh --pipe --fixture $FIXTURE"
   fi
-  if [ "$RUN_SBY" = 1 ] || [ "$LIST" = 1 ]; then
-    echo "SKIP riscv-formal checks: not wired for the pipeline in this branch"
-    echo "     (the retirement shim is a sequence-trace shim; no rvfi_muldiv)"
+  if [ "$RUN_SBY" = 0 ] && [ "$LIST" = 0 ]; then
+    echo "SKIP riscv-formal checks: pass --sby (or --list) to use them"
+    exit 0
   fi
-  exit 0
-fi
+  if [ "$RUN_SBY" = 1 ] && [ -z "$INSTRUCTION" ]; then
+    echo "SKIP riscv-formal checks: --pipe --sby needs --instruction <name>"
+    echo "     (a formal check constrains one instruction at the check cycle; the"
+    echo "      fixture program is a sequence trace, not a repeated instruction)"
+    exit 0
+  fi
+else
+
 
 if [ "$ALL_INSNS" = 1 ]; then
   rc=0
@@ -163,6 +195,7 @@ if [ "$RUN_SBY" = 1 ] || [ "$LIST" = 1 ]; then
   python3 oracle/scripts/mkrvfi.py --formal --verilog "$VERILOG" --out "$OUT"
 else
   python3 oracle/scripts/mkrvfi.py --verilog "$VERILOG" --out "$OUT"
+fi
 fi
 
 # ---- wrapper lint ------------------------------------------------------------

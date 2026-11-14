@@ -1,5 +1,5 @@
-// Testbench for the pipeline rvfi shim: run the emitted pipeline and print one
-// trace line per retirement, in the oracle's line format.
+// Testbench for the pipeline's rvfi port: run the emitted pipeline through the
+// rvfi adapter and print one trace line per retirement, in the oracle's line format.
 //
 //   iverilog -g2005 -o sim pipe.v rvfi_pipe.v tb_rvfi_pipe.v \
 //       -Ptb_rvfi_pipe.STEPS=32 -Ptb_rvfi_pipe.MBASE=8192 -Ptb_rvfi_pipe.MCOUNT=256
@@ -8,7 +8,7 @@
 // The beat is a retirement (R), so the line is the architectural *pre-state* of
 // the retiring instruction: it corresponds to the Python trace's line `step`
 // (0-based), not `step + 1`.  PC and registers are read from the core instance
-// `dut` inside the shim.  Memory is the on-chip data memory of the *previous*
+// `dut` inside the adapter.  Memory is the on-chip data memory of the *previous*
 // cycle, because a store's write lands at the edge the store enters R (see
 // oracle/wiz/pipe_trace.wiz); `prev_mem` is sampled at every edge for that.
 `timescale 1ns/1ps

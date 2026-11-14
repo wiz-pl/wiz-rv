@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
-"""Generate the retirement-observation shim for a Wiz-emitted pipelined core.
+"""Generate the riscv-formal adapter for the pipeline's rvfi port.
 
-    python3 oracle/scripts/mkrvfi_pipe.py --verilog build/oracle_pipe.v --out build/rvfi_pipe.v
+    python3 oracle/scripts/mkrvfi_pipe.py --verilog build/oracle_rvfi.v --out build/rvfi_pipe.v
 
-The template is oracle/rtl/rvfi_pipe.v.in.  Unlike the multi-cycle core, the
-pipeline has no `ph`/`pc`/`q` projection and its R stage does not carry the
-instruction word, so this shim observes `PpSt`'s flat state directly:
+The template is oracle/rtl/rvfi_pipe.v.in.  **The emitted module carries the rvfi port
+itself**: `oracle/wiz/emit_pipe.wiz` emits `Rv.Pipe.pipeRvfiCore`, whose outputs are
+`Pp.rvfi` (src/Rv/Pipe.wiz), i.e.
 
-    rr_v, rr_miss, rr_pc, rr_we, rr_rd, rr_val, rr_trap,
-    ms_rfa (register file), ms_mi0..3 (fetch lanes), ms_md0..3 (data lanes)
+    rvfi_valid, rvfi_insn, rvfi_trap, rvfi_halt, rvfi_intr,
+    rvfi_rs1_addr/rdata, rvfi_rs2_addr/rdata, rvfi_rd_addr/rdata,
+    rvfi_pc_rdata/pc_wdata, rvfi_mem_addr/rmask/wmask/rdata/wdata
 
-A beat is a retirement: `rr_v && !rr_miss`, the same condition as
-`src/Rv/PLockstep.wiz`.  This is a *documented shim*, not riscv-formal's `rvfi`
-checker interface: `rvfi_insn` is the on-chip instruction word at `rr_pc`, and
-`rvfi_pc_wdata` is decoded from the ISA with the architectural register values,
-because R holds no next-PC register.  `rvfi_rd_wdata` and `rvfi_rd_addr` are the
-core's own (`rr_val`/`rr_we`/`rr_rd`), and the trap is `rr_trap`.  The sequence
-trace check (`oracle.py rvfi --pipe`) prints the pre-state from the core's
-register file and data memory; the formal `insn_*` checks are not claimed for
-the pipeline (no `rvfi_muldiv` either).
+so this script only ties the core's bus/I/O inputs and adds `rvfi_order` (a counter)
+and `rvfi_mode`/`rvfi_ixl` (constants).  There are no hierarchical memory references
+and no debug read ports: unlike the multi-cycle core, the pipeline's rvfi values are
+latched in R (`rr_ins`, `rr_pcw`, `rr_ldw`; FINDINGS.md, H12), and the two register
+operands are read from the architectural register file at R inside the design.
 
-This script fails loudly if the emitted state names have drifted.
+This script fails loudly if the emitted module's rvfi ports have drifted.
+
+A deliberately *non*-formal use (Icarus) is the pipeline sequence trace:
+`oracle.py rvfi --pipe` compiles the same two files plus tb_rvfi_pipe.v.in.
 """
 import argparse
-import math
 import os
 import re
 import sys
@@ -31,9 +30,15 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE = os.path.join(os.path.dirname(HERE), "rtl", "rvfi_pipe.v.in")
 
-NEEDED_REGS = ["rr_v", "rr_miss", "rr_pc", "rr_we", "rr_rd", "rr_val", "rr_trap"]
-NEEDED_MEMS = ["ms_rfa", "ms_mi0", "ms_mi1", "ms_mi2", "ms_mi3",
-               "ms_md0", "ms_md1", "ms_md2", "ms_md3"]
+# The port `Pp.rvfi` must provide (src/Rv/Pipe.wiz).  `rvfi_order`, `rvfi_mode` and
+# `rvfi_ixl` are the adapter's.
+RVFI_OUTPUTS = [
+    "rvfi_valid", "rvfi_insn", "rvfi_trap", "rvfi_halt", "rvfi_intr",
+    "rvfi_rs1_addr", "rvfi_rs2_addr", "rvfi_rs1_rdata", "rvfi_rs2_rdata",
+    "rvfi_rd_addr", "rvfi_rd_wdata", "rvfi_pc_rdata", "rvfi_pc_wdata",
+    "rvfi_mem_addr", "rvfi_mem_rmask", "rvfi_mem_wmask",
+    "rvfi_mem_rdata", "rvfi_mem_wdata",
+]
 
 
 def parse_ports(header):
@@ -55,10 +60,10 @@ def parse_ports(header):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--verilog", default="build/oracle_pipe.v",
-                   help="the emitted pipeline (default: build/oracle_pipe.v)")
+    p.add_argument("--verilog", default="build/oracle_rvfi.v",
+                   help="the emitted pipeline with the rvfi port (default: build/oracle_rvfi.v)")
     p.add_argument("--out", default="build/rvfi_pipe.v",
-                   help="the generated wrapper (default: build/rvfi_pipe.v)")
+                   help="the generated adapter (default: build/rvfi_pipe.v)")
     args = p.parse_args(argv)
 
     with open(args.verilog) as f:
@@ -70,57 +75,37 @@ def main(argv=None):
     core = m.group(1)
     header = text[m.start():text.index(");", m.start()) + 2]
     ports = parse_ports(header)
+    names = {name for _, _, name in ports}
 
-    missing = [r for r in NEEDED_REGS
-               if not re.search(r"^\s*reg\s+(\[[^]]*\]\s*)?%s\s*;" % re.escape(r), text, re.M)]
-    missing += [f"{mm}[]" for mm in NEEDED_MEMS
-                if not re.search(r"^\s*reg\s+\[[^]]*\]\s*%s\s*\[" % re.escape(mm), text, re.M)]
+    missing = [n for n in ["clk"] + RVFI_OUTPUTS if n not in names]
     if missing:
         raise SystemExit(
-            f"mkrvfi_pipe: {args.verilog}: missing internal signal(s): {', '.join(missing)}\n"
-            f"  the pipeline shim is coupled to the emitted flat pp state names;\n"
-            f"  update oracle/rtl/rvfi_pipe.v.in and this list if PpSt's fields were renamed")
+            f"mkrvfi_pipe: {args.verilog}: missing port(s): {', '.join(missing)}\n"
+            f"  the emitted module must have Pp.rvfi's outputs; re-emit with\n"
+            f"  oracle/wiz/emit_pipe.wiz (and check src/Rv/Pipe.wiz's Pp.rvfi)")
 
-    m = re.search(r"^\s*reg\s+\[7:0\]\s+ms_mi0\s*\[0:(\d+)\];", text, re.M)
-    if not m:
-        raise SystemExit("mkrvfi_pipe: cannot find the ms_mi0 lane depth")
-    depth = int(m.group(1)) + 1
-    wb = int(math.log2(depth))
-    if (1 << wb) != depth:
-        raise SystemExit(f"mkrvfi_pipe: ms_mi0 depth {depth} is not a power of two")
-
-    inst = [f"  {core} dut("]
+    # Inputs other than clk are tied high: the formal programs use the on-chip
+    # memory only, so the bus/I/O inputs are never consulted.  Outputs are wired to
+    # the adapter's same-named rvfi nets; anything else is left unconnected.
     ties = []
     for direction, width, name in ports:
         if direction == "input" and name == "clk":
             ties.append("    .clk(clk)")
         elif direction == "input":
             ties.append(f"    .{name}({{{width}{{1'b1}}}})" if width > 1 else f"    .{name}(1'b1)")
+        elif name in RVFI_OUTPUTS:
+            ties.append(f"    .{name}({name})")
         else:
             ties.append(f"    .{name}()")
-    inst.append(",\n".join(ties))
-    inst.append("  );")
+    inst = [f"  {core} dut("] + [",\n".join(ties)] + ["  );"]
 
     with open(TEMPLATE) as f:
         tmpl = f.read()
-    out = (tmpl.replace("${CORE}", core)
-               .replace("${INSTANCE}", "\n".join(inst))
-               .replace("${WB}", str(wb)))
-    reads = {
-        "RR_V": "dut.rr_v", "RR_MISS": "dut.rr_miss", "RR_PC": "dut.rr_pc",
-        "RR_WE": "dut.rr_we", "RR_RD": "dut.rr_rd", "RR_VAL": "dut.rr_val",
-        "RR_TRAP": "dut.rr_trap",
-        "RFA": "dut.ms_rfa",
-        "MI0": "dut.ms_mi0", "MI1": "dut.ms_mi1", "MI2": "dut.ms_mi2", "MI3": "dut.ms_mi3",
-        "MD0": "dut.ms_md0", "MD1": "dut.ms_md1", "MD2": "dut.ms_md2", "MD3": "dut.ms_md3",
-    }
-    for key, value in reads.items():
-        out = out.replace("${" + key + "}", value)
+    out = tmpl.replace("${CORE}", core).replace("${INSTANCE}", "\n".join(inst))
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
         f.write(out)
-    print(f"{args.out}: pipeline rvfi shim for {core} ({wb}-bit word address, "
-          f"{len(ports)} core ports)")
+    print(f"{args.out}: rvfi adapter for {core} ({len(ports)} core ports)")
     return 0
 
 

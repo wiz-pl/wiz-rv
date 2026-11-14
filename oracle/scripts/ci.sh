@@ -38,6 +38,10 @@ fi
 if [ -x oracle/.build/emit_pipe ]; then
   oracle/scripts/run-rvfi.sh --pipe --fixture hazard || exit 1
   python3 oracle/scripts/oracle.py rvfi --pipe --fixture hazard || exit 1
+  if [ "$formal" = 1 ]; then
+    # the pipeline's rvfi port at the retirement cycle (a repeated-instruction core)
+    oracle/scripts/run-rvfi.sh --pipe --instruction add --sby || exit 1
+  fi
 else
   echo "SKIP oracle pipe rvfi: oracle/.build/emit_pipe not built"
   echo "     light wiz build oracle/wiz/emit_pipe.wiz -I oracle/wiz -I src -o oracle/.build/emit_pipe"

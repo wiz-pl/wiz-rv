@@ -710,7 +710,7 @@ def main(argv=None):
                         help="emit a core, wrap it in rvfi and simulate it (iverilog)")
     sp.add_argument("--fixture", default="alu", help="the fixture (default: alu)")
     sp.add_argument("--pipe", action="store_true",
-                    help="use the pipelined core and its retirement shim "
+                    help="use the pipelined core and its rvfi port "
                          "(emit_pipe + mkrvfi_pipe); the beat is a pre-state")
     sp.add_argument("--iverilog", help="iverilog (default: PATH)")
     sp.set_defaults(func=cmd_rvfi)

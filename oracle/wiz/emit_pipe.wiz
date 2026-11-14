@@ -2,16 +2,20 @@ import Rv.Pipe
 import OracleTrace
 import IO
 import Text
--- `emit_pipe FIXTURE [MBITS]`: emit the pipelined core (`Rv.Pipe.pipeCore`) with the
--- fixture's program in both copies of the on-chip RAM, as flat Verilog on stdout.
--- This is the pipeline counterpart of `emit_core`: `oracle.py rvfi --pipe` wraps it
--- with `rtl/rvfi_pipe.v.in` (through `mkrvfi_pipe.py`) and runs a sequence trace.
--- Nothing here changes the core.
+-- `emit_pipe FIXTURE [MBITS]`: emit the pipelined core (`Rv.Pipe.pipeRvfiCore`) with
+-- the fixture's program in both copies of the on-chip RAM, as flat Verilog on stdout.
+-- The module is the pipeline's *rvfi retirement port*: the state, reset and step are
+-- `pipeCore`'s, and the outputs are `Rv.Pipe.PpRv` (`rvfi_valid`, `rvfi_insn`,
+-- `rvfi_pc_rdata`, `rvfi_pc_wdata`, `rvfi_rd_addr`, `rvfi_rd_wdata`, the rs/mem
+-- fields). `oracle.py rvfi --pipe` and `run-rvfi.sh --pipe` wrap it in a module named
+-- `rvfi` (`rtl/rvfi_pipe.v.in` through `mkrvfi_pipe.py`), which adds `rvfi_order`
+-- (a counter), `rvfi_mode`/`rvfi_ixl` (constants) and ties the core's bus/I/O inputs.
+-- Nothing here changes the core's own `Out`.
 --
---   emit_pipe oracle/fixtures/hazard.hex > build/oracle_pipe.v
+--   emit_pipe oracle/fixtures/hazard.hex > build/oracle_rvfi.v
 --
--- The pipeline circuit's ports are its `In`/`Out` leaves (no reset input; the core
--- resets itself from `PpSt.init`, the same way `pipeCore` starts in PLockstep).
+-- The circuit's ports are `In`'s leaves plus the rvfi outputs (no reset input; the
+-- core resets itself from `PpSt.init`, the same way `pipeCore` starts in PLockstep).
 
 def EmitP.main (path : String) (mbitsArg : Nat) : IO Unit :=
   IO.bind (IO.readFile path) (fun text =>
@@ -21,7 +25,7 @@ def EmitP.main (path : String) (mbitsArg : Nat) : IO Unit :=
       let ab := 5;
       let mbits := if Nat.beq mbitsArg 0 then fx.mbits else mbitsArg;
       let wb := Nat.sub mbits 2;
-      let n := Circuit.netlist "oracle_pipe" (pipeCore ab wb .false fx.words);
+      let n := Circuit.netlist "oracle_rvfi" (pipeRvfiCore ab wb .false fx.words);
       IO.print (Verilog.emit n))
 
 def EmitP.parseMbits : List String → Nat
@@ -33,4 +37,4 @@ def EmitP.parseMbits : List String → Nat
 def main : IO Unit := IO.bind IO.args (fun args =>
   match args with
   | .cons path rest => EmitP.main path (EmitP.parseMbits rest)
-  | .nil => IO.println "usage: emit_pipe FIXTURE [MBITS] > pipe.v")
+  | .nil => IO.println "usage: emit_pipe FIXTURE [MBITS] > rvfi_core.v")

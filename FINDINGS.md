@@ -305,11 +305,31 @@ through the record's fields. A claim with instructions in flight (forwarding fro
 R) would need a symbolic predecessor, and is not done.
 
 ### H11. Timing at 100 MHz is thin after the pipeline merge (note)
-
 The merged doomTop placed at 100.12 MHz. A one-gate change (JB2 = the PWM's complement)
 placed at 88.95 MHz with nextpnr's default seed and 108.17 MHz with `--seed 2`
 (`SEED=2 sh .scratch/bitn.sh`). So until rv-pipeline's timing work lands, a build has to
 be checked and maybe placed again; a failing "Max frequency" is not to be loaded.
+
+### H12. The pipeline's R stage had no instruction, next PC or raw load word (gap, closed by 3 registers)
+
+The first pipeline retirement shim (`oracle/rtl/rvfi_pipe.v.in`, branch
+`agent/rv-pipeline-oracle`) could not report a real rvfi port: `PpR` carried `pc`,
+`rd`, `we`, `val`, `trap`, `addr` and `miss`, so the shim read the on-chip word at
+`rr_pc` and **decoded** `pc_wdata` and the memory fields from the ISA. That is a
+sequence-trace shim, and a wrong redirect or load in the core would be reproduced by
+the shim rather than caught by a check.
+
+Closed with three 32-bit registers carried E → M → R (`PpM`/`PpR.ins`, `.pcw`, `.ldw`):
+the instruction word, E's `mux jump target pcInc`, and the word M read for a load
+(`x.ioIn` for I/O). The rs operands need no register: `Pp.rvfi` reads
+`ms.rfa`/`ms.rfb` at R, where the register file already holds every older write and
+not the retiring one's. `Pp.rvfi` is then a projection of the state and
+`pipeRvfiCore` is `pipeCore` with that projection as its output, so the emitted
+Verilog has the rvfi port as real outputs and no hierarchical memory references. 37/37
+base-I `insn_*_ch0` checks pass at the retirement cycle (4); the pipeline's
+consistency checks are not configured. Cost: 6 × 32 = 192 flops (three registers in
+M and in R), and `proofs/PipeProofs/Base.wiz` needed its two constructors extended
+(the proofs themselves were not re-run).
 
 ## Compiler and run time
 
