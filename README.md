@@ -200,6 +200,67 @@ Doom itself on a host instruction-set simulator of the machine (sw/iss/iss.c: fr
 images, sound as a WAV file): the demo loop at about 3.7 frames a second at the core's
 50 MHz, cache misses not counted.
 
+## Headless software benchmark (no board)
+
+The ISS and the RV32IM images are built by nix, so the software side runs on a host
+without the Arty and without a compiler on `PATH`:
+
+```sh
+./scripts/iss-check.sh          # build and run both checks; `make check` is the same
+# or individually:
+nix-build nix/iss.nix  -o build/iss     # -> build/iss/bin/iss
+nix-build nix/bench.nix -o build/bench  # -> build/bench/bench.bin
+nix-build nix/doom.nix -o build/doom    # -> build/doom/doom.bin and doom.map
+./scripts/iss-bench.sh                  # `make run-bench`
+./scripts/iss-doom-smoke.sh             # `make doom-smoke`
+```
+
+The benchmark is `sw/bench/bench.c` and `sw/bench/kernels.S`, linked with the machine's
+own runtime (`sw/crt0.S`, `sw/link.ld`, `sw/syscalls.c`, `sw/hw.h`). It covers ALU,
+shift and branch code, word/byte/halfword memory, an assembly copy and sum kernel, the
+M extension, a selection sort, newlib's string functions on misaligned buffers and
+CRC-32. It prints one line per part (cycles and instructions from the machine's
+counters) and a final `PASS`/`FAIL` line.
+
+`sw/iss/iss.c` loads the program at `0x40000000`, the WAD at `0x48000000` with its
+length at `0x47fffff0`, and starts at `0x40000000`: exactly the memory `rvload` leaves
+on the board. It reports retired instructions and its model of the multi-cycle core's
+cycles, and implements the `sw/hw.h` counters `PERF_INSTR`, `PERF_MEM`, `PERF_LONG` and
+`PERF_FBW`; the cache and bus counters read 0 because the ISS has no caches. `-maxframes
+N` stops at a frame, `-frames DIR` writes the 96 × 64 OLED frame (and the 320 × 200
+frame when `-screen` names `DG_ScreenBuffer` from the map).
+
+**Results (host ISS, 2026-11-14).** These are ISS-model numbers, not measurements of
+the pipelined core or of hardware:
+
+* benchmark body (the harness's counters from just after entry to just before the
+  final line; the per-section figures are in `sw/bench/README.md`): **516,655
+  instructions, 3,497,381 cycles**. The whole run including newlib start-up and the
+  final print: 534,575 instructions, 3,539,494 cycles.
+* Doom first frame: **18,959,155 instructions, 56,274,633 cycles**, 6,144 framebuffer
+  writes, `doom.bin` 561,568 bytes.
+
+**Fixtures.** `build/iss/bin/iss`, `build/bench/bench.bin` (72,972 bytes, sha256
+`8207b6d80ccf5c54275b466f134eb066f819b6a6a7b125192cd0c5fc7ddef1b6`), `build/doom/doom.bin`
+(561,568 bytes, sha256 `d75c55c77b8531dac96e58e6e9732cb85c7980effe3c46b207603082b375eb97`),
+`build/doom/doom.map`, and `wad/doom1.wad` (4,196,020 bytes, sha256
+`1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771`). Doom is GPL-2.0:
+`nix/doom.nix` fetches doomgeneric at commit
+`e257a09527062bfb986b6e5e0780839b6cbd5b71` and builds it with the RV32IM toolchain of
+`nix/riscv.nix`; neither the Doom source nor `doom.bin` is in the repository, and
+`wad/` and `build/` are ignored. Put
+the shareware `doom1.wad` in `wad/` to run the smoke test; without it the test prints
+SKIP and exits 0. The smoke test also checks that the two images fit the `rvload`
+layout (`doom.bin` below `HEAP_END`, the WAD below `0x50000000`).
+
+**What is not headless.** The boot loader itself (reset at 0, the `'L'`/`'G'` records
+over the UART) is not run by the ISS: it starts at the payload, after the load. The
+boot flow is covered by the Wiz lockstep (`tests/lockstep.wiz`, which also loads a
+compiled C payload into DDR) and by `doomgen sim`; a full headless boot would need a
+binary image of `Prog.boot` and a scheduled UART byte stream, which the repository does
+not build. Board-only parts remain the DDR3 controller, PHY and calibration, the OLED
+panel, the sound PWM and the real UART. No number above is a hardware measurement.
+
 ## Next
 
 * **Doom on the Arty** (doomgeneric, bare-metal RV32IM): a GCC toolchain (Nix

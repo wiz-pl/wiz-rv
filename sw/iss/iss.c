@@ -4,8 +4,17 @@
    (UART on stdout / from a key script, a cycle counter, the audio FIFO, written to a
    WAV file, the OLED framebuffer, written out as PPM images).
 
-   iss PROGRAM.bin WAD [-n INSTRUCTIONS] [-frames DIR] [-wav FILE] [-keys "TIME:KEY,..."]
-   The program is loaded at 0x40000000 and started there; the WAD at 0x48000000. */
+   iss PROGRAM.bin [WAD] [-n INSTRUCTIONS] [-maxframes N] [-frames DIR]
+       [-wav FILE] [-keys "TIME:KEY,..."] [-screen HEX]
+   The program is loaded at 0x40000000 and started there; the WAD (optional: the
+   benchmark does not need it) at 0x48000000 and its length at 0x47fffff0. That is
+   the memory rvload (app/rvload.wiz) leaves behind on the board.
+
+   The cycle counts are the ISS's model of the multi-cycle core (2 cycles per
+   instruction, +1 for a load/store, +amount+1 for a shift, +32 for a divide); they
+   are not measurements of the pipelined core or of hardware. The performance
+   counters of sw/hw.h are modelled too: PERF_INSTR, PERF_MEM, PERF_LONG and
+   PERF_FBW; the cache and bus counters read 0 because there are no caches here. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,8 +26,11 @@ static const uint32_t DDR_SIZE = 256u << 20;
 static uint16_t oled[96 * 64];
 static uint32_t x[32], pc;
 static uint64_t cycles, instret;
+static uint64_t mem_cycles;     /* the extra cycle of a load (PERF_MEM) */
+static uint64_t long_cycles;    /* shift, multiply and divide cycles (PERF_LONG) */
 static const char *frames;
 static int nframe;
+static int maxframes;           /* -maxframes N: stop when N frames have been written */
 static const char *keys;        /* "ms:c,ms:c,..." */
 static uint32_t screen_ptr;     /* -screen ADDR: the address of DG_ScreenBuffer (320 x 200 XRGB) */
 static int lenient;             /* -lenient: do misaligned accesses (and report where) */
@@ -80,6 +92,7 @@ static void dump_frame(void) {
 static uint64_t snd_written;
 static FILE *wav;
 static uint32_t wav_n;
+static uint32_t fbw_pc[16]; static int fbw_n; static uint64_t fbw_total;
 
 static uint32_t io_read(uint32_t a) {
   uint32_t ms = (uint32_t)(cycles / 50000);
@@ -93,11 +106,16 @@ static uint32_t io_read(uint32_t a) {
     uint64_t used = snd_written - played;
     return used >= 4096 ? 0 : (uint32_t)(4096 - used);
   }
+  /* sw/hw.h's performance counters. The ISS has no caches or bus waits, so those
+     read 0 instead of inventing numbers. */
+  case 0x50: return (uint32_t)instret;
+  case 0x58: return (uint32_t)mem_cycles;
+  case 0x5c: return (uint32_t)long_cycles;
+  case 0x6c: return (uint32_t)fbw_total;
   default: return 0;
   }
 }
 
-static uint32_t fbw_pc[16]; static int fbw_n; static uint64_t fbw_total;
 static void io_write(uint32_t a, uint32_t v, int size) {
   if ((a >> 24) == 0x81) {
     fbw_total++;
@@ -150,7 +168,7 @@ static int step(void) {
     uint32_t ad = a + iI, size = 1u << (f3 & 3);
     if (f3 == 3 || f3 > 5) return 3;
     if (ad & (size - 1)) { if (!lenient) return 5; misaligned(); }
-    cycles += 1;
+    cycles += 1; mem_cycles += 1;
     if (ad >> 31) v = io_read(ad);
     else {
       uint8_t *p = byte_at(ad); uint32_t t = 0; memcpy(&t, p, size);
@@ -174,7 +192,7 @@ static int step(void) {
     wr = 1;
     if (op == 0x33 && f7 == 1) {
       int64_t sa = (int32_t)a, sb = (int32_t)b; uint64_t ua = a, ub = b;
-      cycles += f3 >= 4 ? 32 : 1;
+      { uint32_t c_ = f3 >= 4 ? 32 : 1; cycles += c_; long_cycles += c_; }
       switch (f3) {
       case 0: v = a * b; break;
       case 1: v = (uint32_t)((sa * sb) >> 32); break;
@@ -189,11 +207,11 @@ static int step(void) {
     }
     switch (f3) {
     case 0: v = alt && op == 0x33 ? a - c : a + c; break;
-    case 1: v = a << (c & 31); cycles += (c & 31) + 1; break;
+    case 1: v = a << (c & 31); { uint32_t k_ = (c & 31) + 1; cycles += k_; long_cycles += k_; } break;
     case 2: v = (int32_t)a < (int32_t)c; break;
     case 3: v = a < c; break;
     case 4: v = a ^ c; break;
-    case 5: v = alt ? (uint32_t)((int32_t)a >> (c & 31)) : a >> (c & 31); cycles += (c & 31) + 1; break;
+    case 5: v = alt ? (uint32_t)((int32_t)a >> (c & 31)) : a >> (c & 31); { uint32_t k_ = (c & 31) + 1; cycles += k_; long_cycles += k_; } break;
     case 6: v = a | c; break;
     case 7: v = a & c; break;
     }
@@ -217,26 +235,48 @@ static long load(const char *path, uint32_t at) {
   return n;
 }
 
+static void usage(void) {
+  fprintf(stderr,
+    "usage: iss PROGRAM.bin [WAD] [options]\n"
+    "  -n N            stop after N instructions (default 2000000000)\n"
+    "  -maxframes N    stop when N frames have been written\n"
+    "  -frames DIR     write each frame as DIR/frameNNNNN.ppm (and fullNNNNN.ppm with -screen)\n"
+    "  -screen HEX     the address of Doom's DG_ScreenBuffer pointer, for the full frame\n"
+    "  -wav FILE       write the sound FIFO to FILE (8-bit mono, 11025 Hz)\n"
+    "  -keys K         a key script, \"milliseconds:key,...\" (\\n and \\e are escapes)\n"
+    "  -lenient        do misaligned accesses instead of trapping, and report them\n");
+}
+
 int main(int argc, char **argv) {
-  if (argc < 3) { fprintf(stderr, "usage: iss PROGRAM.bin WAD [-n N] [-frames DIR] [-keys K]\n"); return 2; }
+  const char *prog = 0, *wadPath = 0;
   uint64_t limit = 2000000000ull;
-  for (int i = 3; i + 1 < argc; i += 2) {
-    if (!strcmp(argv[i], "-n")) limit = strtoull(argv[i + 1], 0, 10);
-    else if (!strcmp(argv[i], "-frames")) frames = argv[i + 1];
-    else if (!strcmp(argv[i], "-keys")) keys = argv[i + 1];
-    else if (!strcmp(argv[i], "-lenient")) { lenient = 1; i--; }
-    else if (!strcmp(argv[i], "-screen")) screen_ptr = (uint32_t)strtoul(argv[i + 1], 0, 16);
-    else if (!strcmp(argv[i], "-wav")) { wav = fopen(argv[i + 1], "wb"); fseek(wav, 44, SEEK_SET); }
+  for (int i = 1; i < argc; i++) {
+    const char *a = argv[i];
+    if (!strcmp(a, "-n") && i + 1 < argc) limit = strtoull(argv[++i], 0, 10);
+    else if (!strcmp(a, "-maxframes") && i + 1 < argc) maxframes = atoi(argv[++i]);
+    else if (!strcmp(a, "-frames") && i + 1 < argc) frames = argv[++i];
+    else if (!strcmp(a, "-keys") && i + 1 < argc) keys = argv[++i];
+    else if (!strcmp(a, "-screen") && i + 1 < argc) screen_ptr = (uint32_t)strtoul(argv[++i], 0, 16);
+    else if (!strcmp(a, "-wav") && i + 1 < argc) { wav = fopen(argv[++i], "wb"); if (wav) fseek(wav, 44, SEEK_SET); }
+    else if (!strcmp(a, "-lenient")) lenient = 1;
+    else if (a[0] == '-') { usage(); return 2; }
+    else if (!prog) prog = a;
+    else if (!wadPath) wadPath = a;
+    else { usage(); return 2; }
   }
+  if (!prog) { usage(); return 2; }
   ddr = calloc(DDR_SIZE, 1);
-  load(argv[1], 0x40000000u);
-  uint32_t n = (uint32_t)load(argv[2], 0x48000000u);
+  if (!ddr) { perror("calloc"); return 1; }
+  load(prog, 0x40000000u);
+  uint32_t n = wadPath ? (uint32_t)load(wadPath, 0x48000000u) : 0;
   memcpy(byte_at(0x47fffff0u), &n, 4);
   pc = 0x40000000u;
   int t = 0;
-  while (instret < limit && !(t = step())) {}
+  while (instret < limit && !(t = step()) && !(maxframes && nframe >= maxframes)) {}
+  int frameStop = maxframes && nframe >= maxframes && !t;
   fprintf(stderr, "\n[iss] %s after %llu instructions, %llu cycles (%.1f s at 50 MHz), pc %08x, %d frames\n",
-          t ? "trap" : "stopped", (unsigned long long)instret, (unsigned long long)cycles, cycles / 50e6, pc, nframe);
+          t ? "trap" : frameStop ? "frame limit" : "stopped", (unsigned long long)instret,
+          (unsigned long long)cycles, cycles / 50e6, pc, nframe);
   if (t) {
     fprintf(stderr, "[iss] trap %d\n", t);
     for (int i = 0; i < 32; i++) fprintf(stderr, "x%d=%08x%s", i, x[i], i % 8 == 7 ? "\n" : " ");
