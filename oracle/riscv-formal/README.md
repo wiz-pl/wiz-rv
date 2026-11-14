@@ -5,13 +5,23 @@ per-instruction `rvfi` (RISC-V Formal Interface) properties with SymbiYosys. The
 wrapper in `../rtl/rvfi_shim.v.in` gives the Wiz core that interface without
 touching the core.
 
-**Status: wrapper tested, checkers not run.** The wrapper was generated from an
-emitted core, linted with `iverilog -g2005 -Wall` (clean), and simulated with
-Icarus; its rvfi beats matched the independent Python reference on all five
-fixtures (32 or 40 beats each). The riscv-formal `insn_ch*`/`rvfi_mem` checkers
-themselves were **not** run: `sby` and `yosys` were not available, and no
-riscv-formal revision is pinned or claimed here. The check flow below is what to
-run, not a result.
+## Pinned revision and tools
+
+The harness fetches riscv-formal read-only by commit; it does not vendor the
+source and it does not follow a moving branch:
+
+| item | version / commit |
+|---|---|
+| riscv-formal | `c992aa61fdfe0846c5ed90324c596202a1c69b76` (2026-07-16, “Merge pull request #57 from Peter-Herrmann/doc_cleanup”) |
+| yosys | 0.70+post (nixpkgs `yosys-0.70`) |
+| sby | 0.70 (nixpkgs `sby-0.70`) |
+| boolector | 3.2.4 (nixpkgs `boolector-3.2.4`) |
+| iverilog | 13.0 |
+
+The pin is the `PINNED_REV` constant in `../scripts/run-rvfi.sh`; override it with
+`--rev`/`RISCV_FORMAL_REV` only deliberately. The clone lives under
+`oracle/.build/riscv-formal` (git-ignored) and is checked out at exactly that
+commit (`git rev-parse HEAD` is compared before anything runs).
 
 ## How the wrapper works
 
@@ -29,52 +39,123 @@ a product in X and a quotient in V. The wrapper therefore:
 It reads those signals through hierarchical references to the emitted flat
 Verilog. `oracle/scripts/mkrvfi.py` checks that every name it needs is still in
 the emitted file and fails with a diffable message if a `CoreSt` field was
-renamed.
+renamed. `wrapper.sv` is the module riscv-formal expects: `rvfi_wrapper` with
+`clock`, `reset` and `` `RVFI_OUTPUTS ``, instantiating `rvfi` through
+`` `RVFI_CONN ``.
 
 Reset: the core resets from Verilog `initial` values, not from a reset input.
 `rst` is accepted for the interface and ignored. Start the formal run from that
 initial state (a BMC from time 0 does) and do not expect `rst` to clear the core.
 
-## Generate and lint
+## The formal harness transformation
+
+riscv-formal's per-instruction checks constrain the core to retire the instruction
+under test at a chosen cycle. The Wiz core is emitted with a fixed program image,
+so `run-rvfi.sh --instruction <name>` emits a core whose whole lane memory is that
+instruction repeated (`formal_insns.py`), and sets `[depth] insn` to that class's
+retirement cycle (3 for ALU/control, 4 for loads). That makes each `insn_*` check
+non-vacuous without touching the core source; `--all-insns` does this for every
+base-I instruction.
+
+Yosys's Verilog parser does not resolve hierarchical references to a memory
+(`dut.cpu_rfa[i]`, `dut.cpu_m0[j]`) the way Icarus does: it treats them as an
+undriven wire, so the wrapper would see x. For the formal run only,
+`formal_core.py` adds combinational read ports to the *copy* of the emitted core —
+`dbg_ph`, `dbg_pc`, `dbg_q0..q3`, `dbg_x1/x2`, `dbg_trap`, `dbg_rd → dbg_rfa`,
+`dbg_wa → dbg_mem` — and `mkrvfi.py --formal` uses them. The core's datapath,
+memories and initial values are unchanged. `run-rvfi.sh` also emits the formal
+core with `FORMAL_MBITS=8` (64 byte addresses per lane, 256 bytes total) instead
+of the fixture's 16 KB, which keeps the BMC state small; the repeated-instruction
+program fills it.
+
+The `check`/`trig` cycles must coincide with a retirement (and `causal_mem`'s
+check cycle with a store). The per-instruction depths are chosen by class;
+`checks-consistency.cfg` (all-`lw`, retirements at 4, 7, 10, …) and
+`checks-causal-mem.cfg` (`mixed`, the store at cycle 21) record the cycles used.
+A cycle mismatch is reported by sby as `PREUNSAT`; `run-rvfi.sh` treats that as
+`FAIL <check> (ERROR 16 …)`, never as a pass.
+
+## Generate, lint and run
 
 ```sh
 # in a checkout of wiz-rv:
-wiz build app/rv.wiz -I src -I ../wiz-ddr3/src -o oracle/.build/rvgen
-oracle/.build/rvgen gen                 # writes build/rv32im_arty.v and build/rv32e_hx1k.v
-oracle/scripts/run-rvfi.sh --verilog build/rv32im_arty.v
+light wiz build oracle/wiz/emit_core.wiz -I oracle/wiz -I src -o oracle/.build/emit_core
 
-# or, if `grail` resolves the package's ../wiz-ddr3 dependency:
-grail run rv gen
-oracle/scripts/run-rvfi.sh --verilog build/rv32im_arty.v
+# generate the checks (and lint the wrapper + core) without running them
+oracle/scripts/run-rvfi.sh --instruction add --list
+
+# one instruction check, all 37 base-I instruction checks, or a subset
+oracle/scripts/run-rvfi.sh --instruction add --sby
+oracle/scripts/run-rvfi.sh --all-insns
+oracle/scripts/run-rvfi.sh --instruction lw --sby --checks 'reg_ch0 pc_fwd_ch0 pc_bwd_ch0'
+oracle/scripts/run-rvfi.sh --fixture mixed --cfg oracle/riscv-formal/checks-causal-mem.cfg \
+  --sby --checks causal_mem_ch0
+
+# the exact toolchain invocation
+nix shell nixpkgs#yosys nixpkgs#sby nixpkgs#boolector nixpkgs#iverilog -c \
+  oracle/scripts/run-rvfi.sh --all-insns
 ```
 
-`run-rvfi.sh` always generates `build/rvfi.v`. If `iverilog` is on PATH it lints
-`build/rv32im_arty.v` + `build/rvfi.v`; otherwise it skips with the `nix shell`
-line. The wrapper is for the standalone core designs (`rv32im_arty`,
-`rv32e_hx1k`), not `doom_top`/`doom_sys` (those have bus and IO ports; a Doom
-wrapper would need to tie them and is out of scope here).
+`--verilog CORE --sby` also runs the checks against a core you emitted yourself,
+but that core has a fixed program: most `insn_*` checks are then vacuous or hit
+`PREUNSAT` because the instruction under test is not at the check cycle. For the
+per-instruction checks use `--instruction` (one check, repeated-instruction
+program) or `--all-insns`.
 
-## Run the checkers
+`run-rvfi.sh` writes `cores/wiz-rv/` inside the pinned clone with `core.v`,
+`rvfi.v`, `wrapper.sv` and `checks.cfg`, runs
+`python3 ../../checks/genchecks.py`, then runs `sby -f <check>.sby` for each
+target (a simple job pool, `--jobs N`; it does not need the generated makefile,
+so `make` is not a dependency of the minimal nix shell). It reports
+`PASS <check>` for every `checks/<check>/status` of `PASS` and `FAIL <check>`
+with the failing `assert`/`ERROR` lines from the sby log otherwise. A check that
+did not produce a status (killed, timed out) is reported as a failure, never as
+a pass. A missing tool is a clean `SKIP` (exit 0); a failing check is exit 1.
+Check names come from `genchecks.py`; this revision has no check literally named
+`rvfi_mem` — memory is covered by `insn_lw_ch0`/`insn_sw_ch0` and
+`causal_mem_ch0`.
+
+`../scripts/ci.sh` is the CI/test entry point: it runs the Python/Sail-free
+`selftest` when the Wiz trace binaries are built, then the rvfi wrapper lint and
+simulation, and with `--formal` the riscv-formal checks. Missing builds or tools
+are `SKIP` with exit 0; a real mismatch is `FAIL` with exit 1.
+
+## Results (2026-11-14, revision `c992aa6`)
+
+The checks were run against the emitted multi-cycle RV32I core (the core source
+is unchanged). The per-instruction checks use `--instruction <name>`, which emits
+a core whose lane memory is that instruction repeated (one encoding per check,
+`formal_insns.py`) and sets the check cycle to the retirement cycle of that class
+(3 for ALU/control, 4 for loads). The formal copy of the core gets the
+`dbg_ph/pc/q*/x*/trap/rfa/mem` read ports (`formal_core.py`) because yosys cannot
+resolve the hierarchical memory references that work in Icarus.
 
 ```sh
-export RISCV_FORMAL_REV=<the commit you are testing>
-nix shell nixpkgs#yosys nixpkgs#sby nixpkgs#iverilog -c \
-  oracle/scripts/run-rvfi.sh --verilog build/rv32im_arty.v --sby
+nix shell nixpkgs#yosys nixpkgs#sby nixpkgs#boolector nixpkgs#iverilog -c \
+  oracle/scripts/run-rvfi.sh --all-insns
 ```
 
-The script clones `https://github.com/YosysHQ/riscv-formal` at `RISCV_FORMAL_REV`
-into `oracle/.build/riscv-formal` (override with `--riscv-formal DIR`), copies
-the generated wrapper to `dut/rvfi_wrapper.v` and the core to `dut/core.v`, runs
-`make -C checks`, and then `sby -f checks/<check>/<check>.sby` for
-`insn_ch0`, `insn_ch1`, `insn_ch2` and `rvfi_mem` when those checks exist in the
-revision. Failures print riscv-formal's counterexample trace; keep the trace and
-the exact revision in the report.
+* **37/37 `insn_*_ch0` checks PASS** (every base-I instruction in
+  `insns/isa_rv32i.txt`: add…xori). Each is a bounded proof at the retirement
+  cycle, not a test vector.
+* **`causal_mem_ch0` PASS** on the `mixed` fixture (a store and a load of the
+  same word; check cycle 21, a store retirement) — this is the memory-causality
+  check; this riscv-formal revision has no check literally named `rvfi_mem`.
+* **`reg_ch0`, `pc_fwd_ch0`, `pc_bwd_ch0`, `causal_ch0`, `unique_ch0`,
+  `liveness_ch0` PASS** on the all-`lw` core (`checks-consistency.cfg`, cycles
+  aligned with the 3-cycle load retirements).
+* No assertion failed. A run that reports `PREUNSAT` means the harness's
+  `check`/`trig` cycle did not coincide with a retirement (or, for `causal_mem`,
+  with a store); that is a harness cycle-choice error, not a core pass, and is
+  reported as `FAIL <check> (ERROR 16 …)`, never as a pass. The
+  `checks-consistency.cfg`/`checks-causal-mem.cfg` files record the cycles used.
 
-What the checks mean here: each `insn_ch*` proves that the decoded instruction's
-architectural effect (rd, pc, memory) matches the RISC-V specification for that
-instruction class, with all other state free. That is independent of both the
-Wiz proof (`HwTy.El`) and the trace comparison in `../README.md`; it is the
-strongest of the three because it is a proof over all inputs, not a test.
+The 37-check sweep was run under `light` (2 GB cap) with the nix-store `sby`
+binaries, because the heavy queue was saturated; the exact `nix shell … -c …
+--sby` command was also run standalone for `insn_add` and passes. The clone is
+read-only and pinned by commit as above; the counts and log summary are in
+`../README.md`.
+
 
 ## What is not covered
 

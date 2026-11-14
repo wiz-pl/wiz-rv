@@ -67,27 +67,29 @@ module rvfi(
   localparam [3:0] PH_H = 4'd5;
   localparam WB = ${WB};              // word-address bits of the byte lanes
 
+${DEBUG_WIRES}
+  wire [WB-1:0] dbg_wa;
 ${INSTANCE}
 
-  wire [2:0] core_trap = dut.${TRAP};
+  wire [2:0] core_trap = ${TRAP_READ};
 
   // The rvfi beat is one cycle after E and waits for completion (F, D or H).
-  reg        pend;
-  reg [31:0] insn_q;
-  reg [31:0] pc_q;
-  reg [31:0] rs1_q;
-  reg [31:0] rs2_q;
-  reg [63:0] order_q;
+  reg        pend = 1'b0;
+  reg [31:0] insn_q = 32'd0;
+  reg [31:0] pc_q = 32'd0;
+  reg [31:0] rs1_q = 32'd0;
+  reg [31:0] rs2_q = 32'd0;
+  reg [63:0] order_q = 64'd0;
 
-  wire at_e = (dut.${P}ph == PH_E);
-  wire done = pend && ((dut.${P}ph == PH_F) || (dut.${P}ph == PH_D) || (dut.${P}ph == PH_H));
+  wire at_e = (${PH} == PH_E);
+  wire done = pend && ((${PH} == PH_F) || (${PH} == PH_D) || (${PH} == PH_H));
 
   always @(posedge clk) begin
     if (at_e) begin
-      insn_q <= {dut.${P}q3, dut.${P}q2, dut.${P}q1, dut.${P}q0};
-      pc_q   <= dut.${P}pc;
-      rs1_q  <= dut.${P}x1;
-      rs2_q  <= dut.${P}x2;
+      insn_q <= {${Q3}, ${Q2}, ${Q1}, ${Q0}};
+      pc_q   <= ${PC};
+      rs1_q  <= ${X1};
+      rs2_q  <= ${X2};
       pend   <= 1'b1;
     end
     if (done) begin
@@ -114,6 +116,7 @@ ${INSTANCE}
   wire [31:0] imm_s = {{20{insn_q[31]}}, insn_q[31:25], insn_q[11:7]};
   wire [31:0] addr_raw = rs1_q + (op_store ? imm_s : imm_i);
   wire [31:0] mem_addr_aligned = {addr_raw[31:2], 2'b00};
+  assign dbg_wa = addr_raw[WB+1:2];
 
   // The size of a load/store from funct3: 0=byte, 1=half, 2=word, 4/5=byte/half.
   wire [3:0] size_mask = (f3[1:0] == 2'd0) ? 4'b0001 :
@@ -121,13 +124,13 @@ ${INSTANCE}
   wire [3:0] lane_shift = {2'b00, addr_raw[1:0]};
 
   wire [WB-1:0] wa = addr_raw[WB+1:2];
-  wire [31:0] mem_word = {dut.${P}m3[wa], dut.${P}m2[wa], dut.${P}m1[wa], dut.${P}m0[wa]};
+  wire [31:0] mem_word = ${MEM_READ};
 
   assign rvfi_valid   = done;
   assign rvfi_order   = order_q;
   assign rvfi_insn    = insn_q;
   assign rvfi_trap    = (core_trap != 3'd0);
-  assign rvfi_halt    = (dut.${P}ph == PH_H);
+  assign rvfi_halt    = (${PH} == PH_H);
   assign rvfi_intr    = 1'b0;
   assign rvfi_mode    = 2'b11;   // machine mode
   assign rvfi_ixl     = 2'b01;   // 32-bit
@@ -138,10 +141,10 @@ ${INSTANCE}
   assign rvfi_rs2_rdata = rs2_q;
 
   assign rvfi_rd_addr  = (writes_rd && (rd != 5'd0) && !rvfi_trap) ? rd : 5'd0;
-  assign rvfi_rd_wdata = (rvfi_rd_addr != 5'd0) ? dut.${P}rfa[rvfi_rd_addr] : 32'd0;
+  assign rvfi_rd_wdata = (rvfi_rd_addr != 5'd0) ? ${RFA_READ} : 32'd0;
 
   assign rvfi_pc_rdata = pc_q;
-  assign rvfi_pc_wdata = dut.${P}pc;
+  assign rvfi_pc_wdata = ${PC};
 
   assign rvfi_mem_addr  = (op_load || op_store) ? mem_addr_aligned : 32'd0;
   assign rvfi_mem_rmask = op_load  ? (size_mask << lane_shift) : 4'd0;

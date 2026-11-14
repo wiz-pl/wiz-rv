@@ -47,6 +47,10 @@ def main(argv=None):
                    help="the emitted core (default: build/rv32im_arty.v)")
     p.add_argument("--out", default="build/rvfi.v",
                    help="the generated wrapper (default: build/rvfi.v)")
+    p.add_argument("--formal", action="store_true",
+                   help="the core has the formal debug ports (dbg_rd/dbg_wa/dbg_rfa/dbg_mem); "
+                        "read the register file and memory through them instead of "
+                        "hierarchical memory references (yosys cannot resolve those)")
     args = p.parse_args(argv)
 
     with open(args.verilog) as f:
@@ -96,23 +100,72 @@ def main(argv=None):
 
     inst = [f"  {core} dut("]
     ties = []
+    debug = {"dbg_rd", "dbg_wa", "dbg_rfa", "dbg_mem", "dbg_ph", "dbg_pc",
+             "dbg_q0", "dbg_q1", "dbg_q2", "dbg_q3", "dbg_x1", "dbg_x2", "dbg_trap"}
     for direction, width, name in ports:
+        if args.formal and name in debug:
+            continue
         if direction == "input" and name == "clk":
             ties.append("    .clk(clk)")
         elif direction == "input":
             ties.append(f"    .{name}({{{width}{{1'b1}}}})" if width > 1 else f"    .{name}(1'b1)")
         else:
             ties.append(f"    .{name}()")
+    if args.formal:
+        ties += [
+            "    .dbg_ph(dbg_ph)",
+            "    .dbg_pc(dbg_pc)",
+            "    .dbg_q0(dbg_q0)",
+            "    .dbg_q1(dbg_q1)",
+            "    .dbg_q2(dbg_q2)",
+            "    .dbg_q3(dbg_q3)",
+            "    .dbg_x1(dbg_x1)",
+            "    .dbg_x2(dbg_x2)",
+            "    .dbg_trap(dbg_trap)",
+            "    .dbg_rd(rvfi_rd_addr)",
+            "    .dbg_wa(dbg_wa)",
+            "    .dbg_rfa(dbg_rfa)",
+            "    .dbg_mem(dbg_mem)",
+        ]
     inst.append(",\n".join(ties))
     inst.append("  );")
+
+    if args.formal:
+        debug_wires = (
+            "  wire [3:0] dbg_ph;\n"
+            "  wire [31:0] dbg_pc;\n"
+            "  wire [7:0] dbg_q0, dbg_q1, dbg_q2, dbg_q3;\n"
+            "  wire [31:0] dbg_x1, dbg_x2;\n"
+            "  wire [2:0] dbg_trap;\n"
+            "  wire [31:0] dbg_rfa;\n"
+            "  wire [31:0] dbg_mem;")
+        reads = {
+            "PH": "dbg_ph", "PC": "dbg_pc",
+            "Q0": "dbg_q0", "Q1": "dbg_q1", "Q2": "dbg_q2", "Q3": "dbg_q3",
+            "X1": "dbg_x1", "X2": "dbg_x2", "TRAP_READ": "dbg_trap",
+            "RFA_READ": "dbg_rfa", "MEM_READ": "dbg_mem",
+        }
+    else:
+        debug_wires = ""
+        reads = {
+            "PH": f"dut.{prefix}ph", "PC": f"dut.{prefix}pc",
+            "Q0": f"dut.{prefix}q0", "Q1": f"dut.{prefix}q1",
+            "Q2": f"dut.{prefix}q2", "Q3": f"dut.{prefix}q3",
+            "X1": f"dut.{prefix}x1", "X2": f"dut.{prefix}x2",
+            "TRAP_READ": f"dut.{trap}",
+            "RFA_READ": f"dut.{prefix}rfa[rvfi_rd_addr]",
+            "MEM_READ": (f"{{dut.{prefix}m3[wa], dut.{prefix}m2[wa], "
+                         f"dut.{prefix}m1[wa], dut.{prefix}m0[wa]}}"),
+        }
 
     with open(TEMPLATE) as f:
         tmpl = f.read()
     out = (tmpl.replace("${CORE}", core)
                .replace("${INSTANCE}", "\n".join(inst))
-               .replace("${TRAP}", trap)
-               .replace("${P}", prefix)
+               .replace("${DEBUG_WIRES}", debug_wires)
                .replace("${WB}", str(wb)))
+    for key, value in reads.items():
+        out = out.replace("${" + key + "}", value)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
         f.write(out)

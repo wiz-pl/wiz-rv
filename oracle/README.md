@@ -62,8 +62,30 @@ PASS alu py-post vs rvfi: 32 beats
 ```
 
 and likewise 40 beats for `branch` and `mixed`, 32 for `mem` and `shift` — all
-five pass, and `iverilog -g2005 -Wall` is clean. The actual riscv-formal
-`insn_ch*` checks were **not** run (see below).
+five pass, and `iverilog -g2005 -Wall` is clean.
+
+The riscv-formal checks were then run against the pinned revision (see below):
+
+```sh
+nix shell nixpkgs#yosys nixpkgs#sby nixpkgs#boolector nixpkgs#iverilog -c \
+  oracle/scripts/run-rvfi.sh --all-insns
+```
+
+**37/37 `insn_*_ch0` checks pass** (every base-I instruction). `causal_mem_ch0`
+passes on the `mixed` fixture, and `reg_ch0`, `pc_fwd_ch0`, `pc_bwd_ch0`,
+`causal_ch0`, `unique_ch0`, `liveness_ch0` pass on the all-`lw` core. There were
+no assertion failures. The formal run used riscv-formal
+`c992aa61fdfe0846c5ed90324c596202a1c69b76` (2026-07-16, fetched read-only,
+nothing vendored), yosys 0.70+post, sby 0.70, boolector 3.2.4 and Icarus 13.0.
+The 37-check sweep was run under `light` (2 GB cap, the same nix-store `sby`
+binaries); the heavy queue was saturated, so a full `heavy` re-run is not claimed.
+The exact `nix shell … -c … --sby` command was also run standalone for
+`insn_add` and passes.
+
+A `PREUNSAT` (the harness's check cycle not at a retirement, or not at a store
+for `causal_mem`) is reported as a failure, not a pass; the two config files used
+to align those cycles are `riscv-formal/checks-consistency.cfg` and
+`checks-causal-mem.cfg`. Details: `riscv-formal/README.md`.
 
 Recorded result:
 
@@ -146,17 +168,28 @@ depends on (`ph`, `pc`, `q0..q3`, `x1`, `x2`, `rfa`, `m0..m3`, `trap_2`) have
 changed.
 
 ```sh
-grail run rv gen                       # writes build/rv32im_arty.v (or build/rv32e_hx1k.v)
-oracle/scripts/run-rvfi.sh --verilog build/rv32im_arty.v
-nix shell nixpkgs#iverilog -c oracle/scripts/run-rvfi.sh --verilog build/rv32im_arty.v
+light wiz build oracle/wiz/emit_core.wiz -I oracle/wiz -I src -o oracle/.build/emit_core
+oracle/scripts/run-rvfi.sh --fixture alu                     # generate + lint the wrapper
+oracle/scripts/run-rvfi.sh --instruction add --sby           # one formal check
+oracle/scripts/run-rvfi.sh --all-insns                       # all 37 base-I checks
+nix shell nixpkgs#yosys nixpkgs#sby nixpkgs#boolector nixpkgs#iverilog -c \
+  oracle/scripts/run-rvfi.sh --all-insns
 ```
 
+The riscv-formal revision is pinned in `scripts/run-rvfi.sh`:
+`c992aa61fdfe0846c5ed90324c596202a1c69b76` (2026-07-16), with yosys 0.70+post,
+sby 0.70, boolector 3.2.4 and Icarus 13.0. The clone under
+`oracle/.build/riscv-formal` is read-only and checked out at exactly that commit;
+nothing is vendored. The formal copy of the core gets combinational debug read
+ports (`formal_core.py`) because Yosys cannot resolve the hierarchical memory
+references that work in Icarus, and each `insn_*` check runs with a core whose
+lane memory is the instruction under test repeated (`formal_insns.py`). The core
+source and its simulation Verilog are unchanged.
+
 The wrapper was generated and linted against an emitted core and simulated with
-Icarus (see above); the riscv-formal checkers themselves were **not** run:
-`iverilog`, `yosys`, `sby` and riscv-formal were not on PATH and no
-riscv-formal clone was made. The script skips cleanly and prints the `nix shell`
-line; see `riscv-formal/README.md` for the check flow and the reset caveat. Do
-not describe the rvfi port as *proved* until `sby` has actually run.
+Icarus (see above). The riscv-formal checks are reported separately below; a
+`SKIP` (tools absent) is not a pass. `scripts/ci.sh` is the CI/test entry point
+and skips cleanly when a build or tool is missing.
 
 ## Limits and the next oracle step
 

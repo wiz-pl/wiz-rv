@@ -144,8 +144,13 @@ AUIPC fixtures are Sail/Python-only).
 The same directory has an `rvfi` (RISC-V Formal Interface) wrapper for the emitted
 core. It is generated from the flat Verilog by `oracle/scripts/mkrvfi.py`, linted with
 Icarus, and its rvfi beats are simulated and compared with the Python reference on all
-five fixtures. The riscv-formal `insn_ch*` checkers are the next step and have **not**
-been run (no `sby`/`yosys` here). See [oracle/README.md](oracle/README.md).
+five fixtures. The riscv-formal checks were then run against the pinned revision
+`c992aa61fdfe0846c5ed90324c596202a1c69b76` (2026-07-16, yosys 0.70+post, sby 0.70,
+boolector 3.2.4, Icarus 13.0): **37/37 `insn_*_ch0` checks pass** (every base-I
+instruction), `causal_mem_ch0` passes on the mixed load/store program, and the
+`reg`/`pc_fwd`/`pc_bwd`/`causal`/`unique`/`liveness` consistency checks pass on the
+load program. No assertion failed. See [oracle/README.md](oracle/README.md) and
+[oracle/riscv-formal/README.md](oracle/riscv-formal/README.md).
 
 ## Toolchain
 
