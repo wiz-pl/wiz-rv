@@ -1,0 +1,159 @@
+// rvfi-style retirement shim for a Wiz-emitted pipelined core (Rv.Pipe).
+//
+// This file is a template: oracle/scripts/mkrvfi_pipe.py fills in the core name,
+// the port instantiation, the byte-lane width and the flat state names.  Do not
+// edit the generated copy.
+//
+// This is a *documented shim*, not riscv-formal's checker interface: the pipeline
+// has no `ph`/`pc`/`q` projection, R carries no instruction word, and R holds no
+// next-PC register.  It observes the core's flat PpSt state:
+//
+//     rr_v, rr_miss, rr_pc, rr_we, rr_rd, rr_val, rr_trap,
+//     ms_rfa, ms_mi0..3, ms_md0..3
+//
+// One beat is one retirement, `rr_v && !rr_miss` (the condition of
+// src/Rv/PLockstep.wiz; a cache miss is replayed and is not a retirement).
+//
+//   rvfi_insn       the on-chip instruction word at rr_pc (fixtures execute from
+//                   on-chip memory; DDR/I-cache-only programs are out of scope)
+//   rvfi_pc_rdata   rr_pc: the retiring instruction's address (pre-state)
+//   rvfi_rd_addr/   the core's own write: rr_rd/rr_we, and rr_val (the value R
+//   rvfi_rd_wdata   writes at the edge)
+//   rvfi_rs1/rs2    the architecture's pre-state values at the instruction's rs
+//   rvfi_pc_wdata   decoded from the ISA (pc+4, pc+imm, jalr); R does not keep the
+//                   core's next PC, so this field is the shim's decode, not a core
+//                   register.  The next beat's rvfi_pc_rdata is the core's own.
+//   rvfi_trap       rr_trap != 0 (the trap that stops the core)
+//   rvfi_mem_*      decoded load/store address/mask/data; rdata from the data lanes
+//
+// The formal `insn_*` checks are not claimed for the pipeline in this branch (and
+// no `rvfi_muldiv`).  `oracle.py rvfi --pipe` runs a retirement *sequence trace*
+// and compares PC/registers/memory with the Python reference.
+
+module rvfi(
+  input  clk,
+  input  rst,
+
+  output        rvfi_valid,
+  output [63:0] rvfi_order,
+  output [31:0] rvfi_insn,
+  output        rvfi_trap,
+  output        rvfi_halt,
+  output        rvfi_intr,
+  output [1:0]  rvfi_mode,
+  output [1:0]  rvfi_ixl,
+
+  output [4:0]  rvfi_rs1_addr,
+  output [4:0]  rvfi_rs2_addr,
+  output [31:0] rvfi_rs1_rdata,
+  output [31:0] rvfi_rs2_rdata,
+
+  output [4:0]  rvfi_rd_addr,
+  output [31:0] rvfi_rd_wdata,
+
+  output [31:0] rvfi_pc_rdata,
+  output [31:0] rvfi_pc_wdata,
+
+  output [31:0] rvfi_mem_addr,
+  output [3:0]  rvfi_mem_rmask,
+  output [3:0]  rvfi_mem_wmask,
+  output [31:0] rvfi_mem_rdata,
+  output [31:0] rvfi_mem_wdata
+);
+
+  localparam WB = ${WB};              // word-address bits of the byte lanes
+
+${INSTANCE}
+
+  wire retire = (${RR_V} != 1'b0) && (${RR_MISS} == 1'b0);
+
+  reg [63:0] order_q = 64'd0;
+  always @(posedge clk) begin
+    if (retire) order_q <= order_q + 64'd1;
+  end
+
+  // The instruction is the on-chip word at the retiring pc (the fetch copy of the
+  // RAM is written by every store too, so a self-modifying program must exclude
+  // this window; the fixtures do).
+  wire [WB-1:0] insn_wa = ${RR_PC}[WB+1:2];
+  wire [31:0] insn = {${MI3}[insn_wa], ${MI2}[insn_wa], ${MI1}[insn_wa], ${MI0}[insn_wa]};
+
+  wire [6:0] opc = insn[6:0];
+  wire [4:0] rs1 = insn[19:15];
+  wire [4:0] rs2 = insn[24:20];
+  wire [4:0] rd  = insn[11:7];
+  wire [2:0] f3  = insn[14:12];
+
+  wire [31:0] a = ${RFA}[rs1];
+  wire [31:0] b = ${RFA}[rs2];
+
+  wire op_jal   = (opc == 7'h6f);
+  wire op_jalr  = (opc == 7'h67);
+  wire op_load  = (opc == 7'h03);
+  wire op_store = (opc == 7'h23);
+  wire op_branch = (opc == 7'h63);
+
+  wire [31:0] imm_i = {{20{insn[31]}}, insn[31:20]};
+  wire [31:0] imm_s = {{20{insn[31]}}, insn[31:25], insn[11:7]};
+  wire [31:0] imm_b = {{20{insn[31]}}, insn[7], insn[30:25], insn[11:8], 1'b0};
+  wire [31:0] imm_u = {insn[31:12], 12'd0};
+  wire [31:0] imm_j = {{12{insn[31]}}, insn[19:12], insn[20], insn[30:21], 1'b0};
+
+  // branch conditions on the pre-state register values
+  wire br_eq  = (a == b);
+  wire br_ne  = (a != b);
+  wire br_lt  = ($signed(a) < $signed(b));
+  wire br_ge  = ($signed(a) >= $signed(b));
+  wire br_ltu = (a < b);
+  wire br_geu = (a >= b);
+  wire br_taken = (f3 == 3'd0) ? br_eq :
+                  (f3 == 3'd1) ? br_ne :
+                  (f3 == 3'd4) ? br_lt :
+                  (f3 == 3'd5) ? br_ge :
+                  (f3 == 3'd6) ? br_ltu :
+                  (f3 == 3'd7) ? br_geu : 1'b0;
+
+  wire [31:0] pc_plus4 = ${RR_PC} + 32'd4;
+  wire [31:0] pc_branch = br_taken ? (${RR_PC} + imm_b) : pc_plus4;
+  wire [31:0] jalr_tgt = (a + imm_i) & 32'hffff_fffe;
+
+  wire [31:0] pc_next = op_jal  ? (${RR_PC} + imm_j) :
+                        op_jalr ? jalr_tgt :
+                        op_branch ? pc_branch : pc_plus4;
+
+  wire [31:0] addr_raw = a + (op_store ? imm_s : imm_i);
+  wire [31:0] mem_addr_aligned = {addr_raw[31:2], 2'b00};
+  wire [WB-1:0] wa = addr_raw[WB+1:2];
+
+  wire [3:0] size_mask = (f3[1:0] == 2'd0) ? 4'b0001 :
+                         (f3[1:0] == 2'd1) ? 4'b0011 : 4'b1111;
+  wire [3:0] lane_shift = {2'b00, addr_raw[1:0]};
+  wire [31:0] mem_word = {${MD3}[wa], ${MD2}[wa], ${MD1}[wa], ${MD0}[wa]};
+
+  assign rvfi_valid   = retire;
+  assign rvfi_order   = order_q;
+  assign rvfi_insn    = insn;
+  assign rvfi_trap    = (${RR_TRAP} != 3'd0);
+  assign rvfi_halt    = (${RR_TRAP} != 3'd0);
+  assign rvfi_intr    = 1'b0;
+  assign rvfi_mode    = 2'b11;   // machine mode
+  assign rvfi_ixl     = 2'b01;   // 32-bit
+
+  assign rvfi_rs1_addr  = rs1;
+  assign rvfi_rs2_addr  = rs2;
+  assign rvfi_rs1_rdata = a;
+  assign rvfi_rs2_rdata = b;
+
+  assign rvfi_rd_addr  = (${RR_WE} != 1'b0) ? ${RR_RD} : 5'd0;
+  assign rvfi_rd_wdata = (${RR_WE} != 1'b0) ? ${RR_VAL} : 32'd0;
+
+  assign rvfi_pc_rdata = ${RR_PC};
+  assign rvfi_pc_wdata = pc_next;
+
+  assign rvfi_mem_addr  = (op_load || op_store) ? mem_addr_aligned : 32'd0;
+  assign rvfi_mem_rmask = op_load  ? (size_mask << lane_shift) : 4'd0;
+  assign rvfi_mem_wmask = op_store ? (size_mask << lane_shift) : 4'd0;
+  assign rvfi_mem_rdata = op_load  ? mem_word : 32'd0;
+  assign rvfi_mem_wdata = op_store ? (b << {lane_shift, 3'b000}) : 32'd0;
+
+endmodule

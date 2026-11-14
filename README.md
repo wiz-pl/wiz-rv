@@ -134,12 +134,16 @@ value of the core's other registers. FINDINGS.md, H2, says why not the others.
 ## Independent oracle
 
 `oracle/` is verification infrastructure, not part of the core. It compares the
-executable specification (`Rv.Isa`), the multi-cycle core, an independent Python RV32I
-reference, `sail-riscv` and Spike on one architectural trace per instruction (PC, all
-32 registers and the data memory), on ALU, branch, load/store, shift and mixed
-fixtures. The recorded run (sail-riscv 0.12, Spike 1.1.1-dev) has 31 passing
+executable specification (`Rv.Isa`), the multi-cycle core, the 5-stage pipeline at
+retirement (`Rv.Pipe`, R), an independent Python RV32I reference, `sail-riscv` and
+Spike on one architectural trace per instruction (PC, all 32 registers and the data
+memory), on ALU, branch, hazard/forwarding, load/store, shift, stall, redirect and
+mixed fixtures. The recorded run (sail-riscv 0.12, Spike 1.1.1-dev) has 31 passing
 comparisons, 0 failures and 2 documented skips (Spike cannot load at 0, so the two
-AUIPC fixtures are Sail/Python-only).
+AUIPC fixtures are Sail/Python-only); the pipeline extension (branch
+`agent/rv-pipeline-oracle`, based on `agent/rv-oracle` `2a874fd`) brings it to 87
+passing, 0 failed and 3 skipped over eight fixtures, and adds a retirement sequence
+trace through the pipeline rvfi shim (8/0/0). See [oracle/README.md](oracle/README.md).
 
 The same directory has an `rvfi` (RISC-V Formal Interface) wrapper for the emitted
 core. It is generated from the flat Verilog by `oracle/scripts/mkrvfi.py`, linted with

@@ -1,0 +1,79 @@
+import OracleTrace
+import Rv.PLockstep
+import IO
+import Text
+-- `pipe_trace FIXTURE`: the pipelined core (`Rv.Pipe.pipeCore`, at values) on a
+-- fixture, as a trace in the oracle's line format (see OracleTrace.wiz).
+--
+-- One line per retired instruction, the architectural state *before* it, exactly as
+-- `core_trace` projects the multi-cycle core at E:
+--
+--     pc     = R's pc (`rr.pc`), the instruction's address
+--     regs   = the register file at R, before its write (so the writes of the
+--              instructions before it, and none after)
+--     memory = the on-chip data memory before the instruction
+--
+-- The sample point is `rr.v && !rr.miss`, the retirement of `PLockstep`: a D- or
+-- I-cache miss is replayed (its R marker is not a retirement), and a killed
+-- instruction never has `rr.v`.  The pc and registers are pre-state directly.
+--
+-- Memory needs one more word: a store's write is registered when the store leaves M
+-- and lands at the next edge, i.e. exactly when the store enters R (`Pipe.wiz`,
+-- `wr.oWe`).  So at R the memory already contains the retiring store's bytes.  The
+-- pre-state is the memory of the *previous* cycle, which the driver keeps in `prev`
+-- (`prev` starts at the initial memory).  This is a projection of the core's state,
+-- not a re-implementation: no store data or address is reconstructed.
+--
+-- When the core stops (a trap retires), the trace ends; a fixture with a trap is
+-- shorter than the ISA trace and the comparator reports the state-count difference.
+-- Fixtures for this trace avoid traps, DDR and the I/O port (the driver runs the
+-- pipeline with `In.idle`, so on-chip memory only).
+
+def Pt.regLine (ab : Nat) {wb : Nat} (s : PpSt ab wb HwTy.El) : List String :=
+  Tr.regsGo 32 0 (fun i => if Nat.beq i 0 then 0 else (s.ms.rfa (BitVec.ofNat ab i)).toNat)
+
+def Pt.memGo (n : Nat) (get : Nat → Nat) : Nat → Nat → List String
+  | .zero, _ => .nil
+  | .succ k, a =>
+    List.append (.cons (Ox.hex 2 (get a)) .nil) (Pt.memGo n get k (Nat.succ a))
+
+def Pt.line (ab wb : Nat) (fx : Fx) (k : Nat) (s : PpSt ab wb HwTy.El) (prev : Nat → Nat) : String :=
+  Tr.line k s.rr.pc.toNat s.trap.toNat (Pt.regLine ab s) (Pt.memGo fx.mcount prev fx.mcount fx.mbase)
+
+def Pt.next (ab wb : Nat) (mx : Bool) (s : PpSt ab wb HwTy.El) : HwTy.El (PpSt.code ab wb) :=
+  (pipeStep (r := HwTy.El) ab wb mx s In.idle).1
+
+def Pt.go (ab wb : Nat) (mx : Bool) (fx : Fx) :
+    Nat → Nat → (Nat → Nat) → HwTy.El (PpSt.code ab wb) → List String
+  | .zero, _, _, _ => .nil
+  | .succ fuel, emitted, prev, v =>
+    let s := PLs.hw (ab := ab) (wb := wb) v;
+    let retire := Bool.and (BitVec.isTrue s.rr.v) (Bool.not (BitVec.isTrue s.rr.miss));
+    let stopped := Bool.not (Nat.beq s.trap.toNat 0);
+    if stopped then .nil
+    else
+      (if retire then
+        (if Nat.le emitted fx.steps then
+          List.append (.cons (Pt.line ab wb fx emitted s prev) .nil)
+            (Pt.go ab wb mx fx fuel (Nat.succ emitted) (fun a => PLs.byteD ab wb s a) (Pt.next ab wb mx s))
+         else .nil)
+       else
+        Pt.go ab wb mx fx fuel emitted (fun a => PLs.byteD ab wb s a) (Pt.next ab wb mx s))
+
+def Pt.main (path : String) : IO Unit :=
+  IO.bind (IO.readFile path) (fun text =>
+    match Fx.ofLines (Fx.lines text) with
+    | .none => IO.println ("oracle: bad fixture " ++ path)
+    | .some fx =>
+      let ab := 5;
+      let wb := Nat.sub fx.mbits 2;
+      let fuel := Nat.add (Nat.mul fx.steps 8) 400;
+      let init := PpSt.init ab wb fx.words;
+      let prev0 : Nat → Nat := fun a => PLs.byteD ab wb init a;
+      let v0 := Bundle.toEl (PpSt.bundle ab wb) init;
+      Tr.say (List.append (Tr.header fx "pipe") (Pt.go ab wb .false fx fuel 0 prev0 v0)))
+
+def main : IO Unit := IO.bind IO.args (fun args =>
+  match args with
+  | .cons path .nil => Pt.main path
+  | _ => IO.println "usage: pipe_trace FIXTURE")

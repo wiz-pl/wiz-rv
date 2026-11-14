@@ -4,20 +4,22 @@ This directory is verification infrastructure. It does not change `src/Rv/*.wiz`
 or the Wiz HDL library; it drives the existing cores and compares them with
 implementations written outside Wiz.
 
-Four implementations of the same RV32I machine are compared on one trace at a time:
+Five implementations of the same RV32I machine are compared on one trace at a time:
 
 | backend | what it is | always available? |
 |---|---|---|
 | `isa` | `Rv.Isa`, Wiz's executable specification (`src/Rv/Isa.wiz`), on values | yes (built with `wiz`) |
 | `core` | the multi-cycle core `Rv.Core.core`, projected to an architectural state at its E phase | yes (built with `wiz`) |
+| `pipe` | the 5-stage pipeline `Rv.Pipe.pipeCore`, projected to the architectural pre-state at retirement (R) | yes (built with `wiz`) |
 | `py` | `scripts/rv32_ref.py`, an independent RV32I interpreter written from the ISA manual | yes (Python 3) |
 | `sail` | `sail_riscv_sim` from [riscv/sail-riscv](https://github.com/riscv/sail-riscv), configured to `rv32i` | external |
 | `spike` | the Spike RISC-V ISS | external |
 
-`isa` vs `py`, `core` vs `py`, `isa` vs `sail`, `core` vs `sail`, `isa` vs `spike`
-and `core` vs `spike` are separate comparisons. All of them are architectural
-traces: per instruction, the PC, the trap code, **all 32 registers**, and the
-256 bytes of data memory at `0x2000`.
+`isa` vs `py`, `core` vs `py`, `pipe` vs `py`, `isa` vs `sail`, … are separate
+comparisons. All of them are architectural traces: per instruction, the PC, the
+trap code, **all 32 registers**, and the 256 bytes of data memory at `0x2000`.
+The pipeline's sample is also the **pre-state** of the retiring instruction; see
+"The pipeline retirement trace" below for the one-word memory detail.
 
 ## What was run (2026-11-14, agent `rv-oracle`)
 
@@ -36,11 +38,12 @@ Build and run (the Wiz builds are ordinary builds; on the shared machine put the
 under `light`/`heavy` as the project rules say):
 
 ```sh
-# the two trace generators (one build each)
+# the trace generators (one build each)
 light wiz build oracle/wiz/isa_trace.wiz  -I oracle/wiz -I src -o oracle/.build/isa_trace
 light wiz build oracle/wiz/core_trace.wiz -I oracle/wiz -I src -o oracle/.build/core_trace
+light wiz build oracle/wiz/pipe_trace.wiz -I oracle/wiz -I src -o oracle/.build/pipe_trace
 
-# no external tools: isa/core vs the Python reference (the CI-able test)
+# no external tools: isa/core/pipe vs the Python reference (the CI-able test)
 oracle/scripts/run-oracle.sh selftest
 
 # with Sail and Spike from nixpkgs (this is how the recorded run was made)
@@ -110,6 +113,104 @@ The `selftest` command additionally perturbs one register in a copy of the
 reference trace and requires the comparator to report it, so "the comparator
 works" is itself checked.
 
+## Pipeline extension (2026-11-14, agent `rv-pipeline-oracle`)
+
+Worktree `/workspace/wt/rv-pipeline-oracle`, branch `agent/rv-pipeline-oracle`,
+based on `agent/rv-oracle` `2a874fd` (which is based on `wiz-rv` master `9ee43c8`).
+The Wiz core is unchanged; this adds the pipeline projection, its fixtures and its
+retirement shim.
+
+Tool versions used for the recorded run:
+
+```
+wiz/grail 0.1.0-dev (071a033a433f93bf9bb54325560506c444a19787)  [tower, wiz-toolchain]
+sail-riscv 0.12        /nix/store/fxp0v4v6l7smii055kcx1skh58dpy8pk-sail-riscv-0.12
+Spike 1.1.1-dev        /nix/store/bg193gb5vvsgmz8rk0h7bab50igxmp1g-spike-1.1.0-unstable-2026-10-20
+Icarus Verilog 13.0    /nix/store/fvj1mg3g7ihj3sjiyv5khdms6rzhjjm5-iverilog-13.0
+python3 3.14 (the interpreter running oracle.py)
+```
+
+Commands (each is a single probe, under `light` on the shared machine):
+
+```sh
+python3 oracle/scripts/oracle.py build --wiz "$(tower which wiz)"
+python3 oracle/scripts/oracle.py selftest
+python3 oracle/scripts/oracle.py run \
+  --sail /nix/store/fxp0v4v6l7smii055kcx1skh58dpy8pk-sail-riscv-0.12/bin/sail_riscv_sim \
+  --spike /nix/store/bg193gb5vvsgmz8rk0h7bab50igxmp1g-spike-1.1.0-unstable-2026-10-20/bin/spike
+for f in alu branch hazard mem mixed redirect shift stall; do
+  python3 oracle/scripts/oracle.py rvfi --pipe --fixture "$f" \
+    --emit-pipe-bin oracle/.build/emit_pipe \
+    --iverilog /nix/store/fvj1mg3g7ihj3sjiyv5khdms6rzhjjm5-iverilog-13.0/bin/iverilog
+done
+```
+
+Recorded results (8 fixtures):
+
+```
+selftest                       32 passed, 0 failed, 0 skipped
+run (isa,core,pipe,py,sail,spike)
+                               87 passed, 0 failed, 3 skipped
+rvfi --pipe (8 fixtures)        8 passed, 0 failed, 0 skipped  (33/41 beats each)
+```
+
+The three skips are Spike on `alu`, `branch` and `redirect` (AUIPC and Spike's
+`0x80000000` load base); those fixtures are Sail/Python-only. A skip is not a
+pass. No riscv-formal instruction check is claimed for the pipeline in this
+branch; the wrapper is a documented retirement shim (below).
+
+### The pipeline retirement trace
+
+`oracle/wiz/pipe_trace.wiz` drives `Rv.Pipe.pipeCore` at values with `In.idle`
+(on-chip memory only) and emits one line per retirement, `rr.v && !rr.miss` —
+the same condition as `src/Rv/PLockstep.wiz`. A D- or I-cache miss is replayed,
+so it is not a retirement, and a killed instruction never has `rr.v`.
+
+* `pc` is `rr.pc`; registers are `ms.rfa` at R, before its write, so the line is
+  the architectural **pre-state** and matches the `isa`/`core` line `step`.
+* memory is the on-chip data memory of the **previous** cycle. A store's write is
+  registered when the store leaves M and lands at the edge it enters R, so at R
+  the memory already contains the retiring store's own bytes. The driver keeps
+  the previous cycle's memory (`prev`), which is exactly the pre-state; nothing
+  is reconstructed from store data or addresses.
+* the trace retires `steps + 1` instructions, so line `steps` is the state after
+  the last compared instruction and a fixture may end in `SPIN`.
+
+Typical mismatch report (field by field, the same comparator as the other
+backends; illustrative — the recorded run has no mismatch):
+
+```
+FAIL hazard pipe vs py
+  hazard pipe vs py: step 17 (pc 00000044) differs in 1 field(s)
+      x18: 2468a014  vs  2468a013
+```
+
+### The pipeline rvfi shim
+
+`oracle/rtl/rvfi_pipe.v.in` + `oracle/scripts/mkrvfi_pipe.py` wrap the emitted
+pipeline (from `oracle/wiz/emit_pipe.wiz`) in the rvfi port list. This is a
+*documented shim*, not riscv-formal's checker interface, because the pipeline's
+R stage carries no instruction word and no next-PC register:
+
+* `rvfi_valid` is the retirement (`rr_v && !rr_miss`), one beat per instruction.
+* `rvfi_insn` is the on-chip word at `rr_pc`; `rvfi_pc_rdata` is `rr_pc`;
+  `rvfi_rd_addr`/`rvfi_rd_wdata` are the core's `rr_we`/`rr_rd`/`rr_val`.
+* `rvfi_pc_wdata` and the memory fields are decoded from the ISA with the
+  architectural pre-state values (`R` keeps no next-PC or funct3 register).
+  They are useful for the sequence trace, not a substitute for a core port.
+* `rvfi_trap` is `rr_trap != 0`; the call does not start `rvfi_muldiv` (no M
+  extension in this branch).
+
+The sequence check (`oracle.py rvfi --pipe`) compiles the emitted pipeline +
+shim + `rtl/tb_rvfi_pipe.v.in` with Icarus, prints the pre-state at each
+retirement, and compares it with the Python trace. It passes on all eight
+fixtures (33 beats for the 32-step fixtures, 41 for the 40-step ones), and
+`iverilog -g2005 -Wall` is clean. `scripts/run-rvfi.sh --pipe --fixture hazard`
+generates and lints the same wrapper; `--sby` there is a clean SKIP with the
+explanation (formal pipeline checks are not wired).
+
+
+
 ## Fixtures
 
 `fixtures/*.hex` are plain text (generated by `scripts/mkfixtures.py`):
@@ -130,10 +231,15 @@ trap/IO choices as well, but those cases are not compared with Sail/Spike.
 * `alu` — every ALU form, signed/unsigned compares, shifts by 0/1/31, LUI/AUIPC,
   x0 and same-value writes.
 * `branch` — taken/not-taken forms of all six branches, a loop, JAL and JALR.
+* `hazard` — a dependent ALU chain (M→E and R→E forwarding), a store→load, a
+  load-use pair, and a branch on the previous instruction's result.
 * `mem` — word/half/byte loads and stores, sign/zero extension, overlapping
   stores and a read-back of the merged word.
 * `shift` — shifts by 0, 1, 31 and register amounts ≥ 32 (the low five bits).
 * `mixed` — a small loop that stores `3i+1` and reads it back.
+* `redirect` — a loop with back-to-back branch targets, taken/not-taken branches,
+  JAL and JALR (the two instructions after a taken transfer are squashed).
+* `stall` — load-use stalls after word, byte and half loads, store→load.
 
 ## The trace format and mismatch reports
 
@@ -191,16 +297,33 @@ Icarus (see above). The riscv-formal checks are reported separately below; a
 `SKIP` (tools absent) is not a pass. `scripts/ci.sh` is the CI/test entry point
 and skips cleanly when a build or tool is missing.
 
+The pipeline has its own shim, `rtl/rvfi_pipe.v.in` + `scripts/mkrvfi_pipe.py`,
+described under "The pipeline rvfi shim" above:
+
+```sh
+light wiz build oracle/wiz/emit_pipe.wiz -I oracle/wiz -I src -o oracle/.build/emit_pipe
+oracle/scripts/run-rvfi.sh --pipe --fixture hazard        # generate + lint
+python3 oracle/scripts/oracle.py rvfi --pipe --fixture hazard   # sequence trace
+```
+
+It is a documented retirement shim, not a formal checker port; `--sby` is a clean
+SKIP for the pipeline in this branch.
+
 ## Limits and the next oracle step
 
 * The comparison is over finite traces of base-I programs with on-chip memory.
-  It does not cover the M extension, the pipeline (`Rv.Pipe`), caches/DDR, the
-  bus, traps, or the I/O port.
-* `Rv.Isa` and the core share one author; `py` and Sail are independent of Wiz's
+  `isa`, `core` and `pipe` (and `py`) cover the pipeline at retirement; the M
+  extension, caches/DDR, the bus, traps and the I/O port are not in the compared
+  traces. The pipeline trace runs with `In.idle`/on-chip memory only.
+* The pipeline rvfi shim reports the core's write and trap, but its `pc_wdata`
+  and memory fields are decoded from the ISA (R has no next-PC/instruction
+  register), so the riscv-formal `insn_*` checks are not run for it. No
+  `rvfi_muldiv` in this branch.
+* `Rv.Isa` and the cores share one author; `py` and Sail are independent of Wiz's
   code but not of the *machine description* (trap policy, memory map).
-* Next: (a) run the rvfi wrapper through riscv-formal's `insn_ch0`/`insn_ch1`/
-  `rvfi_mem` checkers on the emitted core; (b) add a `PLockstep`-driven pipeline
-  trace to the same format so `core` vs `py` covers `Rv.Pipe`; (c) add M-extension
-  fixtures with a Sail configuration that has `M` and the same `rvfi_muldiv`
-  checks; (d) drive the fixtures from a small random generator (instruction
-  classes and operand corners) instead of five hand-written programs.
+* Next: (a) give the pipeline R stage (or a debug port built from E) the
+  instruction and next-PC so the real riscv-formal `insn_*` checks can run;
+  (b) add M-extension fixtures with a Sail configuration that has `M` and the
+  same `rvfi_muldiv` checks; (c) drive the fixtures from a small random
+  generator (instruction classes and operand corners) instead of eight
+  hand-written programs.

@@ -1,0 +1,36 @@
+import Rv.Pipe
+import OracleTrace
+import IO
+import Text
+-- `emit_pipe FIXTURE [MBITS]`: emit the pipelined core (`Rv.Pipe.pipeCore`) with the
+-- fixture's program in both copies of the on-chip RAM, as flat Verilog on stdout.
+-- This is the pipeline counterpart of `emit_core`: `oracle.py rvfi --pipe` wraps it
+-- with `rtl/rvfi_pipe.v.in` (through `mkrvfi_pipe.py`) and runs a sequence trace.
+-- Nothing here changes the core.
+--
+--   emit_pipe oracle/fixtures/hazard.hex > build/oracle_pipe.v
+--
+-- The pipeline circuit's ports are its `In`/`Out` leaves (no reset input; the core
+-- resets itself from `PpSt.init`, the same way `pipeCore` starts in PLockstep).
+
+def EmitP.main (path : String) (mbitsArg : Nat) : IO Unit :=
+  IO.bind (IO.readFile path) (fun text =>
+    match Fx.ofLines (Fx.lines text) with
+    | .none => IO.println ("oracle: bad fixture " ++ path)
+    | .some fx =>
+      let ab := 5;
+      let mbits := if Nat.beq mbitsArg 0 then fx.mbits else mbitsArg;
+      let wb := Nat.sub mbits 2;
+      let n := Circuit.netlist "oracle_pipe" (pipeCore ab wb .false fx.words);
+      IO.print (Verilog.emit n))
+
+def EmitP.parseMbits : List String → Nat
+  | .nil => 0
+  | .cons s _ => (match String.parseNat (String.trim s) with
+                  | .some n => n
+                  | .none => 0)
+
+def main : IO Unit := IO.bind IO.args (fun args =>
+  match args with
+  | .cons path rest => EmitP.main path (EmitP.parseMbits rest)
+  | .nil => IO.println "usage: emit_pipe FIXTURE [MBITS] > pipe.v")
