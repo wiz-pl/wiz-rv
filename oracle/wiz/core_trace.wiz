@@ -1,0 +1,49 @@
+import OracleTrace
+import Rv.Lockstep
+import IO
+import Text
+-- `core_trace FIXTURE`: the multi-cycle core (`Rv.Core.core`) on a fixture, as a
+-- trace in the oracle's line format.  One line per instruction, projected from the
+-- core's state at the E phase (before the instruction's write), which is the ISA
+-- trace's pre-state.  The core is unchanged; this only drives `coreStep` at
+-- `HwTy.El` and reads the state record.
+--
+-- When the core stops (phase H), the final state is emitted too, so a trapping
+-- program has the same number of lines as `isa_trace`.  The fixtures avoid traps.
+
+def Ct.line (ab wb : Nat) (fx : Fx) (k : Nat) (s : CoreSt ab wb HwTy.El) : String :=
+  Tr.line k s.pc.toNat s.trap.toNat
+    (Tr.regsGo 32 0 (fun i => if Nat.beq i 0 then 0 else (s.rfa (BitVec.ofNat ab i)).toNat))
+    (Tr.memGo fx.mcount fx.mbase (fun a => Ls.byte ab wb s a))
+
+def Ct.go (ab wb : Nat) (mx : Bool) (fx : Fx) :
+    Nat → Nat → HwTy.El (CoreSt.code ab wb) → List String
+  | .zero, _, _ => .nil
+  | .succ fuel, emitted, v =>
+    let s := Ls.hw (ab := ab) (wb := wb) v;
+    if Nat.beq s.ph.toNat Ph.h then
+      (if Nat.le emitted fx.steps then .cons (Ct.line ab wb fx emitted s) .nil else .nil)
+    else if Nat.beq s.ph.toNat Ph.e then
+      (if Nat.le emitted fx.steps then
+        List.append (.cons (Ct.line ab wb fx emitted s) .nil)
+          (Ct.go ab wb mx fx fuel (Nat.succ emitted)
+            (coreStep (r := HwTy.El) ab wb mx s In.idle).1)
+       else .nil)
+    else
+      Ct.go ab wb mx fx fuel emitted (coreStep (r := HwTy.El) ab wb mx s In.idle).1
+
+def Ct.main (path : String) : IO Unit :=
+  IO.bind (IO.readFile path) (fun text =>
+    match Fx.ofLines (Fx.lines text) with
+    | .none => IO.println ("oracle: bad fixture " ++ path)
+    | .some fx =>
+      let ab := 5;
+      let wb := Nat.sub fx.mbits 2;
+      let fuel := Nat.add (Nat.mul fx.steps 40) 400;
+      let init := Bundle.toEl (CoreSt.bundle ab wb) (CoreSt.init ab wb fx.words);
+      Tr.say (List.append (Tr.header fx "core") (Ct.go ab wb .false fx fuel 0 init)))
+
+def main : IO Unit := IO.bind IO.args (fun args =>
+  match args with
+  | .cons path .nil => Ct.main path
+  | _ => IO.println "usage: core_trace FIXTURE")

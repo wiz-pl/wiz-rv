@@ -131,6 +131,22 @@ RV32E core give the specification's PC and rd for XOR, OR, AND, XORI, ORI, ANDI,
 AUIPC, for every PC, register file, memory (holding the instruction at PC) and every
 value of the core's other registers. FINDINGS.md, H2, says why not the others.
 
+## Independent oracle
+
+`oracle/` is verification infrastructure, not part of the core. It compares the
+executable specification (`Rv.Isa`), the multi-cycle core, an independent Python RV32I
+reference, `sail-riscv` and Spike on one architectural trace per instruction (PC, all
+32 registers and the data memory), on ALU, branch, load/store, shift and mixed
+fixtures. The recorded run (sail-riscv 0.12, Spike 1.1.1-dev) has 31 passing
+comparisons, 0 failures and 2 documented skips (Spike cannot load at 0, so the two
+AUIPC fixtures are Sail/Python-only).
+
+The same directory has an `rvfi` (RISC-V Formal Interface) wrapper for the emitted
+core. It is generated from the flat Verilog by `oracle/scripts/mkrvfi.py`, linted with
+Icarus, and its rvfi beats are simulated and compared with the Python reference on all
+five fixtures. The riscv-formal `insn_ch*` checkers are the next step and have **not**
+been run (no `sby`/`yosys` here). See [oracle/README.md](oracle/README.md).
+
 ## Toolchain
 
 The HDL memories (PR #166) and the fast netlist simulator (PR #199) were unmerged when
