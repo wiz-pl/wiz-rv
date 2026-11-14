@@ -1,0 +1,131 @@
+import Rv.DPipe
+import Rv.Doom
+import Rv.Golem.Bus
+import Ddr3.Cache
+import Ddr3.Board
+-- golem, the first SoC top level: a core, the DDR3 controller, the UART and the
+-- PSSD1331 OLED, with the bus of src/Rv/Golem/Bus.wiz and the memory map of
+-- src/Rv/Golem/Map.wiz (DESIGN.md has the table and the simulation commands).
+--
+-- The machine at the core's rate is wiz-rv's Doom machine (`Doom.doomSysCfg`: the
+-- core, the UART, the cycle counter, the sound FIFO, the framebuffer and the OLED
+-- controller); golem adds the bus decode and the arbiter in front of wiz-ddr3's
+-- 8 KB write-back cache, controller and PHY (the same pairing as `doomTop`,
+-- src/Rv/DoomTop.wiz, with an explicit bus instead of the cache wired to the core).
+--
+--   golem     the pipelined core at 100 MHz (the default; `golemMc` the multi-cycle
+--             core at half rate, the conservative variant)
+--   golemSim  the same machine with a behavioural DDR behind the same bus interface
+--             (no controller, no PHY), for tests and the fast simulator
+--
+-- The host loader (`GBus.arb`'s second master) is a simulation and bring-up port: the
+-- hardware top ties it off, `golemSim` exposes it so a test can put words in DDR
+-- before the ROM asks for them. Its request/answer shape is the cache's
+-- (`CacheReq`/`CacheResp`), so it costs the arbiter and nothing else.
+
+--------------------------------------------------------------------------------
+-- The board ports
+
+structure GIn (r : HwTy → Type) where
+  sys4x : r HwTy.clock
+  sys4xDqs : r HwTy.clock
+  ref200 : r HwTy.clock
+  locked : r W1
+  uart_rx : r W1
+  btn : r B4
+  deriving Bundle
+
+structure GOut (r : HwTy → Type) where
+  uart_tx : r W1
+  led : r B4
+  ja : r W8
+  jb : r W8
+  deriving Bundle
+
+--------------------------------------------------------------------------------
+-- The full-rate part: the DDR cache and controller, the bus and its arbiter, and the
+-- machine (which may be at half rate, behind `Circuit.half`: the bus adapter then
+-- crosses the two rates in registers, src/Rv/Doom.wiz's `busStep`).
+
+structure GSt (h : HwTy) (r : HwTy → Type) where
+  ctrl : r St.code
+  cache : r CSt.code
+  bus : BusA r
+  arb : GBus.Arb r
+  sys : r h
+  beat : r (HwTy.bits 27)
+  deriving Bundle
+
+def Golem.step (t : Timing) (h : Circuit DIn.code DOut.code) {r : HwTy → Type} [Hw r]
+    (s : GSt h.st r) (phyIn : r PhyIn.code) (rx : r W1) (btn : r B4) :
+    r (HwTy.prod (GSt.code h.st) (HwTy.prod Dfi.code GOut.code)) :=
+  let ω bs := s.bus;
+  -- the machine's bus request comes from its state: ask with no answer first
+  let quiet := DIn.pack (DIn.mk rx (Hw.lit 4 0) lo lo (Hw.lit 32 0) (Hw.lit 2 0) (Hw.lit 32 0) (Hw.lit 32 0));
+  let ω o0 := DOut.unpack (Hw.snd (Circuit.inst h s.sys quiet));
+  -- the decode and the adapter: a zero answer gives the request, the real one the state
+  let r0 := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb (GBus.noResp (r := r));
+  let ω q := CacheReq.unpack (Hw.fst (Hw.snd r0));
+  -- the arbiter's second master: absent on the board
+  let host := CacheReq.mk lo (Hw.lit 28 0) lo (Hw.lit 32 0) (Hw.lit 4 0);
+  let ar0 := GBus.arb s.arb q host (GBus.noResp (r := r));
+  let ω sel := CacheReq.unpack (Hw.fst (Hw.snd ar0));
+  -- the controller's answer to the cache comes from its state and its PHY input
+  let ω cs := St.unpack s.ctrl;
+  let co0 := Ctrl.step t cs (PortIn.mk U.lo U.lo (Hw.lit 24 0) (Hw.lit 128 0) (Hw.lit 16 0)) (PhyIn.unpack phyIn);
+  let ω po0 := PortOut.unpack (Hw.fst (Hw.snd co0));
+  let cr := C.step (CSt.unpack s.cache) (CReq.mk sel.valid sel.addr sel.we sel.wdata sel.wstrb) po0;
+  let ω resp := CResp.unpack (Hw.fst (Hw.snd cr));
+  let ar := GBus.arb s.arb q host (CacheResp.mk resp.ready resp.rvalid resp.rdata);
+  let ω coreResp := CacheResp.unpack (Hw.fst (Hw.snd (Hw.snd ar)));
+  let co := Ctrl.step t cs (PortIn.unpack (Hw.snd (Hw.snd cr))) (PhyIn.unpack phyIn);
+  let ω po := PortOut.unpack (Hw.fst (Hw.snd co));
+  let br := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb coreResp;
+  let ω toCore := GBus.Resp.unpack (Hw.snd (Hw.snd br));
+  -- the core waits in reset for the calibration
+  let calEnd := Hw.or po.calDone po.calFail;
+  let rst := Hw.or (bitOf 0 btn) (Hw.not calEnd);
+  let hr := Circuit.inst h s.sys (DIn.pack (DIn.mk rx (Hw.cat (Hw.slice 1 3 btn : r B3) rst)
+    toCore.ready toCore.rvalid toCore.rdata (Hw.cat po.calFail po.calDone) (Hw.lit 32 0) (Hw.lit 32 0)));
+  let ω o := DOut.unpack (Hw.snd hr);
+  Hw.pair
+    (GSt.pack h.st (GSt.mk (Hw.fst co) (Hw.fst cr) (BusA.unpack (Hw.fst br)) (GBus.Arb.unpack (Hw.fst ar)) (Hw.fst hr) (inc s.beat)))
+    (Hw.pair (Hw.snd (Hw.snd co))
+      (GOut.pack (GOut.mk o.uart_tx
+        (Hw.cat (bitOf 26 s.beat) (Hw.cat (bitOf 0 o.led) (Hw.cat po.calFail po.calDone)))
+        o.ja o.jb)))
+
+def Golem.init (t : Timing) (h : Circuit DIn.code DOut.code) : HwTy.El (GSt.code h.st) :=
+  Bundle.toEl (GSt.bundle h.st) (GSt.mk (Ctrl.init t) C.init BusA.init GBus.arbInit h.init
+    (BitVec.ofNat 27 0))
+
+-- the board: the PHY between the controller and the pins (its input registered, as in
+-- wiz-ddr3's memory test), its reset held until the PLL has locked for 255 cycles
+structure BSt (h : HwTy) (r : HwTy → Type) where
+  top : r (GSt.code h)
+  phy : r PhyIn.code
+  rstCnt : r W8
+  deriving Bundle
+
+def Golem.board (t : Timing) (h : Circuit DIn.code DOut.code) : Circuit GIn.code (HwTy.prod Ddr3Pads.code GOut.code) :=
+  let ω hst := h.st;
+  Circuit.mk (BSt.code hst)
+    (Bundle.toEl (BSt.bundle hst) (BSt.mk (Golem.init t h) (HwTy.unpack PhyIn.code 0) (BitVec.ofNat 8 0)))
+    (fun s x =>
+      let ω b := BSt.unpack hst s;
+      let ω i := GIn.unpack x;
+      let ω ts := GSt.unpack hst b.top;
+      let ω cs := St.unpack ts.ctrl;
+      let phyRst := Hw.not (isK b.rstCnt 255);
+      let tr := Golem.step t h ts b.phy i.uart_rx i.btn;
+      let ω dfi := Dfi.unpack (Hw.fst (Hw.snd tr));
+      let phy := Phy.io (PhyClk.mk i.sys4x i.sys4xDqs i.ref200) phyRst cs.rstN dfi;
+      Hw.pair (BSt.pack hst (BSt.mk (Hw.fst tr) (Hw.snd phy) (Hw.mux phyRst (Hw.mux i.locked (inc b.rstCnt) b.rstCnt) b.rstCnt)))
+        (Hw.pair (Hw.fst phy) (Hw.snd (Hw.snd tr))))
+
+def Golem.golem (t : Timing) (prog : List Nat) : Circuit GIn.code (HwTy.prod Ddr3Pads.code GOut.code) :=
+  Golem.board t (doomSysCfg .true Doom.oled (Nat.add 3 (Doom.lo .true)) (Doom.pipeCore prog))
+
+-- the conservative variant: the multi-cycle core at half rate (50 MHz effective)
+def Golem.golemMc (t : Timing) (prog : List Nat) : Circuit GIn.code (HwTy.prod Ddr3Pads.code GOut.code) :=
+  Golem.board t (Circuit.half (doomSysCfg .false Doom.oled (Nat.add 3 (Doom.lo .false)) (Doom.oldCore prog)))

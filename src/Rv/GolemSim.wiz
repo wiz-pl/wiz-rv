@@ -1,0 +1,67 @@
+import Rv.Golem.Mini
+import Rv.Golem.Bus
+-- golem's simulation top: the slim machine (`Mini.machine`: the multi-cycle core, UART,
+-- timer, framebuffer and OLED), the bus and its arbiter, and a behavioural DDR
+-- (`GBus.Ram`) in place of the cache, the controller and the PHY. It is separate from
+-- src/Rv/Golem.wiz so that the test does not compile the board's PHY, wiz-ddr3's
+-- controller or the pipelined core's IR (which is over the 5 GB build cap).
+
+structure GSimIn (r : HwTy → Type) where
+  uart_rx : r W1
+  ld_valid : r W1
+  ld_we : r W1
+  ld_addr : r B32      -- a byte address; the low 28 bits are the DDR offset
+  ld_wdata : r B32
+  ld_wstrb : r B4
+  deriving Bundle
+
+structure GSimOut (r : HwTy → Type) where
+  uart_tx : r W1
+  led : r B4
+  ja : r W8
+  jb : r W8
+  ld_ready : r W1
+  ld_rvalid : r W1
+  ld_rdata : r B32
+  deriving Bundle
+
+structure SimSt (fl : Nat) (r : HwTy → Type) where
+  bus : BusA r
+  arb : GBus.Arb r
+  cpu : MSt fl r
+  ddr : GBus.Ram 16 r
+  deriving Bundle
+
+def Golem.simStep (cfg : RgbCfg) (n : Nat) {r : HwTy → Type} [Hw r] (s : SimSt cfg.frameLog r) (x : GSimIn r) :
+    r (HwTy.prod (SimSt.code cfg.frameLog) GSimOut.code) :=
+  let ω i := x;
+  let ω bs := s.bus;
+  -- the machine with no bus answer first: its request and I/O decode
+  let m0 := Mini.step cfg n s.cpu (MIn.mk i.uart_rx lo lo (Hw.lit 32 0) (Hw.lit 2 1) (Hw.lit 4 0));
+  let ω o0 := MOut.unpack (Hw.snd m0);
+  let r0 := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb (GBus.noResp (r := r));
+  let ω q := CacheReq.unpack (Hw.fst (Hw.snd r0));
+  let host := CacheReq.mk i.ld_valid (Hw.slice 0 28 i.ld_addr) i.ld_we i.ld_wdata i.ld_wstrb;
+  let ar0 := GBus.arb s.arb q host (GBus.noResp (r := r));
+  let ω sel := CacheReq.unpack (Hw.fst (Hw.snd ar0));
+  let dr := GBus.ramStep 16 s.ddr sel;
+  let ω resp := CacheResp.unpack (Hw.snd dr);
+  let ar := GBus.arb s.arb q host resp;
+  let ω coreResp := CacheResp.unpack (Hw.fst (Hw.snd (Hw.snd ar)));
+  let ω hostResp := CacheResp.unpack (Hw.snd (Hw.snd (Hw.snd ar)));
+  let br := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb coreResp;
+  let ω toCore := GBus.Resp.unpack (Hw.snd (Hw.snd br));
+  -- the machine again, with the answer (the state and the pins come from this one)
+  let m1 := Mini.step cfg n s.cpu (MIn.mk i.uart_rx toCore.ready toCore.rvalid toCore.rdata (Hw.lit 2 1) (Hw.lit 4 0));
+  let ω o := MOut.unpack (Hw.snd m1);
+  Hw.pair
+    (SimSt.pack cfg.frameLog (SimSt.mk (BusA.unpack (Hw.fst br)) (GBus.Arb.unpack (Hw.fst ar))
+      (MSt.unpack cfg.frameLog (Hw.fst m1)) (GBus.Ram.unpack 16 (Hw.fst dr))))
+    (GSimOut.pack (GSimOut.mk o.uart_tx o.led o.ja o.jb hostResp.ready hostResp.rvalid hostResp.rdata))
+
+def Golem.golemSim (prog : List Nat) (cfg : RgbCfg) (n : Nat) (startPix : Bool) (pixels : List Nat) :
+    Circuit GSimIn.code GSimOut.code :=
+  Circuit.mk (SimSt.code cfg.frameLog)
+    (Bundle.toEl (SimSt.bundle cfg.frameLog)
+      (SimSt.mk BusA.init GBus.arbInit (MSt.initWith cfg prog startPix pixels) (GBus.ramInit 16)))
+    (fun s x => Golem.simStep cfg n (SimSt.unpack cfg.frameLog s) (GSimIn.unpack x))

@@ -1,0 +1,165 @@
+import Hdl.Core
+import Rv.Uart
+import Rv.Golem.Map
+
+------------------------------------------------------------------------------------
+-- The bus adapter, at the full rate, between the core (at half rate: it sees the bus
+-- only every other cycle, and holds its request) and the cache (whose `ready` and
+-- `rvalid` last one cycle). Both directions go through registers, so that every path
+-- between the half-rate part and the full-rate part is a register, a few LUTs and a
+-- register (one period: FINDINGS.md, H5): the request is copied once into `rv` …
+-- `rst` (`acc`: this request has been copied) and offered to the cache until it is
+-- taken; `ready`, `rvalid` and the data are kept until the core has left its bus phase.
+
+structure BusA (r : HwTy → Type) where
+  acc : r W1
+  rv : r W1
+  ra : r B32
+  rwe : r W1
+  rwd : r B32
+  rst : r B4
+  gotR : r W1
+  gotV : r W1
+  data : r B32
+  deriving Bundle
+
+-- the cache's side (wiz-ddr3 CReq / CResp)
+structure CacheReq (r : HwTy → Type) where
+  valid : r W1
+  addr : r (HwTy.bits 28)
+  we : r W1
+  wdata : r B32
+  wstrb : r B4
+  deriving Bundle
+structure CacheResp (r : HwTy → Type) where
+  ready : r W1
+  rvalid : r W1
+  rdata : r B32
+  deriving Bundle
+
+-- core request (from DOut) and the cache's answer → the adapter's next state, the
+-- request to the cache, the answer to the core (ready, rvalid, rdata); the last two
+-- depend only on the adapter's state
+def busStep {r : HwTy → Type} [Hw r] (s : BusA r) (valid pend we : r W1) (addr wdata : r B32) (wstrb : r B4)
+    (c : CacheResp r) : r (HwTy.prod BusA.code (HwTy.prod CacheReq.code CacheResp.code)) :=
+  let take := gate valid (Hw.and (Hw.not s.acc) (Hw.not s.rv));
+  let taken := Hw.and s.rv c.ready;
+  Hw.pair
+    (BusA.pack (BusA.mk
+      (gate pend (Hw.or s.acc take))
+      (Hw.mux take (Hw.lit 1 1) (Hw.mux taken (Hw.lit 1 0) s.rv))
+      (Hw.mux take addr s.ra) (Hw.mux take we s.rwe) (Hw.mux take wdata s.rwd) (Hw.mux take wstrb s.rst)
+      (gate pend (Hw.or s.gotR taken))
+      (gate pend (Hw.or s.gotV c.rvalid))
+      (Hw.mux c.rvalid c.rdata s.data)))
+    (Hw.pair
+      (CacheReq.pack (CacheReq.mk s.rv (Hw.slice 0 28 s.ra) s.rwe s.rwd s.rst))
+      (CacheResp.pack (CacheResp.mk s.gotR s.gotV s.data)))
+
+def BusA.init : BusA HwTy.El := BusA.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0)
+  (BitVec.ofNat 32 0) (BitVec.ofNat 4 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0)
+
+-- The golem bus: one request/one answer at a time, as wiz-ddr3's native port
+-- (`CacheReq`/`CacheResp`, below) and the DDR cache use it. Three pieces:
+--
+--   `GBus.route`  the core's address decode: a request inside DDR goes to the cache;
+--                 one outside it is answered at once with ready (and zero data for a
+--                 read) and `err` high, so a wild pointer cannot hang the machine.
+--   `GBus.arb`    two masters (the core and a host loader) onto that port: the first
+--                 request wins, the owner keeps the bus until its answer, so the core
+--                 (which holds its request until `ready`) is never starved mid-word.
+--   `GBus.ramStep` a behavioural DDR for simulation: words with byte masks, answering
+--                 two cycles after the request (the cache and the controller are
+--                 replaced by it in `golemSim`; `golemSimDdr` has the real ones).
+--
+-- All three are plain combinational code around registers the caller owns, so they
+-- run at the bus's clock (100 MHz) whatever rate the core runs at.
+
+structure GBus.Resp (r : HwTy → Type) where
+  ready : r W1
+  rvalid : r W1
+  rdata : r B32
+  err : r W1     -- the request was outside DDR (answered with 0)
+  deriving Bundle
+
+def GBus.noResp {r : HwTy → Type} [Hw r] : CacheResp r :=
+  CacheResp.mk lo lo (Hw.lit 32 0)
+
+def GBus.zero {r : HwTy → Type} [Hw r] : GBus.Resp r :=
+  GBus.Resp.mk lo lo (Hw.lit 32 0) lo
+
+-- the core's bus port (`busStep`, src/Rv/Doom.wiz) with the DDR decode in front of
+-- it: the adapter's state, the request to the cache (valid only for DDR), and the
+-- answer into the core. `ddr` is the cache's answer (from `GBus.arb`).
+def GBus.route {r : HwTy → Type} [Hw r] (s : BusA r) (valid pend we : r W1)
+    (addr wdata : r B32) (wstrb : r B4) (ddr : CacheResp r) :
+    r (HwTy.prod BusA.code (HwTy.prod CacheReq.code GBus.Resp.code)) :=
+  -- the address the adapter copied (0 until a request has been taken)
+  let dec := GMap.isDdr s.ra;
+  let unmapped := Hw.and s.rv (Hw.not dec);
+  -- an unmapped request is answered at once: ready for a write, ready and rvalid
+  -- (with 0) for a read; the adapter latches it as if the slave had answered
+  let ans := CacheResp.mk (Hw.or ddr.ready unmapped)
+    (Hw.or ddr.rvalid (Hw.and unmapped (Hw.not s.rwe))) ddr.rdata;
+  let br := busStep s valid pend we addr wdata wstrb ans;
+  let ω q := CacheReq.unpack (Hw.fst (Hw.snd br));
+  let q2 := CacheReq.mk (Hw.and q.valid dec) q.addr q.we q.wdata q.wstrb;
+  let ω a := CacheResp.unpack (Hw.snd (Hw.snd br));
+  Hw.pair (Hw.fst br)
+    (Hw.pair (CacheReq.pack q2) (GBus.Resp.pack (GBus.Resp.mk a.ready a.rvalid a.rdata unmapped)))
+
+structure GBus.Arb (r : HwTy → Type) where
+  busy : r W1
+  owner : r W1     -- 0: the core, 1: the host loader
+  deriving Bundle
+
+def GBus.arbInit : GBus.Arb HwTy.El := GBus.Arb.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
+
+-- who gets the bus this cycle: the current owner while busy, else the core if it
+-- asks, else the host
+def GBus.grant {r : HwTy → Type} [Hw r] (s : GBus.Arb r) (c : CacheReq r) (h : CacheReq r) : r W1 :=
+  Hw.mux s.busy s.owner (Hw.mux c.valid (Hw.lit 1 0) (Hw.lit 1 1))
+
+-- the next arbiter state, the request the slave sees, and the answer to each master
+def GBus.arb {r : HwTy → Type} [Hw r] (s : GBus.Arb r) (c h : CacheReq r) (resp : CacheResp r) :
+    r (HwTy.prod GBus.Arb.code (HwTy.prod CacheReq.code
+      (HwTy.prod CacheResp.code CacheResp.code))) :=
+  let g := GBus.grant s c h;
+  let sel := Hw.mux g (CacheReq.pack h) (CacheReq.pack c);
+  let selV := Hw.mux g h.valid c.valid;
+  -- the answer ends the request; so does the selected master dropping `valid`
+  -- (a loader or a core that traps mid-request may abandon it: the slave's own
+  -- handshake then never comes, and without this the bus would stay owned forever)
+  let done := Hw.or (Hw.or resp.ready resp.rvalid) (Hw.and s.busy (Hw.not selV));
+  let zeroC := CacheResp.pack (GBus.noResp (r := r));
+  let respC := CacheResp.pack resp;
+  Hw.pair
+    (GBus.Arb.pack (GBus.Arb.mk
+      (Hw.mux done (Hw.lit 1 0) (Hw.mux s.busy (Hw.lit 1 1) selV))
+      (Hw.mux s.busy s.owner g)))
+    (Hw.pair sel
+      (Hw.pair (Hw.mux g zeroC respC) (Hw.mux g respC zeroC)))
+--------------------------------------------------------------------------------
+-- A behavioural DDR for simulation. Words of 32 bits with byte masks, `wait` counts
+-- the cycles since the request: an answer on the second one. The address is the
+-- cache's 28-bit byte offset; the word index is bits 2 … 2+ab.
+
+structure GBus.Ram (ab : Nat) (r : HwTy → Type) where
+  m : r (HwTy.mem ab 32)
+  wait : r B2
+  deriving Bundle
+
+def GBus.ramStep {r : HwTy → Type} [Hw r] (ab : Nat) (s : GBus.Ram ab r) (q : CacheReq r) :
+    r (HwTy.prod (GBus.Ram.code ab) CacheResp.code) :=
+  let go := Hw.and q.valid (isK s.wait 2);
+  let ix : r (HwTy.bits ab) := Hw.slice 2 ab q.addr;
+  let old := Hw.memRead s.m ix;
+  let ml := fun (l : Nat) => Hw.mux (bitOf l q.wstrb) (Hw.slice (8 * l) 8 q.wdata) (Hw.slice (8 * l) 8 old : r W8);
+  let nw : r B32 := Hw.cat (ml 3) (Hw.cat (ml 2) (Hw.cat (ml 1) (ml 0)));
+  Hw.pair
+    (GBus.Ram.pack ab (GBus.Ram.mk (Hw.memWrite s.m (Hw.and go q.we) ix nw)
+      (Hw.mux q.valid (Hw.mux go (Hw.lit 2 0) (inc s.wait)) (Hw.lit 2 0))))
+    (CacheResp.pack (CacheResp.mk go (Hw.and go (Hw.not q.we)) old))
+
+def GBus.ramInit (ab : Nat) : GBus.Ram ab HwTy.El :=
+  GBus.Ram.mk (fun (a : BitVec ab) => BitVec.ofNat 32 0) (BitVec.ofNat 2 0)

@@ -1,0 +1,135 @@
+import Rv.Core
+import Rv.Uart
+import Rv.Oled
+import Rv.Golem.Map
+-- A slim golem machine for the simulation: the multi-cycle RV32IM core, the UART, the
+-- cycle counter, the framebuffer and the OLED controller, with the memory map of
+-- src/Rv/Golem/Map.wiz. It mirrors the subset of `Rv.Doom.dSys` the test needs (no
+-- sound FIFO, performance counters or edge registers), so that the test does not
+-- compile the Doom machine; the bus, the DDR stub and the arbiter are in
+-- src/Rv/GolemSim.wiz, and the board top uses the full machine (src/Rv/Golem.wiz).
+--
+-- The OLED controller's clock enable is every cycle (`ediv` 0 in the full machine), so
+-- a frame takes about 197 000 cycles.
+
+structure MIn (r : HwTy → Type) where
+  uart_rx : r W1
+  ready : r W1
+  rvalid : r W1
+  rdata : r B32
+  ddr : r B2
+  btn : r B4
+  deriving Bundle
+
+structure MOut (r : HwTy → Type) where
+  uart_tx : r W1
+  led : r B4
+  ja : r W8
+  jb : r W8
+  valid : r W1
+  pend : r W1
+  we : r W1
+  addr : r B32
+  wdata : r B32
+  wstrb : r B4
+  deriving Bundle
+
+def MB13 : HwTy := HwTy.bits 13
+def MB16 : HwTy := HwTy.bits 16
+def MB64 : HwTy := HwTy.bits 64
+
+structure MSt (fl : Nat) (r : HwTy → Type) where
+  cpu : CoreSt 5 12 r
+  sync : Sync r
+  rx : Rx r
+  tx : UTx r
+  full : r W1
+  byte : r W8
+  cyc : r MB64
+  pix : r (HwTy.mem 13 16)
+  col : r MB16
+  fwe : r W1
+  fwa : r MB13
+  fwd : r MB16
+  oled : RCtl fl r
+  txGo : r W1
+  txB : r W8
+  deriving Bundle
+
+def Mini.step (cfg : RgbCfg) (n : Nat) {r : HwTy → Type} [Hw r] (s : MSt cfg.frameLog r) (x : MIn r) :
+    r (HwTy.prod (MSt.code cfg.frameLog) MOut.code) :=
+  let rr := rxStep n s.rx s.sync.ff2;
+  let ω got := Byte.unpack (Hw.snd rr);
+  let rst := bitOf 0 x.btn;
+  -- the core with no answer first: its request's address and the I/O decode
+  let ω o0 := Out.unpack (Hw.snd (coreStep 5 12 .true s.cpu In.quiet));
+  let off : r W8 := Hw.slice 0 8 o0.ioa;
+  let fbA := bitOf 24 o0.ioa;
+  let uartA := Hw.and (isK off 0) (Hw.not fbA);
+  let status : r B32 := Hw.cat (Hw.lit 30 0) (Hw.cat s.full (Hw.and (txIdle s.tx) (Hw.not s.txGo)));
+  let ioIn : r B32 := Hw.mux uartA (Hw.mux s.full (Hw.cat (Hw.lit 24 0) s.byte) (Hw.lit 32 4294967295))
+    (Hw.mux (isK off 4) status
+    (Hw.mux (isK off 16) (Hw.slice 0 32 s.cyc)
+    (Hw.mux (isK off 20) (Hw.slice 32 32 s.cyc)
+    (Hw.mux (isK off 64) (Hw.cat (Hw.lit 30 0) x.ddr) (Hw.lit 32 0)))));
+  let cr := coreStep 5 12 .true s.cpu (In.mk (Hw.and (txIdle s.tx) (Hw.not s.txGo)) ioIn x.ready x.rvalid x.rdata);
+  let ω o := Out.unpack (Hw.snd cr);
+  let ω c := CoreSt.unpack 5 12 (Hw.fst cr);
+  -- BTN0 resets the phase, the PC and the trap code (the memories/registers keep)
+  let c2 := CoreSt.mk (Hw.mux rst (Hw.lit 4 Ph.f) c.ph) (Hw.mux rst (Hw.lit 32 0) c.pc) c.q0 c.q1 c.q2 c.q3
+    c.m0 c.m1 c.m2 c.m3 c.rfa c.rfb c.x1 c.x2 c.acc c.dv c.rm c.cnt c.srd c.sf3 c.slo c.sio (Hw.mux rst (Hw.lit 3 0) c.trap)
+    c.busq c.fromBus c.badr c.bwe c.bwd c.bst c.bret c.bsent c.ra c.l1q c.l1t c.l1d c.l1tag c.fromL1 c.rmode c.rk c.rgap c.rbuf c.rline c.bnew;
+  -- the OLED: the pixel at the controller's (x, y), read every cycle
+  let ω ol := s.oled;
+  let y13 : r MB13 := Hw.cat (Hw.lit 7 0) ol.gen.y;
+  let idx : r MB13 := Hw.add (Hw.add (Hw.shl y13 6) (Hw.shl y13 5)) (Hw.cat (Hw.lit 6 0) ol.gen.x);
+  let fw := Hw.and o.wr fbA;
+  let oledNext := rctlStep cfg RProg.tree ol s.col;
+  Hw.pair
+    (MSt.pack cfg.frameLog (MSt.mk c2
+      (Sync.unpack (syncStep s.sync x.uart_rx))
+      (Rx.unpack (Hw.fst rr))
+      (UTx.unpack (txStep n s.tx s.txGo s.txB))
+      (Hw.mux got.valid hi (Hw.mux (Hw.and o.rd uartA) lo s.full))
+      (Hw.mux got.valid got.data s.byte)
+      (inc s.cyc)
+      (Hw.memWrite s.pix s.fwe s.fwa s.fwd)
+      (Hw.memRead s.pix idx)
+      fw (Hw.slice 1 13 o.ioa) (Hw.slice 0 16 o.iod)
+      (RCtl.unpack cfg.frameLog oledNext)
+      (Hw.and o.wr uartA) o.byte))
+    (MOut.pack (MOut.mk s.tx.line
+      (Hw.cat o.trap (bitOf 26 s.cyc))
+      (Hw.cat ol.pins.pmoden (Hw.cat ol.pins.vccen (Hw.cat ol.pins.res (Hw.cat ol.pins.dc
+        (Hw.cat ol.spi.sclk (Hw.cat (Hw.lit 1 0) (Hw.cat ol.spi.mosi ol.pins.cs)))))))
+      (Hw.lit 8 0)
+      o.valid o.pend o.we o.addr o.wdata o.wstrb))
+
+-- a framebuffer preloaded with `pixels` (the test starts the streamer at the frame)
+def Mini.pix0 (pixels : List Nat) : HwTy.El (HwTy.mem 13 16) :=
+  fun (a : BitVec 13) => BitVec.ofNat 16 (Hdl.nthD 0 pixels a.toNat)
+
+-- the OLED controller's state at the start of the `pixels` step (the program counter
+-- of `RProg.loop`, with the frame's CS already low), so a test can see a frame without
+-- waiting through the blank one
+def Mini.oledPixels (cfg : RgbCfg) : RCtl cfg.frameLog HwTy.El :=
+  RCtl.mk (RSeq.mk (BitVec.ofNat 7 (RProg.frameAt + 6)) (BitVec.ofNat 1 0) (BitVec.ofNat 21 0))
+    (RPins.mk (BitVec.ofNat 1 1) (BitVec.ofNat 1 1) (BitVec.ofNat 1 1) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0))
+    (RFrame.mk (BitVec.ofNat cfg.frameLog 0) (BitVec.ofNat 1 0) (BitVec.ofNat 11 1))
+    (RGen.mk (BitVec.ofNat 7 0) (BitVec.ofNat 6 0) (BitVec.ofNat 1 0) (BitVec.ofNat 8 0))
+    Spi.init
+
+def MSt.initWith (cfg : RgbCfg) (prog : List Nat) (startPix : Bool) (pixels : List Nat) : MSt cfg.frameLog HwTy.El :=
+  MSt.mk (CoreSt.init 5 12 prog) Sync.init Rx.init UTx.init
+    (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 64 0)
+    (Mini.pix0 pixels) (BitVec.ofNat 16 (Hdl.nthD 0 pixels 0))
+    (BitVec.ofNat 1 0) (BitVec.ofNat 13 0) (BitVec.ofNat 16 0)
+    (if startPix then Mini.oledPixels cfg else RCtl.init cfg) (BitVec.ofNat 1 0) (BitVec.ofNat 8 0)
+
+def MSt.init (cfg : RgbCfg) (prog : List Nat) : MSt cfg.frameLog HwTy.El :=
+  MSt.initWith cfg prog .false .nil
+
+def Mini.machine (cfg : RgbCfg) (n : Nat) (prog : List Nat) : Circuit MIn.code MOut.code :=
+  Circuit.mk (MSt.code cfg.frameLog)
+    (Bundle.toEl (MSt.bundle cfg.frameLog) (MSt.init cfg prog))
+    (fun s x => Mini.step cfg n (MSt.unpack cfg.frameLog s) (MIn.unpack x))

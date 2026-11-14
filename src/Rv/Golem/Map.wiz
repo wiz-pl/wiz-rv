@@ -1,0 +1,53 @@
+import Hdl.Core
+-- The golem SoC's memory map, in one place: the hardware decode (`GMap.addrIn`), the
+-- constants the software header (sw/golem.h) mirrors, and the offsets of the MMIO
+-- registers. The map is the Doom machine's (src/Rv/Doom.wiz) plus a documented
+-- decode for the bus; see DESIGN.md for the table.
+--
+--   0x00000000  16 KB on-chip RAM: the boot ROM (the core's m0 … m3, wb = 12)
+--   0x40000000  256 MB DDR3 (through wiz-ddr3's cache and controller)
+--   0x80000000  MMIO: UART, cycle counter, DDR status, performance counters
+--   0x81000000  the 96 × 64 RGB 565 framebuffer (12 KB, halfword stores)
+
+def GMap.ramBase : Nat := 0
+def GMap.ramBytes : Nat := 16384
+def GMap.ddrBase : Nat := 1073741824        -- 0x40000000
+def GMap.ddrBytes : Nat := 268435456        -- 256 MB
+def GMap.mmioBase : Nat := 2147483648       -- 0x80000000
+def GMap.mmioBytes : Nat := 16777216        -- 16 MB: 0x80000000 … 0x80ffffff
+def GMap.fbBase : Nat := 2164260864         -- 0x81000000
+def GMap.fbBytes : Nat := 12288             -- 96 * 64 * 2
+
+-- the MMIO registers (byte offsets from GMap.mmioBase; as in src/Rv/Doom.wiz)
+def GMap.uart : Nat := 0            -- read: the next byte or -1; write: send
+def GMap.uartStatus : Nat := 4      -- read: bit 0 the transmitter is idle,
+                                    --       bit 1 a received byte is waiting
+def GMap.timerLo : Nat := 16        -- the cycle counter, low word
+def GMap.timerHi : Nat := 20        -- and high word
+def GMap.sound : Nat := 48
+def GMap.soundFree : Nat := 52
+def GMap.ddrStatus : Nat := 64      -- bit 0 calibration done, bit 1 it failed
+def GMap.perf : Nat := 80           -- the performance counters, 0x50 … 0x7c
+def GMap.cycles : Nat := 0x50       -- alias of GMap.perf's first counter (instructions)
+
+-- the framebuffer's shape
+def GMap.width : Nat := 96
+def GMap.height : Nat := 64
+def GMap.pixels : Nat := 6144
+
+-- `a` is in [base, base + size)
+def GMap.addrIn {r : HwTy → Type} [Hw r] (base size : Nat) (a : r (HwTy.bits 32)) : r HwTy.bit :=
+  Hw.and (Hw.not (Hw.ult a (Hw.lit 32 base))) (Hw.ult a (Hw.lit 32 (base + size)))
+
+def GMap.isRam {r : HwTy → Type} [Hw r] (a : r (HwTy.bits 32)) : r HwTy.bit :=
+  GMap.addrIn GMap.ramBase GMap.ramBytes a
+def GMap.isDdr {r : HwTy → Type} [Hw r] (a : r (HwTy.bits 32)) : r HwTy.bit :=
+  GMap.addrIn GMap.ddrBase GMap.ddrBytes a
+def GMap.isMmio {r : HwTy → Type} [Hw r] (a : r (HwTy.bits 32)) : r HwTy.bit :=
+  GMap.addrIn GMap.mmioBase GMap.mmioBytes a
+def GMap.isFb {r : HwTy → Type} [Hw r] (a : r (HwTy.bits 32)) : r HwTy.bit :=
+  GMap.addrIn GMap.fbBase GMap.fbBytes a
+
+-- the DDR offset of a bus address: a byte offset into the 256 MB (the cache's port)
+def GMap.ddrOff {r : HwTy → Type} [Hw r] (a : r (HwTy.bits 32)) : r (HwTy.bits 28) :=
+  Hw.slice 0 28 a

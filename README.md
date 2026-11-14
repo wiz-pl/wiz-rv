@@ -15,6 +15,10 @@ src/Rv/Core.wiz      the multi-cycle core, parameterised by register count and m
 src/Rv/Lockstep.wiz  the core against the specification, cycle by cycle / instruction by instruction
 src/Rv/Pipe.wiz      the 5-stage pipelined core (the Doom machine's, at 100 MHz)
 src/Rv/PLockstep.wiz the pipelined core against the specification, instruction by instruction at retirement
+src/Rv/DPipe.wiz     the pipelined core in the Doom machine, and its simple-DDR simulation top
+src/Rv/Golem.wiz     golem, the SoC top: the core, DDR3, UART and OLED on one bus
+src/Rv/GolemSim.wiz  golem with a behavioural DDR, for the simulation test
+src/Rv/Golem/*.wiz   its memory map, bus/arbiter and boot ROM
 app/rv.wiz           the flow driver: Verilog, yosys, nextpnr
 tests/*.wiz          grail tests
 ```
@@ -142,6 +146,29 @@ icestorm and Icarus Verilog.
 grail build          # check the library, compile the driver
 grail test           # the specification tests and the lockstep simulations
 .grail/bin/rv all    # Verilog, synthesis, place and route
+```
+
+## golem, the SoC
+
+`src/Rv/Golem.wiz` is the first top level that puts the pieces together: the pipelined
+core (or the multi-cycle core at half rate, `golemMc`), wiz-ddr3's DDR3 cache,
+controller and PHY, the UART and the PmodOLEDrgb framebuffer, with an explicit memory
+map, a bus decode and a two-master arbiter. The map is the Doom machine's
+(16 KB of on-chip RAM at 0, 256 MB of DDR3 at 0x40000000, the UART/timer/sound and
+performance counters at 0x80000000, the 96 × 64 framebuffer at 0x81000000) plus a UART
+status register, and it is written down once in `src/Rv/Golem/Map.wiz` and
+`sw/golem.h`. [DESIGN.md](DESIGN.md) has the table, the bus, the simulation and what
+remains for a board.
+
+The simulation boots a small ROM (`src/Rv/Golem/Prog.wiz`) which prints on the UART,
+checks DDR and the timer, draws three pixels into the framebuffer, and calls a routine
+it copied into DDR. Three short kernel runs check it (as the lockstep tests do; the
+compiled netlist is over the build's memory cap): `tests/golem.wiz` the boot ROM as a program on
+the specification, `tests/golem_oled.wiz` the OLED's SPI stream, and
+`tests/golem_bus.wiz` the bus/arbiter and DDR stub.
+
+```sh
+grail test golem     # or: wiz check tests/golem.wiz -I src -I ../wiz-ddr3/src …
 ```
 
 ## Doom
