@@ -298,8 +298,20 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
   let eq := Hw.eq a b;
   let taken := Hw.xor (Hw.mux (bitOf 2 d.f3) (Hw.mux (bitOf 1 d.f3) ult slt) eq) (bitOf 0 d.f3);
   let f3 := d.f3;
-  -- shifts in one cycle (a barrel shifter; the S phase is no longer used)
-  let shRes := barrel (isK f3 1) (Hw.and d.alt (bitOf 31 a)) (Hw.slice 0 5 b) a;
+  -- shifts in one cycle (a barrel shifter; the S phase is no longer used).
+  -- SRA is the complement form the specification uses (`ashr x k = ~(~x >> k)` for a
+  -- negative `x`): the barrel always shifts right with a zero fill, and the result is
+  -- complemented when the sign is set. The old ones-fill (`2^w - 1` in the top `k`
+  -- bits) was correct but its proof had to relate the fill to the logical shift by
+  -- arithmetic on a full-width constant (`Bits.sub_one_high` at w = 32), whose
+  -- `Nat.add_sub_of_le` recurses over `2^31`; the complement form needs only the
+  -- definitional `IntN.shiftRight` branches and the logical shift's stage chain.
+  let shamt : r B5 := Hw.slice 0 5 b;
+  let isSra : r W1 := Hw.and (isK f3 5) d.alt;
+  let sraNeg : r W1 := gate isSra (bitOf 31 a);
+  let shIn : r B32 := Hw.mux sraNeg (Hw.not a) a;
+  let shOut : r B32 := barrel (isK f3 1) (Hw.lit 1 0) shamt shIn;
+  let shRes : r B32 := Hw.mux sraNeg (Hw.not shOut) shOut;
   let aluRes := Hw.mux (isK f3 0) sum (Hw.mux (isK f3 2) (zext32 slt) (Hw.mux (isK f3 3) (zext32 ult)
     (Hw.mux (isK f3 4) (Hw.xor a b) (Hw.mux (isK f3 6) (Hw.or a b) (Hw.mux (isK f3 7) (Hw.and a b) shRes)))));
   let shift := Hw.lit 1 0;

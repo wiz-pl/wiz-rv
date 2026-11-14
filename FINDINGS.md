@@ -309,6 +309,23 @@ placed at 88.95 MHz with nextpnr's default seed and 108.17 MHz with `--seed 2`
 (`SEED=2 sh .scratch/bitn.sh`). So until rv-pipeline's timing work lands, a build has to
 be checked and maybe placed again; a failing "Max frequency" is not to be loaded.
 
+### H12. Arithmetic shift: the ones fill is proof-hostile, the complement form is not (note)
+
+`SRAI` was the shift the kernel proof could not finish. The barrel filled the top
+`k` bits with ones, so its value was `2^w - 1 - ((2^w - 1 - x) >> k)`; relating
+that to the specification needed `Bits.sub_one_high` at `w = 32`, which
+instantiates `Nat.add_sub_of_le` at `2^31` and recurses over the successor chain
+(stack overflow at 2 GB). `IntN.shiftRight` already *defines* an arithmetic
+shift as `~(~x >> k)` when `x` is negative, so the core now selects the
+complemented operand into the barrel (zero fill) and complements the result:
+`shamt`, `isSra`, `sraNeg`, `shIn`, `shOut`, `shRes` in `coreStep`. The proof is
+then the definitional `IntN.shiftRight` branches plus the logical stage chain
+(`SRAI x9, x2, 1`: 71 s uncached, under 2 GB, no `native_refl`; the proof is in
+wiz-lang `drafts/rv-shift/SRAI.wiz` until the toolchain pin has
+`lib/BitVecShift.wiz`). Cost: a 32-bit mux before and after the shared barrel,
+no second barrel. `tests/lockstep.wiz` agrees on every program, including the
+shift program (SRA/SRAI at shamt 0, 1, 9, 31, negative operands).
+
 ## Compiler and run time
 
 ### S1. A program that imports the core takes 12 to 15 minutes to compile (slow)
