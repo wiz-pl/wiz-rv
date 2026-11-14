@@ -85,6 +85,36 @@ def orr(rd, rs1, rs2): return rr(6, rd, rs1, rs2)
 def andr(rd, rs1, rs2): return rr(7, rd, rs1, rs2)
 
 
+# The M extension: OP with funct7 = 0000001 and funct3 0..7.
+def mr(f3, rd, rs1, rs2): return rr(f3, rd, rs1, rs2, 0x01)
+def mul(rd, rs1, rs2): return mr(0, rd, rs1, rs2)
+def mulh(rd, rs1, rs2): return mr(1, rd, rs1, rs2)
+def mulhsu(rd, rs1, rs2): return mr(2, rd, rs1, rs2)
+def mulhu(rd, rs1, rs2): return mr(3, rd, rs1, rs2)
+def div(rd, rs1, rs2): return mr(4, rd, rs1, rs2)
+def divu(rd, rs1, rs2): return mr(5, rd, rs1, rs2)
+def rem(rd, rs1, rs2): return mr(6, rd, rs1, rs2)
+def remu(rd, rs1, rs2): return mr(7, rd, rs1, rs2)
+
+
+def li(rd, val):
+    """Load a 32-bit constant: LUI + ADDI, or a single ADDI when it fits."""
+    val &= 0xFFFFFFFF
+    if val >= 0xFFFFF800:                       # -2048 … -1
+        return [addi(rd, x0, val - 0x100000000)]
+    if val < 0x800:
+        return [addi(rd, x0, val)]
+    hi = (val >> 12) & 0xFFFFF
+    lo = val & 0xFFF
+    if lo & 0x800:
+        hi = (hi + 1) & 0xFFFFF
+        lo -= 0x1000
+    out = [lui(rd, hi)]
+    if lo:
+        out.append(addi(rd, rd, lo))
+    return out
+
+
 def lui(rd, imm20): return u(imm20, rd, 0x37)
 def auipc(rd, imm20): return u(imm20, rd, 0x17)
 def jal(rd, imm): return j(imm, rd)
@@ -275,12 +305,62 @@ def mixed_program():
     ]
 
 
+# The M fixtures share a prelude of constants in registers x6 … x18.  The
+# instruction under test writes x3, so each result is visible in the pre-state of
+# the next instruction (the trace compares every step).
+def mprelude():
+    prog = []
+    prog += li(x6, 1)                 # 1
+    prog += li(x7, 0xFFFFFFFF)        # -1
+    prog += li(x8, 0x7FFFFFFF)        # INT_MAX
+    prog += li(x9, 0x80000000)        # INT_MIN
+    prog += li(x10, 0x12345678)
+    prog += li(x11, 0x9ABCDEF0)
+    prog += li(x12, 0xDEADBEEF)
+    prog += li(x13, 0x0BADF00D)
+    prog += li(x14, 0xFFFF)           # 0x0000ffff
+    prog += li(x15, 0x10000)          # 0x00010000
+    prog += li(x16, 0xFFFFFFF9)       # -7
+    prog += li(x17, 2)
+    prog += li(x18, 7)
+    return prog
+
+
+# Operand pairs: zero and same-register aliasing, small signed values, signed
+# 32-bit edges, and two patterns that exercise both halves of the product.
+MUL_PAIRS = [
+    (x0, x0), (x6, x0), (x0, x6), (x6, x6),
+    (x7, x6), (x6, x7), (x7, x7),
+    (x8, x6), (x9, x7), (x9, x8),           # INT_MAX*1, INT_MIN*-1, INT_MIN*INT_MAX
+    (x10, x11), (x12, x13), (x14, x14), (x15, x15),
+]
+DIV_PAIRS = [
+    (x0, x0), (x6, x0), (x0, x6), (x6, x6), (x7, x6), (x6, x7), (x7, x7),
+    (x9, x7), (x9, x6), (x6, x9), (x7, x9), (x9, x9),  # INT_MIN/-1, /1, 1/INT_MIN
+    (x8, x7), (x16, x17), (x18, x7),                   # INT_MAX/-1, -7/2, 7/-1
+    (x10, x11), (x12, x13), (x13, x6), (x13, x17),     # large unsigned, /2
+]
+
+
+def mfixture(op, pairs):
+    prog = mprelude() + [op(x3, r1, r2) for (r1, r2) in pairs] + [SPIN]
+    return ("rv32im", 14, len(prog), DATA, 256, prog)
+
+
 FIXTURES = {
     "alu": ("rv32i", 14, 32, DATA, 256, alu()),
     "branch": ("rv32i", 14, 40, DATA, 256, branch()),
     "mem": ("rv32i", 14, 32, DATA, 256, mem()),
     "shift": ("rv32i", 14, 32, DATA, 256, shift()),
     "mixed": ("rv32i", 14, 40, DATA, 256, mixed_program()),
+    "mul": mfixture(mul, MUL_PAIRS),
+    "mulh": mfixture(mulh, MUL_PAIRS),
+    "mulhsu": mfixture(mulhsu, MUL_PAIRS),
+    "mulhu": mfixture(mulhu, MUL_PAIRS),
+    "div": mfixture(div, DIV_PAIRS),
+    "divu": mfixture(divu, DIV_PAIRS),
+    "rem": mfixture(rem, DIV_PAIRS),
+    "remu": mfixture(remu, DIV_PAIRS),
 }
 
 

@@ -1,14 +1,16 @@
 #!/bin/sh
 # Generate (and, if the tools exist, run) the riscv-formal checks for the emitted
-# Wiz multi-cycle RV32I core.
+# Wiz multi-cycle RV32I/RV32IM core.
 #
 #   oracle/scripts/run-rvfi.sh --fixture alu
 #   oracle/scripts/run-rvfi.sh --fixture alu --sby
 #   oracle/scripts/run-rvfi.sh --fixture alu --sby --jobs 2
 #   oracle/scripts/run-rvfi.sh --instruction add --sby
-#   oracle/scripts/run-rvfi.sh --all-insns
+#   oracle/scripts/run-rvfi.sh --all-insns          # every instruction (I and M)
+#   oracle/scripts/run-rvfi.sh --muldiv             # only mul/mulh/div/... (8)
+#   oracle/scripts/run-rvfi.sh --instruction mul --sby
 #   oracle/scripts/run-rvfi.sh --fixture alu --sby --checks 'insn_add_ch0 insn_lw_ch0'
-#   oracle/scripts/run-rvfi.sh --list
+#   oracle/scripts/run-rvfi.sh --list [--muldiv]
 #
 # It always generates the rvfi wrapper (mkrvfi.py) and lints the wrapper + core
 # with iverilog when iverilog is on PATH.  With --sby it fetches riscv-formal at
@@ -16,6 +18,12 @@
 # directory (core.v, rvfi.v, wrapper.sv, checks.cfg), runs
 # checks/genchecks.py, and runs the generated checks with `sby -f` (a simple
 # --jobs pool; no make dependency).
+#
+# The M-extension instructions use checks-muldiv.cfg (`isa rv32im`) and a core
+# emitted with the multiplier/divider (the fixture's `rv32im` cfg selects `mx`).
+# At the pinned riscv-formal revision there is no check literally named
+# `rvfi_muldiv`: genchecks.py generates `insn_mul_ch0`, `insn_mulh_ch0`, …,
+# `insn_remu_ch0` from the Sail-derived models when `isa rv32im`.
 #
 # Missing tools are a clean SKIP (exit 0); a failing check is a FAIL (exit 1)
 # and the script prints the check name and the failing assertion lines from the
@@ -45,6 +53,7 @@ FORMAL_MBITS=${FORMAL_MBITS:-8}
 INSTRUCTION=
 DEPTH=
 ALL_INSNS=0
+MULDIV=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -52,6 +61,7 @@ while [ $# -gt 0 ]; do
     --fixture) FIXTURE=$2; shift 2 ;;
     --instruction) INSTRUCTION=$2; shift 2 ;;
     --all-insns) ALL_INSNS=1; shift ;;
+    --muldiv) MULDIV=1; shift ;;
     --out) OUT=$2; shift 2 ;;
     --sby) RUN_SBY=1; shift ;;
     --list) LIST=1; shift ;;
@@ -75,6 +85,20 @@ if [ "$ALL_INSNS" = 1 ]; then
   exit $rc
 fi
 
+if [ "$MULDIV" = 1 ] && [ "$LIST" = 1 ]; then
+  python3 oracle/scripts/formal_insns.py --list --muldiv
+  exit 0
+fi
+
+if [ "$MULDIV" = 1 ]; then
+  rc=0
+  for name in $(python3 oracle/scripts/formal_insns.py --list --muldiv); do
+    echo "=== instruction $name (rvfi muldiv) ==="
+    oracle/scripts/run-rvfi.sh --instruction "$name" --sby --jobs 1 || rc=1
+  done
+  exit $rc
+fi
+
 # ---- the core Verilog --------------------------------------------------------
 
 if [ -n "$INSTRUCTION" ]; then
@@ -89,10 +113,15 @@ if [ -n "$INSTRUCTION" ]; then
   fi
   FIXTURE=formal-$INSTRUCTION
   FIX=oracle/.build/formal-$INSTRUCTION.hex
-  DEPTH=$(python3 oracle/scripts/formal_insns.py --name "$INSTRUCTION" --out "$FIX")
+  INFO=$(python3 oracle/scripts/formal_insns.py --name "$INSTRUCTION" --out "$FIX")
+  DEPTH=${INFO%% *}
+  INSISA=${INFO#* }
+  if [ "$INSISA" = rv32im ] && [ "$CFG" = oracle/riscv-formal/checks.cfg ]; then
+    CFG=oracle/riscv-formal/checks-muldiv.cfg
+  fi
   VERILOG=oracle/.build/rvfi-core-$FIXTURE.v
   "$EMIT" "$FIX" "$FORMAL_MBITS" > "$VERILOG"
-  echo "# core: $FIXTURE, $FORMAL_MBITS address bits -> $VERILOG (check cycle $DEPTH)"
+  echo "# core: $FIXTURE, $FORMAL_MBITS address bits -> $VERILOG ($INSISA, check cycle $DEPTH)"
   [ -z "$CHECKS" ] && CHECKS="insn_${INSTRUCTION}_ch0"
 fi
 

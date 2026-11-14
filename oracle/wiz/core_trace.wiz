@@ -39,9 +39,11 @@ def Ct.main (path : String) : IO Unit :=
     | .some fx =>
       let ab := 5;
       let wb := Nat.sub fx.mbits 2;
-      let fuel := Nat.add (Nat.mul fx.steps 40) 400;
+      -- A division is 34 cycles, a multiplication 3; the base-I instructions are
+      -- 2..34, so 80 cycles per traced instruction leaves room for any mix.
+      let fuel := Nat.add (Nat.mul fx.steps 80) 600;
       let init := Bundle.toEl (CoreSt.bundle ab wb) (CoreSt.init ab wb fx.words);
-      Tr.say (List.append (Tr.header fx "core") (Ct.go ab wb .false fx fuel 0 init)))
+      Tr.say (List.append (Tr.header fx "core") (Ct.go ab wb (Fx.m fx) fx fuel 0 init)))
 
 def main : IO Unit := IO.bind IO.args (fun args =>
   match args with

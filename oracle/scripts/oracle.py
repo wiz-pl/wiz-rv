@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The independent-oracle harness for wiz-rv.
 
-It compares four implementations of the same RV32I machine on one instruction
-trace at a time:
+It compares four implementations of the same RV32I/RV32IM machine on one
+instruction trace at a time:
 
     isa    Rv.Isa        the Wiz executable specification (src/Rv/Isa.wiz)
     core   Rv.Core       the multi-cycle core, projected at its E phase
@@ -48,6 +48,7 @@ FIXDIR = os.path.join(ROOT, "oracle", "fixtures")
 BUILDDIR = os.path.join(ROOT, "oracle", ".build")
 TRACEDIR = os.path.join(ROOT, "oracle", ".traces")
 SAIL_CFG = os.path.join(ROOT, "oracle", "sail", "rv32i.json")
+SAIL_CFG_M = os.path.join(ROOT, "oracle", "sail", "rv32im.json")
 
 sys.path.insert(0, HERE)
 import rv32_ref  # noqa: E402
@@ -228,7 +229,8 @@ def sail_trace(fx, tmp, exe):
     with open(elf, "wb") as f:
         f.write(build_elf(fx.words, 0))
     log = os.path.join(tmp, fx.name + ".sail")
-    cmd = [exe, "--rv32", "--config-override", SAIL_CFG,
+    cfg = SAIL_CFG_M if fx.mx else SAIL_CFG
+    cmd = [exe, "--rv32", "--config-override", cfg,
            "--inst-limit", str(fx.steps + 1),
            "--trace-instr", "--trace-gpr", "--trace-mem", "--trace-step",
            "--trace-output", log, elf]
@@ -334,7 +336,7 @@ def spike_trace(fx, tmp, exe):
     log = os.path.join(tmp, fx.name + ".spike.log")
     mem_end = fx.mbase + fx.mcount
     regions = f"0x{fx.mbase:x}:0x{max(0x1000, (mem_end - fx.mbase + 0xfff) & ~0xfff):x},0x80000000:0x10000"
-    cmd = [exe, "--isa=rv32i", "--priv=m", "--disable-dtb",
+    cmd = [exe, "--isa=" + ("rv32im" if fx.mx else "rv32i"), "--priv=m", "--disable-dtb",
            f"--instructions={fx.steps + 1}",
            "-m" + regions, "-l", "--log-commits", elf]
     proc = subprocess.run(cmd, capture_output=True, text=True)

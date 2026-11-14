@@ -83,6 +83,10 @@ def Fx.ofLines : List String → Option Fx
        .some (Fx.mk (String.trim name) cfg (Fx.tok 1 toks) (Fx.tok 2 toks) (Fx.tok 3 toks)
          (Fx.tok 4 toks) (List.map Ox.parse ws)))
 
+-- `rv32im` enables the M extension in `Rv.Isa` and `Rv.Core`; anything else is the
+-- base-I machine (`rv32i`).
+def Fx.m (fx : Fx) : Bool := String.eq (String.trim fx.cfg) "rv32im"
+
 ------------------------------------------------------------------------------------
 -- State lines
 
@@ -132,6 +136,6 @@ def Tr.isaMain (path : String) : IO Unit :=
     match Fx.ofLines (Fx.lines text) with
     | .none => IO.println ("oracle: bad fixture " ++ path)
     | .some fx =>
-      let c := Cfg.mk 5 fx.mbits .false;
+      let c := Cfg.mk 5 fx.mbits (Fx.m fx);
       Tr.say (List.append (Tr.header fx "isa")
         (Tr.isaGo c fx fx.steps 0 (Arch.start c fx.words))))
