@@ -16,3 +16,16 @@ def Qp.ori_rd (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval 
     (Qp.G (Qp.at a (Qp.w (A.ori 4 4 1365)) m0 m1 m2 m3 ea eb mres rval) (BitVec.ofNat 32 (Qp.w (A.ori 4 4 1365)), BitVec.ofNat 1 1)).rd = (Qp.spec a (Qp.w (A.ori 4 4 1365)) 4).rd := rfl
 def Qp.ori_val (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
     (Qp.G (Qp.at a (Qp.w (A.ori 4 4 1365)) m0 m1 m2 m3 ea eb mres rval) (BitVec.ofNat 32 (Qp.w (A.ori 4 4 1365)), BitVec.ofNat 1 1)).val = (Qp.spec a (Qp.w (A.ori 4 4 1365)) 4).val := rfl
+
+-- the full claim: the six observed values at retirement are the specification's
+def Qp.ori_ok : Qp.ClaimG (Qp.w (A.ori 4 4 1365)) 4 :=
+  fun a m0 m1 m2 m3 ea eb mres rval h =>
+  Qp.glueG (Qp.at a (Qp.w (A.ori 4 4 1365)) m0 m1 m2 m3 ea eb mres rval) a
+    (Qp.w (A.ori 4 4 1365)) 4
+    (Qp.ori_npc a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.ori_pc a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.ori_v a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.ori_we a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.ori_rd a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.ori_val a m0 m1 m2 m3 ea eb mres rval)
+    h

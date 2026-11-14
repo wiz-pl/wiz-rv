@@ -90,3 +90,114 @@ def Qp.Claim (w rd : Nat) : Prop :=
   Qp.obs (Qp.step (Qp.at a w m0 m1 m2 m3 ea eb mres rval)) (Qp.step (Qp.step (Qp.step (Qp.at a w m0 m1 m2 m3 ea eb mres rval))))
     = Qp.spec a w rd
 
+------------------------------------------------------------------------------------
+-- The same claim, proved field by field
+--
+-- A whole-record `rfl` of `Qp.Claim` costs the conversion check one evaluation of the
+-- three cycles per observed value, and for the immediate forms that went over heavy's
+-- 5 GB cap (FINDINGS.md, H10). The claim below is the same proposition — `Qp.obs` is
+-- `Qp.Obs.mk` of the six observed values, and `Qp.step` is `Qp.stepW` at
+-- `(Pp.dWord s, Pp.dHit s)` — but stated in the form the field proofs can build: the
+-- constructor unfolded, and `Qp.G`'s word and hit as separate arguments (`Qp.GW`) so
+-- the hypothesis rewrites them one at a time. Each observed value is then one field
+-- lemma, proved by its own `rfl` (seconds), and the six are assembled along the
+-- hypothesis alone. No step is evaluated during the assembly.
+
+-- `Qp.G` with D's word and hit as separate arguments
+def Qp.GW (s : PpSt 4 9 HwTy.El) (wd : BitVec 32) (ht : BitVec 1) : Qp.Obs :=
+  Qp.G s (wd, ht)
+
+-- transport a two-argument value along two equalities
+def Qp.tr2 {X : Type} (F : BitVec 32 → BitVec 1 → X) {a b : BitVec 32} {c d : BitVec 1}
+    (e1 : a = b) (e2 : c = d) : F a c = F b d :=
+  Eq.trans (Eq.congrArg (fun z => F z c) e1) (Eq.congrArg (fun z => F b z) e2)
+
+-- constructor congruence for the observed values
+def Qp.Obs.eq6 (a1 a2 : BitVec 32) (a3 a4 : BitVec 1) (a5 : BitVec 5) (a6 : BitVec 32)
+    (b1 b2 : BitVec 32) (b3 b4 : BitVec 1) (b5 : BitVec 5) (b6 : BitVec 32)
+    (h1 : a1 = b1) (h2 : a2 = b2) (h3 : a3 = b3) (h4 : a4 = b4) (h5 : a5 = b5) (h6 : a6 = b6) :
+    Qp.Obs.mk a1 a2 a3 a4 a5 a6 = Qp.Obs.mk b1 b2 b3 b4 b5 b6 :=
+  Eq.trans (Eq.congrArg (fun z => Qp.Obs.mk z a2 a3 a4 a5 a6) h1)
+    (Eq.trans (Eq.congrArg (fun z => Qp.Obs.mk b1 z a3 a4 a5 a6) h2)
+      (Eq.trans (Eq.congrArg (fun z => Qp.Obs.mk b1 b2 z a4 a5 a6) h3)
+        (Eq.trans (Eq.congrArg (fun z => Qp.Obs.mk b1 b2 b3 z a5 a6) h4)
+          (Eq.trans (Eq.congrArg (fun z => Qp.Obs.mk b1 b2 b3 b4 z a6) h5)
+            (Eq.congrArg (fun z => Qp.Obs.mk b1 b2 b3 b4 b5 z) h6)))))
+
+-- the second component of the hypothesis: an equality of pairs is a pair of equalities,
+-- and the second one is cast along the first (the pair encoding is dependent)
+def Qp.hitEq (s : PpSt 4 9 HwTy.El) (w : Nat)
+    (h : (Pp.dWord (r := HwTy.El) 4 9 s, Pp.dHit (r := HwTy.El) 4 9 s)
+      = (BitVec.ofNat 32 w, BitVec.ofNat 1 1)) :
+    Pp.dHit (r := HwTy.El) 4 9 s = BitVec.ofNat 1 1 :=
+  Eq.trans (Eq.symm (castRefl (transp (fun y _ => BitVec 1 = BitVec 1) (refl (BitVec 1)) h.1)
+    (Pp.dHit (r := HwTy.El) 4 9 s))) h.2
+
+-- one observed value, transported from (w, 1) to what D presents
+def Qp.trF {X : Type} (s : PpSt 4 9 HwTy.El) (w : Nat) (F : BitVec 32 → BitVec 1 → X)
+    (h : (Pp.dWord (r := HwTy.El) 4 9 s, Pp.dHit (r := HwTy.El) 4 9 s)
+      = (BitVec.ofNat 32 w, BitVec.ofNat 1 1)) :
+    F (Pp.dWord (r := HwTy.El) 4 9 s) (Pp.dHit (r := HwTy.El) 4 9 s)
+      = F (BitVec.ofNat 32 w) (BitVec.ofNat 1 1) :=
+  Qp.tr2 F h.1 (Qp.hitEq s w h)
+
+-- assemble the six field lemmas into the observation
+def Qp.glueG (s : PpSt 4 9 HwTy.El) (a : Arch) (w rd : Nat)
+    (h1 : (Qp.GW s (BitVec.ofNat 32 w) (BitVec.ofNat 1 1)).npc = (Qp.spec a w rd).npc)
+    (h2 : (Qp.GW s (BitVec.ofNat 32 w) (BitVec.ofNat 1 1)).pc = (Qp.spec a w rd).pc)
+    (h3 : (Qp.GW s (BitVec.ofNat 32 w) (BitVec.ofNat 1 1)).v = (Qp.spec a w rd).v)
+    (h4 : (Qp.GW s (BitVec.ofNat 32 w) (BitVec.ofNat 1 1)).we = (Qp.spec a w rd).we)
+    (h5 : (Qp.GW s (BitVec.ofNat 32 w) (BitVec.ofNat 1 1)).rd = (Qp.spec a w rd).rd)
+    (h6 : (Qp.GW s (BitVec.ofNat 32 w) (BitVec.ofNat 1 1)).val = (Qp.spec a w rd).val)
+    (h : (Pp.dWord (r := HwTy.El) 4 9 s, Pp.dHit (r := HwTy.El) 4 9 s)
+      = (BitVec.ofNat 32 w, BitVec.ofNat 1 1)) :
+    Qp.Obs.mk
+      (Qp.GW s (Pp.dWord (r := HwTy.El) 4 9 s) (Pp.dHit (r := HwTy.El) 4 9 s)).npc
+      (Qp.GW s (Pp.dWord (r := HwTy.El) 4 9 s) (Pp.dHit (r := HwTy.El) 4 9 s)).pc
+      (Qp.GW s (Pp.dWord (r := HwTy.El) 4 9 s) (Pp.dHit (r := HwTy.El) 4 9 s)).v
+      (Qp.GW s (Pp.dWord (r := HwTy.El) 4 9 s) (Pp.dHit (r := HwTy.El) 4 9 s)).we
+      (Qp.GW s (Pp.dWord (r := HwTy.El) 4 9 s) (Pp.dHit (r := HwTy.El) 4 9 s)).rd
+      (Qp.GW s (Pp.dWord (r := HwTy.El) 4 9 s) (Pp.dHit (r := HwTy.El) 4 9 s)).val
+    = Qp.Obs.mk
+      (Qp.spec a w rd).npc (Qp.spec a w rd).pc (Qp.spec a w rd).v
+      (Qp.spec a w rd).we (Qp.spec a w rd).rd (Qp.spec a w rd).val :=
+  Qp.Obs.eq6 _ _ _ _ _ _ _ _ _ _ _ _
+    (Eq.trans (Qp.trF s w (fun wd ht => (Qp.GW s wd ht).npc) h) h1)
+    (Eq.trans (Qp.trF s w (fun wd ht => (Qp.GW s wd ht).pc) h) h2)
+    (Eq.trans (Qp.trF s w (fun wd ht => (Qp.GW s wd ht).v) h) h3)
+    (Eq.trans (Qp.trF s w (fun wd ht => (Qp.GW s wd ht).we) h) h4)
+    (Eq.trans (Qp.trF s w (fun wd ht => (Qp.GW s wd ht).rd) h) h5)
+    (Eq.trans (Qp.trF s w (fun wd ht => (Qp.GW s wd ht).val) h) h6)
+
+-- `Qp.Claim`, in the form the field proofs build (`Qp.Obs.mk` is `Qp.obs`; `Qp.GW` is
+-- `Qp.G`; the pair hypothesis is the same one). `Qp.Claim` and `Qp.ClaimG` are the same
+-- proposition, not two theorems: only the spelling differs, so that the checker does
+-- not re-evaluate the three cycles once per observed value.
+def Qp.ClaimG (w rd : Nat) : Prop :=
+  (a : Arch) → (m0 m1 m2 m3 : BitVec 9 → BitVec 8) → (ea eb mres rval : BitVec 32) →
+  (h : (Pp.dWord (r := HwTy.El) 4 9 (Qp.at a w m0 m1 m2 m3 ea eb mres rval),
+        Pp.dHit (r := HwTy.El) 4 9 (Qp.at a w m0 m1 m2 m3 ea eb mres rval))
+      = (BitVec.ofNat 32 w, BitVec.ofNat 1 1)) →
+  Qp.Obs.mk
+    (Qp.GW (Qp.at a w m0 m1 m2 m3 ea eb mres rval)
+      (Pp.dWord (r := HwTy.El) 4 9 (Qp.at a w m0 m1 m2 m3 ea eb mres rval))
+      (Pp.dHit (r := HwTy.El) 4 9 (Qp.at a w m0 m1 m2 m3 ea eb mres rval))).npc
+    (Qp.GW (Qp.at a w m0 m1 m2 m3 ea eb mres rval)
+      (Pp.dWord (r := HwTy.El) 4 9 (Qp.at a w m0 m1 m2 m3 ea eb mres rval))
+      (Pp.dHit (r := HwTy.El) 4 9 (Qp.at a w m0 m1 m2 m3 ea eb mres rval))).pc
+    (Qp.GW (Qp.at a w m0 m1 m2 m3 ea eb mres rval)
+      (Pp.dWord (r := HwTy.El) 4 9 (Qp.at a w m0 m1 m2 m3 ea eb mres rval))
+      (Pp.dHit (r := HwTy.El) 4 9 (Qp.at a w m0 m1 m2 m3 ea eb mres rval))).v
+    (Qp.GW (Qp.at a w m0 m1 m2 m3 ea eb mres rval)
+      (Pp.dWord (r := HwTy.El) 4 9 (Qp.at a w m0 m1 m2 m3 ea eb mres rval))
+      (Pp.dHit (r := HwTy.El) 4 9 (Qp.at a w m0 m1 m2 m3 ea eb mres rval))).we
+    (Qp.GW (Qp.at a w m0 m1 m2 m3 ea eb mres rval)
+      (Pp.dWord (r := HwTy.El) 4 9 (Qp.at a w m0 m1 m2 m3 ea eb mres rval))
+      (Pp.dHit (r := HwTy.El) 4 9 (Qp.at a w m0 m1 m2 m3 ea eb mres rval))).rd
+    (Qp.GW (Qp.at a w m0 m1 m2 m3 ea eb mres rval)
+      (Pp.dWord (r := HwTy.El) 4 9 (Qp.at a w m0 m1 m2 m3 ea eb mres rval))
+      (Pp.dHit (r := HwTy.El) 4 9 (Qp.at a w m0 m1 m2 m3 ea eb mres rval))).val
+    = Qp.Obs.mk
+    (Qp.spec a w rd).npc (Qp.spec a w rd).pc (Qp.spec a w rd).v
+    (Qp.spec a w rd).we (Qp.spec a w rd).rd (Qp.spec a w rd).val
+

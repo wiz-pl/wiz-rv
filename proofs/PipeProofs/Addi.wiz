@@ -1,0 +1,60 @@
+import PipeProofs.Base
+import BitVecAdd
+-- ADDI, the full claim at retirement (x7, x7, 1365).
+--
+-- The six observed values are proved one at a time (FINDINGS.md H10): the register
+-- value is the core's 34-bit adder, `BitVec.adc` in lib/BitVecAdd.wiz, and
+-- `BitVec.adc_zero`/`adc_one` turn it into the specification's add/sub. `Qp.ClaimG` is
+-- `Qp.Claim` with `Qp.obs` unfolded and D's word and hit separate, so the six field
+-- proofs and the hypothesis assemble without re-evaluating the three cycles.
+
+def Qp.addiImm : BitVec 32 := BitVec.ofNat 32 1365
+def Qp.addiX (a : Arch) : BitVec 32 := Qp.rf a (BitVec.ofNat 4 7)
+
+def Qp.addi_val1 (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.addi 7 7 1365)) m0 m1 m2 m3 ea eb mres rval)
+      (BitVec.ofNat 32 (Qp.w (A.addi 7 7 1365)), BitVec.ofNat 1 1)).val
+    = BitVec.adc (BitVec.ofNat 1 0) (Qp.addiX a) Qp.addiImm := rfl
+
+def Qp.addi_val (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.addi 7 7 1365)) m0 m1 m2 m3 ea eb mres rval)
+      (BitVec.ofNat 32 (Qp.w (A.addi 7 7 1365)), BitVec.ofNat 1 1)).val
+    = (Qp.spec a (Qp.w (A.addi 7 7 1365)) 7).val :=
+  Eq.trans (Qp.addi_val1 a m0 m1 m2 m3 ea eb mres rval)
+    (Eq.trans (BitVec.adc_zero (Qp.addiX a) Qp.addiImm) rfl)
+
+def Qp.addi_npc (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.addi 7 7 1365)) m0 m1 m2 m3 ea eb mres rval)
+      (BitVec.ofNat 32 (Qp.w (A.addi 7 7 1365)), BitVec.ofNat 1 1)).npc
+    = (Qp.spec a (Qp.w (A.addi 7 7 1365)) 7).npc := rfl
+
+def Qp.addi_pc (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.addi 7 7 1365)) m0 m1 m2 m3 ea eb mres rval)
+      (BitVec.ofNat 32 (Qp.w (A.addi 7 7 1365)), BitVec.ofNat 1 1)).pc
+    = (Qp.spec a (Qp.w (A.addi 7 7 1365)) 7).pc := rfl
+
+def Qp.addi_v (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.addi 7 7 1365)) m0 m1 m2 m3 ea eb mres rval)
+      (BitVec.ofNat 32 (Qp.w (A.addi 7 7 1365)), BitVec.ofNat 1 1)).v
+    = (Qp.spec a (Qp.w (A.addi 7 7 1365)) 7).v := rfl
+
+def Qp.addi_we (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.addi 7 7 1365)) m0 m1 m2 m3 ea eb mres rval)
+      (BitVec.ofNat 32 (Qp.w (A.addi 7 7 1365)), BitVec.ofNat 1 1)).we
+    = (Qp.spec a (Qp.w (A.addi 7 7 1365)) 7).we := rfl
+
+def Qp.addi_rd (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.addi 7 7 1365)) m0 m1 m2 m3 ea eb mres rval)
+      (BitVec.ofNat 32 (Qp.w (A.addi 7 7 1365)), BitVec.ofNat 1 1)).rd
+    = (Qp.spec a (Qp.w (A.addi 7 7 1365)) 7).rd := rfl
+
+def Qp.addi_ok : Qp.ClaimG (Qp.w (A.addi 7 7 1365)) 7 :=
+  fun a m0 m1 m2 m3 ea eb mres rval h =>
+  Qp.glueG (Qp.at a (Qp.w (A.addi 7 7 1365)) m0 m1 m2 m3 ea eb mres rval) a (Qp.w (A.addi 7 7 1365)) 7
+    (Qp.addi_npc a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.addi_pc a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.addi_v a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.addi_we a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.addi_rd a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.addi_val a m0 m1 m2 m3 ea eb mres rval)
+    h

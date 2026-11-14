@@ -16,3 +16,16 @@ def Qp.andi_rd (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval
     (Qp.G (Qp.at a (Qp.w (A.andi 9 3 (-2048))) m0 m1 m2 m3 ea eb mres rval) (BitVec.ofNat 32 (Qp.w (A.andi 9 3 (-2048))), BitVec.ofNat 1 1)).rd = (Qp.spec a (Qp.w (A.andi 9 3 (-2048))) 9).rd := rfl
 def Qp.andi_val (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
     (Qp.G (Qp.at a (Qp.w (A.andi 9 3 (-2048))) m0 m1 m2 m3 ea eb mres rval) (BitVec.ofNat 32 (Qp.w (A.andi 9 3 (-2048))), BitVec.ofNat 1 1)).val = (Qp.spec a (Qp.w (A.andi 9 3 (-2048))) 9).val := rfl
+
+-- the full claim: the six observed values at retirement are the specification's
+def Qp.andi_ok : Qp.ClaimG (Qp.w (A.andi 9 3 (-2048))) 9 :=
+  fun a m0 m1 m2 m3 ea eb mres rval h =>
+  Qp.glueG (Qp.at a (Qp.w (A.andi 9 3 (-2048))) m0 m1 m2 m3 ea eb mres rval) a
+    (Qp.w (A.andi 9 3 (-2048))) 9
+    (Qp.andi_npc a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.andi_pc a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.andi_v a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.andi_we a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.andi_rd a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.andi_val a m0 m1 m2 m3 ea eb mres rval)
+    h

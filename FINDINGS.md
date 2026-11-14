@@ -285,22 +285,45 @@ value. As in src/Rv/Proofs.wiz, what D presents is a hypothesis. That is why
 * XOR, OR, AND, LUI, AUIPC: the full claim, kernel-checked. Each is one `rfl` of the
   six observed values at the instruction's state, about 20 minutes and up to 5 GB of
   `wiz check`. That is why they are outside the library (`grail build` would take hours).
-* XORI, ORI, ANDI: one `rfl` of the whole record went over heavy's 5 GB memory cap.
-  Each of the six values on its own is an `rfl` of seconds, so these files prove each
-  observed value of the three cycles with D's word given (`Qp.G`, built on the step
-  function). What is missing is the glue from the hypothesis about D. Every way of
-  combining the six field proofs with the hypothesis took more than 20 minutes,
-  whether through the record, through projections of a lemma about any state, or
-  through a congruence lemma on the record's constructor.
+* XORI, ORI, ANDI, ADD, ADDI, SUB, SLLI, SRLI: the full claim too, proved field by
+  field (`Qp.ClaimG` in Base.wiz). A whole-record `rfl` of `Qp.Claim` evaluates the
+  three cycles once per observed value; for the immediate forms that went over 5 GB.
+  `Qp.ClaimG` is the same proposition — `Qp.obs` is `Qp.Obs.mk`, `Qp.step` is
+  `Qp.stepW` at `(Pp.dWord s, Pp.dHit s)` — with the constructor unfolded, `Qp.G`'s
+  word and hit as separate arguments (`Qp.GW`), and the pair hypothesis split into its
+  two components (`Qp.hitEq` crosses the cast that the pairwise equality puts on the
+  second, with the prelude's `castRefl` axiom). Each observed value is one `rfl` (or,
+  for a shift, one barrel lemma), and
+  `Qp.Obs.eq6`/`Qp.glueG` assemble the six along the hypothesis alone: no step is
+  evaluated during the assembly. A `rfl` bridge back to `Qp.Claim`'s spelling is not
+  cheap — the kernel re-evaluates the projections — so the two spellings are kept.
+* The shifts need library lemmas that are now in the toolchain's lib/BitVecShift.wiz
+  (`BitVec.shlStage`/`shrStage_toNat`, `Bits.low_shift`, `high_low`, `low_low_rev`,
+  `and_zero_left`, …); the shamt-specific stage chain is proof-local in
+  proofs/PipeProofs/Slli.wiz, Srli.wiz. The pipeline's fill `Hw.and alt (bit 31 a)` is
+  a stuck `Hw.and 0 b` (H2); a left shift ignores the fill, and SRLI's zero fill goes
+  through `BitVec.and_zero_left`.
 * No `gate` rewrites were needed. The places where the pipeline ANDs a control bit
   with data are on paths the selects leave unevaluated, and the kernel's evaluation is
-  lazy enough there.
+  lazy enough there. (The fill is the one place where the AND is on a used path; that
+  is why SRLI needs `and_zero_left` rather than `rfl`.)
+* Wall times here (`wiz check`, shared ~/.cache/wiz, heavy 5 GB): Base 9 s warm, 280 s
+  cold; XORI, ORI, ANDI 300 s CPU together cold; ADD, ADDI, SUB, SLLI, SRLI 75 s
+  together warm. Each field proof is seconds; a whole-record `rfl` is minutes to a
+  kill.
 
-Wanted: whatever makes the whole-record `rfl` cost what its fields cost. That is, the
-conversion check should share the evaluation of the state between projections, as the
-six separate `rfl`s do in seconds. A rewriting tactic would also let the glue go
-through the record's fields. A claim with instructions in flight (forwarding from M or
-R) would need a symbolic predecessor, and is not done.
+Still open:
+
+* Register shifts (SLL/SRL/SRA) need the 32-way split on a symbolic shamt; SRAI needs
+  the ones fill `Hw.and 1 b`, which does not reduce (the RTL's complement form on
+  branch `agent/rtl-proof-hooks` is the fix; not on master). SLT/SLTU need the ALU's
+  carry-out comparison bridge (the open H2 remainder).
+* Branches and jumps need a different observation, not more lemmas: `Qp.Obs` compares
+  `val` unconditionally though `we = 0`, and a taken branch's `npc` is pc+4 after one
+  cycle (the redirect is registered, so the target arrives a cycle later).
+* Loads and stores are further out: `Qp.Obs` does not observe memory at all, and the
+  memory read-after-write laws are H4. A claim with instructions in flight (forwarding
+  from M or R) would need a symbolic predecessor, and is not done.
 
 ### H11. Timing at 100 MHz is thin after the pipeline merge (note)
 

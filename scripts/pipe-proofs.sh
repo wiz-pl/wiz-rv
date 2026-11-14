@@ -1,7 +1,9 @@
 #!/bin/sh
 # Check the pipelined core's single-instruction proofs (proofs/PipeProofs/*.wiz), JOBS at a
-# time (default 2; each takes about 20 minutes and 1 to 2 GB). WIZ: the command that runs
-# wiz (default: wiz; it may have words in front, e.g. a job runner).
+# time (default 2). The five `Qp.Claim` files (Xor, Or, And, Lui, Auipc) are one whole-record
+# `rfl` each: about 20 minutes and up to 5 GB. The `Qp.ClaimG` files are field by field,
+# seconds to a minute once Base.wiz is cached (FINDINGS.md H10). WIZ: the command that
+# runs wiz (default: wiz; it may have words in front, e.g. a job runner).
 cd "$(dirname "$0")/.."
 WIZ=${WIZ:-wiz}
 one() {

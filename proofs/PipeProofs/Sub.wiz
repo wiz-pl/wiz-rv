@@ -1,0 +1,60 @@
+import PipeProofs.Base
+import BitVecAdd
+-- SUB, the full claim at retirement (x5, x5, x1).
+--
+-- The six observed values are proved one at a time (FINDINGS.md H10): the register
+-- value is the core's 34-bit adder, `BitVec.adc` in lib/BitVecAdd.wiz, and
+-- `BitVec.adc_zero`/`adc_one` turn it into the specification's add/sub. `Qp.ClaimG` is
+-- `Qp.Claim` with `Qp.obs` unfolded and D's word and hit separate, so the six field
+-- proofs and the hypothesis assemble without re-evaluating the three cycles.
+
+def Qp.subX (a : Arch) : BitVec 32 := Qp.rf a (BitVec.ofNat 4 5)
+def Qp.subY (a : Arch) : BitVec 32 := Qp.rf a (BitVec.ofNat 4 1)
+
+def Qp.sub_val1 (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.sub 5 5 1)) m0 m1 m2 m3 ea eb mres rval)
+      (BitVec.ofNat 32 (Qp.w (A.sub 5 5 1)), BitVec.ofNat 1 1)).val
+    = BitVec.adc (BitVec.ofNat 1 1) (Qp.subX a) (Qp.subY a) := rfl
+
+def Qp.sub_val (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.sub 5 5 1)) m0 m1 m2 m3 ea eb mres rval)
+      (BitVec.ofNat 32 (Qp.w (A.sub 5 5 1)), BitVec.ofNat 1 1)).val
+    = (Qp.spec a (Qp.w (A.sub 5 5 1)) 5).val :=
+  Eq.trans (Qp.sub_val1 a m0 m1 m2 m3 ea eb mres rval)
+    (Eq.trans (BitVec.adc_one (Qp.subX a) (Qp.subY a)) rfl)
+
+def Qp.sub_npc (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.sub 5 5 1)) m0 m1 m2 m3 ea eb mres rval)
+      (BitVec.ofNat 32 (Qp.w (A.sub 5 5 1)), BitVec.ofNat 1 1)).npc
+    = (Qp.spec a (Qp.w (A.sub 5 5 1)) 5).npc := rfl
+
+def Qp.sub_pc (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.sub 5 5 1)) m0 m1 m2 m3 ea eb mres rval)
+      (BitVec.ofNat 32 (Qp.w (A.sub 5 5 1)), BitVec.ofNat 1 1)).pc
+    = (Qp.spec a (Qp.w (A.sub 5 5 1)) 5).pc := rfl
+
+def Qp.sub_v (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.sub 5 5 1)) m0 m1 m2 m3 ea eb mres rval)
+      (BitVec.ofNat 32 (Qp.w (A.sub 5 5 1)), BitVec.ofNat 1 1)).v
+    = (Qp.spec a (Qp.w (A.sub 5 5 1)) 5).v := rfl
+
+def Qp.sub_we (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.sub 5 5 1)) m0 m1 m2 m3 ea eb mres rval)
+      (BitVec.ofNat 32 (Qp.w (A.sub 5 5 1)), BitVec.ofNat 1 1)).we
+    = (Qp.spec a (Qp.w (A.sub 5 5 1)) 5).we := rfl
+
+def Qp.sub_rd (a : Arch) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) :
+    (Qp.G (Qp.at a (Qp.w (A.sub 5 5 1)) m0 m1 m2 m3 ea eb mres rval)
+      (BitVec.ofNat 32 (Qp.w (A.sub 5 5 1)), BitVec.ofNat 1 1)).rd
+    = (Qp.spec a (Qp.w (A.sub 5 5 1)) 5).rd := rfl
+
+def Qp.sub_ok : Qp.ClaimG (Qp.w (A.sub 5 5 1)) 5 :=
+  fun a m0 m1 m2 m3 ea eb mres rval h =>
+  Qp.glueG (Qp.at a (Qp.w (A.sub 5 5 1)) m0 m1 m2 m3 ea eb mres rval) a (Qp.w (A.sub 5 5 1)) 5
+    (Qp.sub_npc a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.sub_pc a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.sub_v a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.sub_we a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.sub_rd a m0 m1 m2 m3 ea eb mres rval)
+    (Qp.sub_val a m0 m1 m2 m3 ea eb mres rval)
+    h
