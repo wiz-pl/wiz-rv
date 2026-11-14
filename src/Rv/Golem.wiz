@@ -1,5 +1,6 @@
 import Rv.DPipe
 import Rv.Doom
+import Rv.Golem.Board
 import Rv.Golem.Bus
 import Ddr3.Cache
 import Ddr3.Board
@@ -56,6 +57,16 @@ structure GSt (h : HwTy) (r : HwTy → Type) where
   beat : r (HwTy.bits 27)
   deriving Bundle
 
+-- The board's reset and status policy lives in `Rv.Golem.Board` (`GBoard.coreReset`,
+-- `GBoard.phyReset`, `GBoard.boardLed`), so `tests/golem_board.wiz` checks the functions
+-- this module uses:
+--
+--   * the core (and the rest of the machine) is held in reset while BTN0 is pressed and
+--     until the DDR3 calibration has finished — done (`calDone`) or failed (`calFail`),
+--     so a failed calibration still lets the boot loader print "DDR fail";
+--   * the PHY's reset is held for 255 cycles after the PLL locks (`Golem.board`);
+--   * LD0 is `calDone`, LD1 `calFail`, LD2 the core's heartbeat, LD3 the bus's.
+
 def Golem.step (t : Timing) (h : Circuit DIn.code DOut.code) {r : HwTy → Type} [Hw r]
     (s : GSt h.st r) (phyIn : r PhyIn.code) (rx : r W1) (btn : r B4) :
     r (HwTy.prod (GSt.code h.st) (HwTy.prod Dfi.code GOut.code)) :=
@@ -83,8 +94,7 @@ def Golem.step (t : Timing) (h : Circuit DIn.code DOut.code) {r : HwTy → Type}
   let br := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb coreResp;
   let ω toCore := GBus.Resp.unpack (Hw.snd (Hw.snd br));
   -- the core waits in reset for the calibration
-  let calEnd := Hw.or po.calDone po.calFail;
-  let rst := Hw.or (bitOf 0 btn) (Hw.not calEnd);
+  let rst := GBoard.coreReset btn po.calDone po.calFail;
   let hr := Circuit.inst h s.sys (DIn.pack (DIn.mk rx (Hw.cat (Hw.slice 1 3 btn : r B3) rst)
     toCore.ready toCore.rvalid toCore.rdata (Hw.cat po.calFail po.calDone) (Hw.lit 32 0) (Hw.lit 32 0)));
   let ω o := DOut.unpack (Hw.snd hr);
@@ -92,7 +102,7 @@ def Golem.step (t : Timing) (h : Circuit DIn.code DOut.code) {r : HwTy → Type}
     (GSt.pack h.st (GSt.mk (Hw.fst co) (Hw.fst cr) (BusA.unpack (Hw.fst br)) (GBus.Arb.unpack (Hw.fst ar)) (Hw.fst hr) (inc s.beat)))
     (Hw.pair (Hw.snd (Hw.snd co))
       (GOut.pack (GOut.mk o.uart_tx
-        (Hw.cat (bitOf 26 s.beat) (Hw.cat (bitOf 0 o.led) (Hw.cat po.calFail po.calDone)))
+        (GBoard.boardLed s.beat (bitOf 0 o.led) po.calDone po.calFail)
         o.ja o.jb)))
 
 def Golem.init (t : Timing) (h : Circuit DIn.code DOut.code) : HwTy.El (GSt.code h.st) :=
@@ -116,7 +126,7 @@ def Golem.board (t : Timing) (h : Circuit DIn.code DOut.code) : Circuit GIn.code
       let ω i := GIn.unpack x;
       let ω ts := GSt.unpack hst b.top;
       let ω cs := St.unpack ts.ctrl;
-      let phyRst := Hw.not (isK b.rstCnt 255);
+      let phyRst := GBoard.phyReset b.rstCnt;
       let tr := Golem.step t h ts b.phy i.uart_rx i.btn;
       let ω dfi := Dfi.unpack (Hw.fst (Hw.snd tr));
       let phy := Phy.io (PhyClk.mk i.sys4x i.sys4xDqs i.ref200) phyRst cs.rstN dfi;

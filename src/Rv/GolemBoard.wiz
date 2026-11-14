@@ -1,0 +1,37 @@
+import Rv.Golem
+import Rv.Golem.Board
+-- golem's board circuits: `golem` and `golemMc` for `Timing.arty`, in the wrapper
+-- `Verilog.emitTop` builds from `GBoard.clocking`. The board's values (boot images,
+-- clocking, pins, XDC, reset domains, the check) are in src/Rv/Golem/Board.wiz, which
+-- does not import the SoC; this module is only what elaborates it.
+
+inductive GBoard.Variant where
+  | full      -- golem: the pipelined core at 100 MHz
+  | mc        -- golemMc: the multi-cycle core at 50 MHz effective
+
+def GBoard.Variant.name : GBoard.Variant → String
+  | .full => "golem"
+  | .mc => "golem_mc"
+
+def GBoard.Variant.circuit (v : GBoard.Variant) (boot : GBoard.Boot) :
+    Circuit GIn.code (HwTy.prod Ddr3Pads.code GOut.code) :=
+  match v with
+  | .full => Golem.golem Timing.arty (GBoard.Boot.prog boot)
+  | .mc => Golem.golemMc Timing.arty (GBoard.Boot.prog boot)
+
+def GBoard.Variant.netlist (v : GBoard.Variant) (boot : GBoard.Boot) : Netlist :=
+  Circuit.netlist (GBoard.Variant.name v) (GBoard.Variant.circuit v boot)
+
+def GBoard.variantOf (s : String) : Option GBoard.Variant :=
+  match Hdl.strEq s "golem", Hdl.strEq s "mc", Hdl.strEq s "golem_mc" with
+  | .true, _, _ => .some .full
+  | _, .true, _ => .some .mc
+  | _, _, .true => .some .mc
+  | _, _, _ => .none
+
+def GBoard.variantsOf (s : String) : Option (List GBoard.Variant) :=
+  match Hdl.strEq s "both" with
+  | .true => .some (.cons .full (.cons .mc .nil))
+  | .false => match GBoard.variantOf s with
+    | .some v => .some (.cons v .nil)
+    | .none => .none

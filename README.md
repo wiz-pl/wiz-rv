@@ -101,6 +101,7 @@ mem; DDR code does not pay this.
 | RV32IM, 16 KB, UART (`rv32im_arty_uart`) | Artix-7 XC7A35T (Arty A7-35T) | about 970 LUTs, 300 FFs, 10 DSP48E1 | 4 RAMB36E1 + 12 RAM32M (the register file) | 78.9 MHz: run at half rate, 50 MHz (FINDINGS.md, H5) |
 | pipelined RV32IM, 16 KB, UART (`p_arty`, app/pgen.wiz) | XC7A35T | about 2000 LUTs, 936 FFs, 4 DSP48E1 | 12 RAMB36E1 + 2 RAMB18E1 + 12 RAM32M (no DDR, so no caches) | 106.9 MHz, run at 100 |
 | the Doom machine, pipelined (`doom_top`) | XC7A35T | about 5100 LUTs, 3900 FFs, 4 DSP48E1 (with wiz-ddr3's controller, cache, PHY) | 23 RAMB36E1 + 4 RAMB18E1 + 12 RAM32M | 104.8 MHz, run at 100 (no multicycle constraints) |
+| golem, pipelined (`golem`, board flow) | XC7A35T | 5063 LUTs, 3815 FFs, 4 DSP48E1 (DDR3, UART, OLED, the bus) | 23 RAMB36E1 + 4 RAMB18E1 + 12 RAM32M | 107.3 MHz (nextpnr), run at 100 |
 
 (The Arty build is artix-target's openXC7 flow: yosys, nextpnr-xilinx, Project X-Ray.)
 
@@ -157,19 +158,48 @@ map, a bus decode and a two-master arbiter. The map is the Doom machine's
 (16 KB of on-chip RAM at 0, 256 MB of DDR3 at 0x40000000, the UART/timer/sound and
 performance counters at 0x80000000, the 96 × 64 framebuffer at 0x81000000) plus a UART
 status register, and it is written down once in `src/Rv/Golem/Map.wiz` and
-`sw/golem.h`. [DESIGN.md](DESIGN.md) has the table, the bus, the simulation and what
-remains for a board.
+`sw/golem.h`. [DESIGN.md](DESIGN.md) has the table, the bus, the simulation and the
+Arty board flow.
 
 The simulation boots a small ROM (`src/Rv/Golem/Prog.wiz`) which prints on the UART,
 checks DDR and the timer, draws three pixels into the framebuffer, and calls a routine
-it copied into DDR. Three short kernel runs check it (as the lockstep tests do; the
+it copied into DDR. Four short kernel runs check it (as the lockstep tests do; the
 compiled netlist is over the build's memory cap): `tests/golem.wiz` the boot ROM as a program on
-the specification, `tests/golem_oled.wiz` the OLED's SPI stream, and
-`tests/golem_bus.wiz` the bus/arbiter and DDR stub.
+the specification, `tests/golem_oled.wiz` the OLED's SPI stream,
+`tests/golem_bus.wiz` the bus/arbiter and DDR stub, and `tests/golem_board.wiz` the
+Arty configuration (75 pins, 55 top ports, the PLL's clocks, the reset domains).
 
 ```sh
 grail test golem     # or: wiz check tests/golem.wiz -I src -I ../wiz-ddr3/src …
 ```
+
+### golem on the Arty A7-35T
+
+`src/Rv/Golem/Board.wiz` is the board configuration and `src/Rv/GolemBoard.wiz` its
+two circuits: `Ddr3.Board`'s DDR3, clock, UART
+and LED constraints plus JA (PmodOLEDrgb), JB (sound) and BTN; the PLL wrapper (100 MHz
+input, 800 MHz VCO, 100 MHz `sys`, 400 MHz `sys4x`, 400 MHz `sys4xDqs` at 90°, 200 MHz
+`ref200`); and the reset domains. `golem` runs the pipelined core at 100 MHz;
+`golemMc` keeps the 100 MHz board clock and enables the multi-cycle core every other
+cycle (50 MHz effective). The default boot image is `Prog.boot`, the UART loader that
+prints `wiz-rv boot` and `DDR ok`/`DDR fail` and accepts `rvload` records; `--boot rom`
+selects the self-contained `GProg` bring-up ROM. LD0/LD1 are calibration done/failed
+and MMIO `0x8000_0040` reports the same.
+
+```sh
+grail build
+scripts/golem-board.sh board      # the pin/clock/reset check (also `golem board`)
+scripts/golem-board.sh gen        # build/golem.v and build/golem.xdc
+scripts/golem-board.sh synth      # yosys only (dry-run path if it is missing)
+scripts/golem-board.sh bit        # nextpnr-xilinx + fasm2frames + xc7frames2bit
+scripts/golem-board.sh timing     # the 100 MHz report; `bit` fails below 100 MHz
+```
+
+`bit` writes `build/a35t/golem.bit` (and `golem.timing`, `golem.report`). The hardware
+step, not run here, is `openFPGALoader -b arty_a7_35t build/a35t/golem.bit`, then the
+UART at 1 Mbaud: the calibration line, then `rvload PORT prog.bin` (or
+`rvload PORT doom.bin doom1.wad`). [DESIGN.md](DESIGN.md) has the pin table and the
+full flow.
 
 ## Doom
 

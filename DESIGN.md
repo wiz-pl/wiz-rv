@@ -87,11 +87,18 @@ src/Rv/Golem/Map.wiz    the memory map: constants, decode predicates, MMIO offse
 src/Rv/Golem/Bus.wiz    GBus.route (decode), GBus.arb (two masters), GBus.ramStep (sim DDR)
 src/Rv/Golem/Prog.wiz   the boot ROM: banner, DDR/host/timer checks, three pixels, a DDR call
 src/Rv/Golem.wiz        GIn/GOut, Golem.step (cache + controller + bus + machine),
-                        golem / golemMc (board, with the PHY)
+                        golem / golemMc (board, with the PHY), the reset/LED policy
+src/Rv/GolemBoard.wiz   the board circuits: golem and golemMc for Timing.arty, and
+                        the netlist each variant becomes
+src/Rv/Golem/Board.wiz  the Arty A7-35T board: boot image, PLL clocking, pins, XDC,
+                        reset domains and the `golem board` check
 src/Rv/GolemSim.wiz     golemSim: the same machine and bus with a behavioural DDR
 src/Rv/DPipe.wiz        the pipelined core in the Doom machine (`doomFull`, `simTop`),
                         kept out of Rv.Doom so the simulation test does not compile it
+app/golem.wiz           the board flow: gen, synth, bit, timing, dry (`golem …`)
+scripts/golem-board.sh  the flow wrapper: finds the tools, refuses to flash unsigned
 tests/golem.wiz         the executable simulation (UART bytes and the OLED SPI stream)
+tests/golem_board.wiz   the `golem board` config/constraints check
 sw/golem.h              the memory map and MMIO for software
 sw/golem.c              a tiny C hello (banner, cycle counter, three rows)
 ```
@@ -111,7 +118,7 @@ tests do. Compiling the machine with `Circuit.simFast` is over the 5 GB build ca
 (FINDINGS.md, S1 — the core's IR alone takes tens of minutes and gigabytes), so the
 executable checks use values and short runs.
 
-There are three checks, one per piece, because each kernel run's state is large
+There are four checks, one per piece, because each kernel run's state is large
 (`tests/golem*.wiz`):
 
 | test | what it runs | checks |
@@ -119,6 +126,7 @@ There are three checks, one per piece, because each kernel run's state is large
 | `tests/golem.wiz` | the boot ROM (`GProg.sim`) as a program on the ISA specification (`Rv.run`) | trap 2 (EBREAK), the UART text |
 | `tests/golem_oled.wiz` | the framebuffer and the SSD1331 streamer (`OledSim`, the controller at its `pixels` step) | the first six SPI data bytes: red, green, blue (RGB 565, high byte first) |
 | `tests/golem_bus.wiz` | `GBus.route`/`arb`/`ramStep` at values | the host writes `0x600d` to DDR[0], the core reads it back, no error |
+| `tests/golem_board.wiz` | `GBoard` (the Arty configuration) | 75 pins, 55 top ports, clocks 100/400/400/200 MHz, reset domains as the design |
 
 The boot check is the program on the specification (the core is the multi-cycle one
 that `tests/lockstep.wiz` checks against the same specification; the whole machine with
@@ -135,6 +143,7 @@ wiz check src/Rv/Golem.wiz   -I src -I ../wiz-ddr3/src
 wiz check tests/golem.wiz    -I src -I ../wiz-ddr3/src
 wiz check tests/golem_oled.wiz -I src -I ../wiz-ddr3/src
 wiz check tests/golem_bus.wiz  -I src -I ../wiz-ddr3/src
+wiz check tests/golem_board.wiz -I src -I ../wiz-ddr3/src
 # or through grail (checks the library and runs the tests):
 grail build && grail test golem
 ```
@@ -149,6 +158,7 @@ ddr ok
 ", PASS
 golem oled: 11 data bytes, first six f8 00 07 e0 00 1f  — PASS
 golem bus: host wrote 0x600d, core read 24589, err 0 — PASS
+golem board: 75 pins, 55 top ports, 3 reset domains, clocks 100/400/400/200 MHz, PASS
 ```
 
 The boot ROM (`GProg.golem`) prints the banner; waits for the DDR status (the stub
@@ -165,34 +175,133 @@ and `DoomTop.doomSim` is the existing circuit with the controller and the behavi
 device in place of the PHY, if a full-DDR simulation is wanted (it is generated to
 Verilog and run in Icarus in wiz-rv's Doom flow).
 
-## Hardware
+## The Arty A7-35T board
 
 `Golem.golem` (src/Rv/Golem.wiz) is the board circuit: `Ddr3.Board.clocking`'s PLL
 clocks (`sys4x`, `sys4xDqs`, `ref200`, `locked`), the PHY, the controller and cache,
-the bus, and the machine. It takes `Timing.arty`. The steps to a bitstream are the
-Doom machine's (README.md, "Doom"), with `golem` in place of `doomTop`:
+the bus, and the machine. It takes `Timing.arty`. The board's configuration lives in
+one place, `src/Rv/Golem/Board.wiz` (boot image, PLL clocking, pin table, XDC and reset
+domains); `src/Rv/GolemBoard.wiz` adds the two circuits. `tests/golem_board.wiz` and
+`golem board` run the same check over the configuration, without elaborating the
+netlist.
 
-1. a board wrapper with the Arty A7-35T's pin constraints: `Ddr3.Board`'s DDR3 pins,
-   the UART (`uart_rx`/`uart_tx`), the four LEDs, and JA's eight pins for the OLED
-   (`ja` is the PmodOLEDrgb's SPI and control: PMODEN, VCCEN, RES, D/C, SCLK, MOSI,
-   CS; the JXADC/Pmod header's 3.3 V and GND);
-2. `.grail/bin/rv`'s flow (yosys, nextpnr-xilinx, `Ddr3.Board`'s XDC) or artix-target's
-   openXC7 flow, as in scripts/arty-load.sh; the design targets 100 MHz (the pipeline
-   placed at 100.12 MHz in `doomTop`; `golemMc` runs the core at 50 MHz effective and
-   needs the same DDR/cache paths at 100);
-3. the DDR3 calibration: the core is held in reset until `calDone`/`calFail`
-   (`Golem.step`), and the boot ROM's `DDR_STATUS` poll waits for it; the board's
-   "DDR ok"/"DDR fail" report is the same as the Doom machine's.
-4. loading software: the boot ROM at address 0 is the image in the on-chip RAM. The
-   ROM in `GProg` is a test image; a board image would replace it with `Prog.boot`
-   (the UART loader, `rvload`) or link `sw/golem.c` at 0. The host loader port is
-   tied off on the board; the UART loader is the way in.
+### Pins
 
-What remains for hardware, precisely: pin constraints for golem, the PLL/board wrapper
-in the flow driver (the pieces exist in wiz-ddr3's `Ddr3.Board` and wiz-rv's Doom
-flow), a board build of the pipeline at 100 MHz and a DDR3 calibration run. None of
-the logic is new: `golem` is the Doom machine's blocks with the bus decode and arbiter
-in front of the cache.
+The Arty A7-35T, XC7A35T in CSG324. `Ddr3.Board` supplies the DDR3 pins and the
+clock/UART/LED group (SSTL135 for DDR3, LVCMOS33 for the rest);
+`Golem/Board.wiz` adds JA, JB and the buttons.
+
+| resource | pins | what |
+|---|---|---|
+| `clk` | E3 | 100 MHz oscillator |
+| `ddr3_a[13:0]`, `ddr3_ba[2:0]`, `ddr3_dq[15:0]`, `ddr3_dm[1:0]` | 35 pins | DDR3 address/data (SSTL135) |
+| `ddr3_ck_p/n`, `ddr3_dqs_p0/n0`, `ddr3_dqs_p1/n1` | 6 | DDR3 clock and strobes (DIFF_SSTL135) |
+| `ddr3_ras_n`, `cas_n`, `we_n`, `cs_n`, `cke`, `odt`, `reset_n` | 7 | DDR3 control |
+| `uart_rx` / `uart_tx` | A9 / D10 | FT2232 channel B, 1 Mbaud |
+| `led[3:0]` | H5 J5 T9 T10 | LD0 calDone, LD1 calFail, LD2 core, LD3 bus |
+| `ja[7:0]` | G13 B11 A11 D12 D13 B18 A18 K16 | PmodOLEDrgb (PMODEN, VCCEN, RES, D/C, SCLK, MOSI, CS) |
+| `jb[7:0]` | E15 E16 D15 C15 J17 J18 K15 J15 | sound PWM (JB1) and its complement (JB2) |
+| `btn[3:0]` | D9 C9 B9 B8 | BTN0 resets the core |
+
+That is 75 package pins and 55 top-level ports (48 DDR3 pads are one-bit ports in the
+netlist; JA, JB, the LEDs and the buttons are buses). The `golem board` check asserts
+both counts, that every port has a pin of the right width, that no package pin is
+used twice, and that the XDC has one `PACKAGE_PIN` line per pin.
+
+### Clocks
+
+`Ddr3.Board.clocking` is a `PLLE2_BASE` from the 100 MHz oscillator: VCO 800 MHz, then
+CLKOUT0 ÷ 8 = **100 MHz** (the circuit's `sys` clock), CLKOUT1 ÷ 2 = 400 MHz
+(`sys4x`), CLKOUT2 ÷ 2 at 90° = 400 MHz (`sys4xDqs`), CLKOUT3 ÷ 4 = 200 MHz
+(`ref200`), and `LOCKED` to the circuit's `locked`. `golem` runs the pipelined core at
+the full 100 MHz. `golemMc` cannot slow the PLL to 50 MHz — the PHY needs 400/200 MHz
+from the same VCO — so it keeps the 100 MHz board clock and runs the multi-cycle core
+behind `Circuit.half`: every register and memory write is enabled every other cycle,
+which is 50 MHz effective. The `golem board` check computes the four clocks from the
+PLL parameters and compares them with 100/400/400/200 MHz.
+
+The timing target is 100 MHz. `bit` reads the last nextpnr report, writes
+`build/a35t/golem.timing`, and fails unless the `ck_CLKOUT0_g` line says
+`PASS at 100.00 MHz`; `timing` prints the same report without rebuilding. The build in
+this tree (yosys 0.70, nextpnr-xilinx 1.0.0, Project X-Ray): 15894 netlist nodes,
+5063 LUTs, 3815 flip-flops, 4 DSP48E1, 23 RAMB36E1 + 4 RAMB18E1 + 12 RAM32M;
+nextpnr 107.30 MHz, `PASS at 100.00 MHz`, into `build/a35t/golem.bit`. The bitstream
+has not been loaded: no hardware control was authorised for this run.
+
+### Reset domains
+
+Three, all named by functions in `Golem/Board.wiz` and checked at values by
+`GBoard.resetProblems`:
+
+* **sys** — `BTN0` (btn bit 0) or `!(calDone | calFail)`: the core, the UART, the
+  framebuffer and the bus. The core is held until the DDR3 calibration has finished,
+  either way, so a failed calibration still lets the boot image print "DDR fail"
+  (`GBoard.coreReset`). The MMIO status at `0x8000_0040` reports the same bits.
+* **phy** — `phyRst = !(rstCnt == 255)`, with `rstCnt` counting only while `locked`:
+  255 cycles after the PLL locks (`GBoard.phyReset`).
+* **ddr** — the controller's `rstN` to the DDR3 pins, from its own reset sequence.
+
+The LEDs carry the calibration: LD0 `calDone`, LD1 `calFail`, LD2 the core's
+heartbeat, LD3 the bus's (`GBoard.boardLed`).
+
+### Boot image
+
+The default is the UART loader, `Prog.boot`, the image that is already proven on the
+Arty: it waits for the calibration, prints `wiz-rv boot` and `DDR ok` (or
+`DDR fail`), then accepts `rvload` records and jumps to the loaded program. That is
+the image to use for a C program (`sw/golem.c`, linked at `0x40000000`) or Doom.
+`--boot rom` selects `GProg.golem` instead, the self-contained bring-up ROM: banner,
+DDR status, timer, three framebuffer pixels and a routine copied into and called from
+DDR. The host-loader port of the arbiter is tied off on the board; the UART loader is
+the only way in. The choice is written to `build/golem.boot` so a bitstream's image is
+recorded next to it.
+
+### Building
+
+```sh
+grail build                                  # the library and .grail/bin/golem
+scripts/golem-board.sh board                 # the pin/clock/reset check
+scripts/golem-board.sh gen                   # build/golem.v, build/golem.xdc
+scripts/golem-board.sh synth                 # gen + yosys (utilisation in .stat)
+scripts/golem-board.sh bit                   # + nextpnr, fasm2frames, xc7frames2bit
+scripts/golem-board.sh timing                # the 100 MHz report from the last run
+scripts/golem-board.sh dry                   # board + gen only, then the hardware step
+```
+
+`gen` writes the design in the PLL wrapper (`Verilog.emitTop`), checks the netlist's
+ports against the pin table (`Xdc.check`) and the XDC's pin-line count, and records the
+boot image. `synth` runs `synth_xilinx -flatten -abc9 -arch xc7`; if yosys is missing it
+says so and leaves the Verilog and XDC in place (the dry-run path). `bit` runs
+`nextpnr-xilinx --chipdb … --xdc … --fasm … --sdf …`, `fasm2frames` and
+`xc7frames2bit`, and writes `build/a35t/golem.bit`, `golem.timing` and `golem.report`.
+`--variant mc` builds `golem_mc`; `--variant both` builds both. `scripts/golem-board.sh`
+finds yosys, nextpnr-xilinx, fasm2frames, xc7frames2bit, the chip database, Project
+X-Ray's database and fasm2frames' Python modules (prjxray, fasm, pyyaml, simplejson,
+intervaltree) on `PATH`, in `ARTY_CHIPDB`/`PRJXRAY_DB_DIR`/`PRJXRAY_PYTHON_DIR`, or in
+the Nix store (`GOLEM_YOSYS`, `GOLEM_NEXTPNR`, `GOLEM_FASM2FRAMES`,
+`GOLEM_XC7FRAMES2BIT`, `GOLEM_CHIPDB`, `GOLEM_DB` override them).
+
+### The hardware step
+
+The bitstream is loaded into SRAM (not flashed) with
+
+```sh
+openFPGALoader -b arty_a7_35t build/a35t/golem.bit
+```
+
+then the UART at 1 Mbaud (`stty -F /dev/serial/by-id/usb-Digilent_*-if01-port0 1000000 raw -echo`,
+`cat` the port): the default loader prints `wiz-rv boot` and, after the DDR3
+calibration, `DDR ok` or `DDR fail`; LD0/LD1 show the same. Then
+`rvload PORT prog.bin` (or `rvload PORT doom.bin doom1.wad`) loads a program into DDR
+and jumps to it. A failed calibration is visible on the UART and the LEDs, and the
+MMIO status register is readable by software.
+
+What remains is the board run itself: place and route at 100 MHz, load the bitstream,
+capture the calibration line, and run the C image or Doom over `rvload`. None of the
+logic is new: `golem` is the Doom machine's blocks with the bus decode and arbiter in
+front of the cache, and the Doom flow already ran this DDR3/OLED pairing on the same
+board.
+
 
 ## Doom
 

@@ -1,0 +1,274 @@
+import Rv.Golem.Prog
+import Rv.Progs
+import Rv.Asm
+import Ddr3.Board
+import Hdl.Xdc
+import Hdl.Arty
+import Text
+-- golem on the Arty A7-35T (XC7A35T, CSG324): the board image, the PLL clocking, the
+-- pin table, the XDC and the reset domains, as values the flow and the test both check.
+--
+-- This module is deliberately small (no `Rv.Golem`): `tests/golem_board.wiz` runs its
+-- `problems` without elaborating the SoC, and `Golem.wiz` uses the reset/LED policy
+-- here (`coreReset`, `phyReset`, `boardLed`) so the check tests the design's function,
+-- not a copy. `src/Rv/GolemBoard.wiz` adds the circuits and netlists.
+--
+--   GBoard.clocking         wiz-ddr3's PLL: 100 MHz input, 800 MHz VCO, 100 MHz sys,
+--                           400 MHz sys4x, 400 MHz sys4xDqs (90°), 200 MHz ref200
+--   GBoard.xdc              wiz-ddr3's DDR3/UART/LED constraints plus JA, JB and BTN
+--   GBoard.problems         the `golem board` check: pin count, clocks, reset domains
+--
+-- The clock is the same for both variants. `golem` runs the pipelined core at 100 MHz;
+-- `golemMc` is the multi-cycle core behind `Circuit.half`, so its registers are enabled
+-- every other cycle (50 MHz effective) while the DDR3 controller and the bus stay at
+-- 100 MHz. The PLL cannot be slowed to 50 for golemMc: the PHY needs sys4x at 400 and
+-- ref200 at 200 from the same VCO.
+--
+-- Boot image (the board has no host loader: `Golem.step` ties the arbiter's second
+-- master off). The default is `Prog.boot`, the UART loader that is already proven on
+-- the Arty: it waits for the calibration, prints "wiz-rv boot" and "DDR ok"/"DDR fail",
+-- then accepts records from `rvload`. `--boot rom` selects `GProg.golem`, the
+-- self-contained bring-up ROM (banner, DDR status, timer, three framebuffer pixels and
+-- a routine called in DDR). A C image (`sw/golem.c`) is linked at 0x40000000 and sent
+-- by the default loader; it is not a ROM image itself.
+
+------------------------------------------------------------------------------------
+-- Boot images
+
+inductive GBoard.Boot where
+  | rom
+  | loader
+
+def GBoard.Boot.name : GBoard.Boot → String
+  | .rom => "rom"
+  | .loader => "loader"
+
+def GBoard.Boot.prog : GBoard.Boot → List Nat
+  | .rom => Asm.assemble GProg.golem
+  | .loader => Asm.assemble Prog.boot
+
+def GBoard.bootOf (s : String) : Option GBoard.Boot :=
+  match Hdl.strEq s "rom", Hdl.strEq s "loader" with
+  | .true, _ => .some .rom
+  | _, .true => .some .loader
+  | _, _ => .none
+
+-- the proven board image: the loader, so a C image (or Doom) can be sent over the UART
+def GBoard.defaultBoot : GBoard.Boot := .loader
+
+------------------------------------------------------------------------------------
+-- Clocks
+
+-- Ddr3.Board.clocking: VCO 800 MHz from the 100 MHz oscillator; CLKOUT0 100 MHz (the
+-- circuit's clock), CLKOUT1 400 MHz (sys4x), CLKOUT2 400 MHz at 90° (sys4xDqs),
+-- CLKOUT3 200 MHz (ref200); LOCKED to the circuit's `locked`.
+def GBoard.clocking : Clocking := Board.clocking
+
+def GBoard.clockHz : Nat := 100000000
+
+def GBoard.pllText (k : String) : String :=
+  match Hdl.lookup k (PrimParam.pairs Board.clocking.params) with
+  | .some s => s
+  | .none => ""
+
+def GBoard.pllNat (k : String) : Nat :=
+  match String.parseNat (GBoard.pllText k) with
+  | .some n => n
+  | .none => 0
+
+def GBoard.vcoHz : Nat :=
+  GBoard.clockHz * GBoard.pllNat "CLKFBOUT_MULT" / GBoard.pllNat "DIVCLK_DIVIDE"
+
+def GBoard.clkoutHz (k : Nat) : Nat :=
+  GBoard.vcoHz / GBoard.pllNat ("CLKOUT" <+> Hdl.show k <+> "_DIVIDE")
+
+-- golem: the circuit's clock is CLKOUT0; golemMc halves it with a clock enable
+def GBoard.coreHz : Nat := GBoard.clkoutHz 0
+def GBoard.mcDiv : Nat := 2
+def GBoard.mcHz : Nat := GBoard.coreHz / GBoard.mcDiv
+
+def GBoard.clockSummary : String :=
+  Hdl.show (GBoard.clkoutHz 0 / 1000000) <+> "/" <+> Hdl.show (GBoard.clkoutHz 1 / 1000000)
+    <+> "/" <+> Hdl.show (GBoard.clkoutHz 2 / 1000000) <+> "/" <+> Hdl.show (GBoard.clkoutHz 3 / 1000000)
+    <+> " MHz"
+
+------------------------------------------------------------------------------------
+-- Pins
+
+-- JA: the PmodOLEDrgb (PMODEN, VCCEN, RES, D/C, SCLK, MOSI, CS); JB: the sound PWM and
+-- its complement (as the Doom machine); BTN0 resets the core. LVCMOS33, no SLEW FAST
+-- on the Pmods (the OLED's SPI picked up glitches with it, app/doomgen.wiz).
+def GBoard.extraPins : List XdcPin :=
+  List.append (Bd.vec "ja" 0 (Bd.words "G13 B11 A11 D12 D13 B18 A18 K16"))
+  (List.append (Bd.vec "jb" 0 (Bd.words "E15 E16 D15 C15 J17 J18 K15 J15"))
+    (Bd.vec "btn" 0 (Bd.words "D9 C9 B9 B8")))
+
+def GBoard.pins : List XdcPin := List.append Board.pins GBoard.extraPins
+
+def GBoard.xdc : String :=
+  Board.xdc ++ Hdl.concat (Hdl.map Xdc.pinLine GBoard.extraPins)
+
+-- the pin table as `Hdl.Xdc` sees it: Arty's bus resources plus the DDR3 pads as
+-- one-bit ports (the netlist flattens `Pads.t`/`Pads.io` the same way)
+def GBoard.asOne (p : XdcPin) : XPin := XPin.one p.port p.pin
+
+def GBoard.ddrPins : List XPin :=
+  Hdl.map GBoard.asOne (List.filter (fun (p : XdcPin) => String.startsWith p.port "ddr3_") Board.pins)
+
+def GBoard.checkBoard : XBoard :=
+  XBoard.mk "E3" 10000 "LVCMOS33"
+    (List.append Arty.pins (List.cons (XPin.one "clk" "E3") GBoard.ddrPins))
+
+-- The ports the PLL wrapper drives (Clocking.inDecls drops them from the top): the
+-- netlist keeps them, the board's pin table does not have them.
+def GBoard.driven (p : NetPort) : Bool :=
+  List.any (fun (q : String × String) => Hdl.strEq p.name q.1)
+    (List.append Board.clocking.clocks Board.clocking.signals)
+
+def GBoard.topNetlist (n : Netlist) : Netlist :=
+  Netlist.mk n.name n.nodes n.regs
+    (List.filter (fun (p : NetPort) => Bool.not (GBoard.driven p)) n.inputs)
+    n.outputs n.hints n.mems n.errors
+
+def GBoard.ddrPorts : List (String × Nat) :=
+  Hdl.map (fun (p : XPin) => (XPin.port p, XPin.width p)) GBoard.ddrPins
+
+-- the wrapper's top-level ports: `clk` and the circuit's non-clock ports
+def GBoard.topPorts : List (String × Nat) :=
+  .cons ("clk", 1) (.cons ("uart_rx", 1) (.cons ("btn", 4) (.cons ("uart_tx", 1)
+    (.cons ("led", 4) (.cons ("ja", 8) (.cons ("jb", 8) GBoard.ddrPorts))))))
+
+def GBoard.pinCount : Nat := List.length GBoard.pins
+def GBoard.portsCount : Nat := List.length GBoard.topPorts
+
+-- the netlist's port count: the board's ports less `clk` (the wrapper adds it), plus
+-- the four inputs the PLL wrapper drives
+def GBoard.corePorts : Nat :=
+  (GBoard.portsCount - 1) + List.length (List.append Board.clocking.clocks Board.clocking.signals)
+
+-- the pin lines in the XDC (one `set_property … PACKAGE_PIN` per pin)
+def GBoard.xdcPinCount : Nat :=
+  List.length (List.filter (fun (l : String) => String.contains l "PACKAGE_PIN")
+    (String.splitOn GBoard.xdc "\n"))
+
+------------------------------------------------------------------------------------
+-- Reset domains and the LED status, as the design implements them
+
+def GBoard.resets : List (String × String) :=
+  .cons ("sys", "BTN0 or !(calDone | calFail): the core, UART, OLED and bus")
+  (.cons ("phy", "held for 255 locked cycles, then released: the DDR3 PHY")
+  (.cons ("ddr", "the controller's rstN to the DDR3 pins") .nil))
+
+-- the two bit helpers `Rv.Core` also has (kept local so this module does not import a core)
+def GBoard.bitOf {r : HwTy → Type} [Hw r] {ω n : Nat} (i : Nat) (w : r (HwTy.bits n)) : r HwTy.bit :=
+  Hw.slice i 1 w
+def GBoard.isK {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) (k : Nat) : r HwTy.bit :=
+  Hw.eq x (Hw.lit n k)
+
+-- the board's reset and status policy, used by `Golem.step` and `Golem.board`:
+--   the core is held while BTN0 is pressed and until the calibration has finished
+--   (done or failed, so a failed calibration can still print "DDR fail"); the PHY is
+--   held for 255 cycles after the PLL locks; LD0 calDone, LD1 calFail, LD2 core, LD3 bus.
+def GBoard.calEnd {r : HwTy → Type} [Hw r] (done fail : r HwTy.bit) : r HwTy.bit := Hw.or done fail
+def GBoard.coreReset {r : HwTy → Type} [Hw r] (btn : r (HwTy.bits 4)) (calDone calFail : r HwTy.bit) : r HwTy.bit :=
+  Hw.or (GBoard.bitOf 0 btn) (Hw.not (GBoard.calEnd calDone calFail))
+def GBoard.phyReset {r : HwTy → Type} [Hw r] (rstCnt : r (HwTy.bits 8)) : r HwTy.bit := Hw.not (GBoard.isK rstCnt 255)
+def GBoard.boardLed {r : HwTy → Type} [Hw r] (beat : r (HwTy.bits 27)) (led0 calDone calFail : r HwTy.bit) : r (HwTy.bits 4) :=
+  Hw.cat (GBoard.bitOf 26 beat) (Hw.cat led0 (Hw.cat calFail calDone))
+
+def GBoard.b1 (b : Bool) : BitVec 1 := Bool.toBits b
+def GBoard.b4 (n : Nat) : BitVec 4 := BitVec.ofNat 4 n
+
+-- the core's reset at values, through the board's own function
+def GBoard.coreResetVal (btn0 done fail : Bool) : Bool :=
+  Nat.beq (GBoard.coreReset (r := HwTy.El) (GBoard.b4 (if btn0 then 1 else 0)) (GBoard.b1 done) (GBoard.b1 fail)).toNat 1
+
+def GBoard.phyResetVal (cnt : Nat) : Bool :=
+  Nat.beq (GBoard.phyReset (r := HwTy.El) (BitVec.ofNat 8 cnt)).toNat 1
+
+def GBoard.ledVal (beat : Nat) (led0 done fail : Bool) : Nat :=
+  (GBoard.boardLed (r := HwTy.El) (BitVec.ofNat 27 beat) (GBoard.b1 led0) (GBoard.b1 done) (GBoard.b1 fail)).toNat
+
+------------------------------------------------------------------------------------
+-- The check
+
+def GBoard.portProblems : List (String × Nat) → List String
+  | .nil => .nil
+  | .cons q qs => match XPin.find q.1 GBoard.checkBoard.pins with
+    | .none => .cons ("no pin for port " <+> q.1) (GBoard.portProblems qs)
+    | .some x => match Nat.beq q.2 (XPin.width x) with
+      | .true => GBoard.portProblems qs
+      | .false => .cons ("port " <+> q.1 <+> " has " <+> Hdl.show q.2 <+> " bits, the board's "
+          <+> q.1 <+> " " <+> Hdl.show (XPin.width x)) (GBoard.portProblems qs)
+
+def GBoard.dupPorts : List XPin → List String → List String
+  | .nil, _ => .nil
+  | .cons p ps, seen => match Hdl.member (XPin.port p) seen with
+    | .true => .cons ("duplicate pin entry for port " <+> XPin.port p) (GBoard.dupPorts ps seen)
+    | .false => GBoard.dupPorts ps (.cons (XPin.port p) seen)
+
+def GBoard.pinPairsOf : XPin → List (String × String)
+  | .one port pin => .cons (port, pin) .nil
+  | .bus port ps => Hdl.map (fun (pin : String) => (port, pin)) ps
+
+def GBoard.pinPairs : List XPin → List (String × String)
+  | .nil => .nil
+  | .cons p ps => List.append (GBoard.pinPairsOf p) (GBoard.pinPairs ps)
+
+def GBoard.dupPins : List (String × String) → List String → List String
+  | .nil, _ => .nil
+  | .cons q qs, seen => match Hdl.member q.2 seen with
+    | .true => .cons ("package pin " <+> q.2 <+> " is used twice") (GBoard.dupPins qs seen)
+    | .false => GBoard.dupPins qs (.cons q.2 seen)
+
+def GBoard.clockProblem (k hz : Nat) : List String :=
+  match Nat.beq (GBoard.clkoutHz k) hz with
+  | .true => .nil
+  | .false => .cons ("CLKOUT" <+> Hdl.show k <+> " is " <+> Hdl.show (GBoard.clkoutHz k)
+      <+> " Hz, not " <+> Hdl.show hz) .nil
+
+def GBoard.clockProblems : List String :=
+  List.append (GBoard.clockProblem 0 100000000)
+  (List.append (GBoard.clockProblem 1 400000000)
+  (List.append (GBoard.clockProblem 2 400000000) (GBoard.clockProblem 3 200000000)))
+
+def GBoard.resetProblems : List String :=
+  List.append
+    (List.append
+      (List.append
+        (List.append (match GBoard.coreResetVal .false .false .false with
+          | .true => .nil | .false => .cons "the core is not held until calibration (nothing done)" .nil)
+          (match GBoard.coreResetVal .false .true .false with
+          | .false => .nil | .true => .cons "the core is not released on calDone" .nil))
+        (match GBoard.coreResetVal .false .false .true with
+        | .false => .nil | .true => .cons "the core is not released on calFail" .nil))
+      (match GBoard.coreResetVal .true .true .true with
+      | .true => .nil | .false => .cons "BTN0 does not reset the core" .nil))
+    (List.append
+      (List.append (match GBoard.phyResetVal 255 with
+        | .false => .nil | .true => .cons "the PHY reset lasts past 255 locked cycles" .nil)
+        (match GBoard.phyResetVal 254 with
+        | .true => .nil | .false => .cons "the PHY reset is not held for 255 cycles" .nil))
+    (List.append (match GBoard.ledVal 0 .false .true .false with
+      | 1 => .nil | _ => .cons "LD0 is not calDone" .nil)
+    (List.append (match GBoard.ledVal 0 .false .false .true with
+      | 2 => .nil | _ => .cons "LD1 is not calFail" .nil)
+      (match GBoard.ledVal 0 .true .false .false with
+      | 4 => .nil | _ => .cons "LD2 is not the core's heartbeat" .nil))))
+
+def GBoard.countProblems : List String :=
+  List.append (match Nat.beq GBoard.pinCount 75 with
+    | .true => .nil | .false => .cons ("the board has " <+> Hdl.show GBoard.pinCount <+> " pins, not 75") .nil)
+  (List.append (match Nat.beq GBoard.portsCount 55 with
+    | .true => .nil | .false => .cons ("the top has " <+> Hdl.show GBoard.portsCount <+> " ports, not 55") .nil)
+  (match Nat.beq GBoard.xdcPinCount GBoard.pinCount with
+  | .true => .nil
+  | .false => .cons ("the XDC has " <+> Hdl.show GBoard.xdcPinCount <+> " pin lines, the table "
+      <+> Hdl.show GBoard.pinCount) .nil))
+
+def GBoard.problems : List String :=
+  List.append (GBoard.portProblems GBoard.topPorts)
+  (List.append GBoard.countProblems
+  (List.append (GBoard.dupPorts GBoard.checkBoard.pins .nil)
+  (List.append (GBoard.dupPins (GBoard.pinPairs GBoard.checkBoard.pins) .nil)
+  (List.append GBoard.clockProblems GBoard.resetProblems))))
