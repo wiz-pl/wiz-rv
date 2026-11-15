@@ -37,7 +37,7 @@ def branchE : String := report 4 Prog.branch 400
 def sortE : String := report 4 Prog.sort 6000
 #eval sortE
 def trapsE : List String :=
-  .cons (report 4 Prog.trapLoad 50) (.cons (report 4 Prog.trapStore 50) (.cons (report 4 Prog.trapJump 50)
+  .cons (report 4 Prog.trapLoad 50) (.cons (report 4 Prog.trapStore 50) (.cons (report 4 Prog.jumpHalf 50)
   (.cons (report 4 Prog.trapIllegal 50) (.cons (report 4 Prog.trapEcall 50) (.cons (report 4 Prog.x16 50) .nil)))))
 #eval trapsE
 -- RV32I: x16 is a register
@@ -54,6 +54,14 @@ def mulI : String := report 5 Prog.muldivShort 400
 #eval mulI
 def mulIM : String := reportM 5 .true Prog.muldivShort 3000
 #eval mulIM
+-- the C extension: the compressed program and its uncompressed twin (same state)
+def cE : String := report 4 (Prog.cProg Prog.cPad) 800
+#eval cE
+def cUE : String := report 4 Prog.uProg 800
+#eval cUE
+-- an illegal 16-bit encoding (C.FLD: no FP) and the reserved zero C.ADDI4SPN
+def cBadE : List String := .cons (report 4 Prog.cIllegal 20) (.cons (report 4 Prog.cIllegal0 20) .nil)
+#eval cBadE
 -- the Doom machine's boot loader (on-chip RAM, 16 KB), loading a program into DDR over
 -- the UART and running it there (the specification models every I/O load as the UART's:
 -- the boot loader's read of the DDR status takes the first byte, 1: "DDR ok")
@@ -68,5 +76,5 @@ def ctestE : String := (fun (r : Ls.Result) => Nat.repr r.instrs ++ " instructio
     ++ String.mk (List.map Char.mk r.out) ++ "\" "
     ++ (match r.problems with
       | .nil => "agrees"
-      | ps => "DISAGREES" ++ lines ps)) (PLs.run 5 12 .true (Hex.words CTest.hex) 40000)
+      | ps => "DISAGREES" ++ lines ps)) (PLs.run 5 12 .true (Hex.halves CTest.hex) 40000)
 #eval ctestE

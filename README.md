@@ -30,6 +30,21 @@ ECALL/EBREAK) and `epc` (`mepc`: the PC of the trapping instruction). FENCE is a
 initial contents and execution starts at 0. A store to an address with bit 31 set
 writes its low byte to the output port instead.
 
+The **C extension** (compressed 16-bit instructions, RV32C) is in both cores: the
+subset `C.ADDI4SPN`, `C.LW`/`C.SW`, `C.ADDI`/`C.LI`/`C.LUI`/`C.ADDI16SP`,
+`C.MV`/`C.ADD`, `C.J`/`C.JAL`/`C.JR`/`C.JALR`/`C.BEQZ`/`C.BNEZ`, `C.LWSP`/`C.SWSP`,
+`C.SLLI`/`C.SRLI`/`C.SRAI`/`C.ANDI`/`C.SUB`/`C.XOR`/`C.OR`/`C.AND`, `C.NOP` and
+`C.EBREAK`. The floating-point forms (`C.FLD`, `C.FLW`, `C.FSD`, `C.FSW` and their
+stack forms) and the RV64-only `C.SUBW`/`C.ADDW` are illegal with the 16-bit encoding
+as `tval`. The expansion to the equivalent 32-bit instruction is written once, in
+`Rv.expand` (`src/Rv/Isa.wiz`); the cores' gate-level `Cx.expand` (`src/Rv/Core.wiz`)
+is the same table, and `tests/spec.wiz` checks the two agree on all 65536 encodings.
+`decode` is the only decode path: it expands a 16-bit word and both cores consume the
+expanded form. A 32-bit instruction may start on any halfword boundary; when one does,
+the core reads its two words (a fetch of `pc + 2` in the multi-cycle core's `J` phase,
+one held cycle in the pipeline's D stage). Programs are images of 16-bit halfwords, so
+the assembler places compressed and uncompressed instructions in one stream.
+
 ## The core
 
 Multi-cycle, a 32-bit datapath, everything big in block RAM: the memory as four byte

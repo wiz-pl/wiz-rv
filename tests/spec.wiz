@@ -1,7 +1,15 @@
 -- test: run
 import Rv.Progs
+import Rv.Core
 import IO
 -- The ISA specification on its own: programs assembled and run on `Rv.step`.
+--
+-- Two checks beyond the reports:
+--  * the C expansion: `Rv.expand` (the specification's, on numbers) and `Cx.expand`
+--    (the cores', the gate-level function `decode` calls) agree on all 65536 16-bit
+--    encodings, including which are illegal;
+--  * a compressed program and its uncompressed twin reach the same architectural
+--    state (the same trap, PC, every register, the data memory and the output).
 
 def showBytes : List Nat → String
   | .nil => ""
@@ -18,10 +26,58 @@ def reportTrap (name : String) (p : List Asm) (steps : Nat) : IO Unit :=
   IO.println (name ++ ": cause " ++ Nat.repr s.trap ++ ", tval " ++ Nat.repr s.tval.toNat
     ++ ", epc " ++ Nat.repr s.epc.toNat ++ ", pc " ++ Nat.repr s.pc.toNat)
 
+------------------------------------------------------------------------------------
+-- The expansion: the specification against the cores' gate-level function
+
+def cxw (h : Nat) : Nat := (Cx.expand (r := HwTy.El) (BitVec.ofNat 16 h)).toNat
+
+def expandBad (h : Nat) : Bool := match Rv.expand h with
+  | .some w => Bool.not (Nat.beq (cxw h) w)
+  | .none => Bool.not (Nat.beq (cxw h) h)
+
+def expandCount : Nat → Nat → Nat
+  | .zero, bad => bad
+  | .succ k, bad => expandCount k (if expandBad k then Nat.succ bad else bad)
+
+------------------------------------------------------------------------------------
+-- A compressed program and its uncompressed twin
+
+def vecUp : Nat → (Nat → Nat) → List Nat
+  | .zero, f => .nil
+  | .succ k, f => List.append (vecUp k f) (.cons (f k) .nil)
+
+def natsEq : List Nat → List Nat → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => Bool.and (Nat.beq a b) (natsEq as bs)
+  | _, _ => .false
+
+-- everything the twin must share: the trap, the PC, all 32 registers, the data memory
+-- (from 256, past both programs' code) and the output
+def stateVec (c : Cfg) (s : Arch) : List Nat :=
+  List.append (.cons s.trap (.cons s.pc.toNat .nil))
+    (List.append (vecUp 32 (fun i => (Rv.reg s i).toNat))
+      (List.append (vecUp 768 (fun i => Rv.byte c s (Rv.w32 (256 + i))))
+        (List.reverse s.out)))
+
+def pad : Nat := Prog.cPad
+
+def run2 (p : List Asm) : Arch :=
+  Rv.run (Cfg.rv32e 12) 400 (Arch.start (Cfg.rv32e 12) (Asm.assemble p))
+
+def twinOk : Bool := natsEq (stateVec (Cfg.rv32e 12) (run2 (Prog.cProg pad))) (stateVec (Cfg.rv32e 12) (run2 Prog.uProg))
+
 def main : IO Unit := do
   report "sum" Prog.sum 100;
   reportTrap "trapLoad" Prog.trapLoad 50;
   reportTrap "trapStore" Prog.trapStore 50;
-  reportTrap "trapJump" Prog.trapJump 50;
+  report "jumpHalf" Prog.jumpHalf 50;
   reportTrap "trapIllegal" Prog.trapIllegal 50;
-  reportTrap "trapEcall" Prog.trapEcall 50
+  reportTrap "trapEcall" Prog.trapEcall 50;
+  let bad := expandCount 65536 0;
+  IO.println ("C expansion: " ++ (if Nat.beq bad 0 then "PASS" else "FAIL " ++ Nat.repr bad)
+    ++ " (65536 encodings, spec Rv.expand = core Cx.expand)");
+  IO.println ("C twin: " ++ (if twinOk then "PASS" else "FAIL") ++ " (pad " ++ Nat.repr pad
+    ++ ", " ++ Nat.repr (List.length (Asm.assemble (Prog.cProg pad))) ++ " halfwords)");
+  IO.println ("C compressed: trap " ++ Nat.repr (run2 (Prog.cProg pad)).trap
+    ++ ", pc " ++ Nat.repr (run2 (Prog.cProg pad)).pc.toNat
+    ++ ", out " ++ showBytes (List.reverse (run2 (Prog.cProg pad)).out))

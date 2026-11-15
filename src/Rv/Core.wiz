@@ -49,6 +49,7 @@ def Ph.x : Nat := 6   -- M: the product (one cycle)
 def Ph.v : Nat := 7   -- M: division, one quotient bit per cycle
 def Ph.p : Nat := 8   -- a bus access (DDR), until it is answered
 def Ph.q : Nat := 9   -- after a cache line was filled: read it again
+def Ph.j : Nat := 10  -- C: read the second word of a 32-bit instruction at pc[1] = 1
 
 -- The L1 cache in front of DDR (unified: the core reads one word at a time, an
 -- instruction or data): 2^lb lines of 16 bytes in block RAM, direct-mapped, write-through
@@ -105,6 +106,11 @@ structure CoreSt (ab wb : Nat) (r : HwTy → Type) where
   rbuf : r B128
   rline : r B32
   bnew : r W1     -- the first cycle of a store's bus phase (the L1 is updated then)
+  w1 : r B32      -- C: the word at the instruction's pc, while `j` fetches the next one
+  ins : r B32     -- C: a 32-bit instruction at pc[1] = 1, assembled from two words
+  half : r W1     -- C: `ins` is the instruction (the D phase after `j`)
+  al : r W1       -- C: bit 1 of the instruction's pc (a register: the 2-cycle proofs
+                  -- are about an aligned 32-bit instruction and take it as 0)
   deriving Bundle
 
 -- what the core shows: the trap code (0 while running), and a byte written to the
@@ -206,15 +212,156 @@ structure Dec (r : HwTy → Type) where
   immB : r B32
   immU : r B32
   immJ : r B32
+  c : r W1        -- a 16-bit (C) instruction: the PC advances by 2
+  iw : r B32      -- the instruction word after expansion (`w` for a 32-bit one)
+
+------------------------------------------------------------------------------------
+-- The C extension, at the gate level
+--
+-- One expansion function, `Cx.expand`, called by `decode` and so shared by both cores
+-- (the pipeline calls `decode` too: it has no second decode path). `Rv.expand` in
+-- src/Rv/Isa.wiz is the same function on numbers; `tests/spec.wiz` checks all 65536
+-- encodings agree. An illegal encoding expands to its own 16-bit word (zero-extended),
+-- whose low bits are not 11, so `decode` marks it illegal and `tval` is the encoding.
+
+def Cx.b {r : HwTy → Type} [Hw r] (i : Nat) (h : r B16) : r W1 := Hw.slice i 1 h
+def Cx.rd {r : HwTy → Type} [Hw r] (h : r B16) : r B5 := Hw.slice 7 5 h
+def Cx.rs2 {r : HwTy → Type} [Hw r] (h : r B16) : r B5 := Hw.slice 2 5 h
+def Cx.shamt {r : HwTy → Type} [Hw r] (h : r B16) : r B5 := Hw.slice 2 5 h
+-- 8 + bits[4:2] (x8 … x15)
+def Cx.rdp {r : HwTy → Type} [Hw r] (h : r B16) : r B5 :=
+  Hw.cat (Hw.lit 2 2) (Hw.slice 2 3 h)
+-- 8 + bits[9:7]
+def Cx.rs1p {r : HwTy → Type} [Hw r] (h : r B16) : r B5 :=
+  Hw.cat (Hw.lit 2 2) (Hw.slice 7 3 h)
+
+def Cx.I12 {r : HwTy → Type} [Hw r] (op f3 : Nat) (rd rs1 : r B5) (imm : r B12) : r B32 :=
+  Hw.cat imm (Hw.cat rs1 (Hw.cat (Hw.lit 3 f3) (Hw.cat rd (Hw.lit 7 op))))
+def Cx.S12 {r : HwTy → Type} [Hw r] (op f3 : Nat) (rs1 rs2 : r B5) (imm : r B12) : r B32 :=
+  Hw.cat (Hw.slice 5 7 imm) (Hw.cat rs2 (Hw.cat rs1
+    (Hw.cat (Hw.lit 3 f3) (Hw.cat (Hw.slice 0 5 imm) (Hw.lit 7 op)))))
+def Cx.R {r : HwTy → Type} [Hw r] (op f3 f7 : Nat) (rd rs1 rs2 : r B5) : r B32 :=
+  Hw.cat (Hw.lit 7 f7) (Hw.cat rs2 (Hw.cat rs1
+    (Hw.cat (Hw.lit 3 f3) (Hw.cat rd (Hw.lit 7 op)))))
+def Cx.U {r : HwTy → Type} [Hw r] (op : Nat) (rd : r B5) (imm : r B32) : r B32 :=
+  Hw.cat (Hw.slice 12 20 imm) (Hw.cat rd (Hw.lit 7 op))
+def Cx.B {r : HwTy → Type} [Hw r] (f3 : Nat) (rs1 rs2 : r B5) (imm : r B32) : r B32 :=
+  Hw.cat (Hw.slice 12 1 imm) (Hw.cat (Hw.slice 5 6 imm) (Hw.cat rs2 (Hw.cat rs1
+    (Hw.cat (Hw.lit 3 f3) (Hw.cat (Hw.slice 1 4 imm)
+      (Hw.cat (Hw.slice 11 1 imm) (Hw.lit 7 Op.branch)))))))
+def Cx.J {r : HwTy → Type} [Hw r] (rd : r B5) (imm : r B32) : r B32 :=
+  Hw.cat (Hw.slice 20 1 imm) (Hw.cat (Hw.slice 1 10 imm) (Hw.cat (Hw.slice 11 1 imm)
+    (Hw.cat (Hw.slice 12 8 imm) (Hw.cat rd (Hw.lit 7 Op.jal)))))
+
+-- the halfwords' immediates as 12-bit I/S fields (zero-extended or sign-extended)
+def Cx.shamt12 {r : HwTy → Type} [Hw r] (h : r B16) : r B12 :=
+  Hw.cat (Hw.lit 7 0) (Cx.shamt h)
+def Cx.shamtSra {r : HwTy → Type} [Hw r] (h : r B16) : r B12 :=
+  Hw.cat (Hw.lit 7 32) (Cx.shamt h)
+-- imm[5|4:0] sign-extended to 12
+def Cx.imm6 {r : HwTy → Type} [Hw r] (h : r B16) : r B12 :=
+  Hw.cat (rep 6 (Cx.b 12 h)) (Hw.cat (Cx.b 12 h) (Hw.slice 2 5 h))
+-- C.ADDI4SPN nzuimm[9:6|5:4|3|2] (bits 11:0, low 2 zero)
+def Cx.uimm10 {r : HwTy → Type} [Hw r] (h : r B16) : r B12 :=
+  Hw.cat (Hw.lit 2 0) (Hw.cat (Hw.slice 7 4 h) (Hw.cat (Hw.slice 11 2 h)
+    (Hw.cat (Cx.b 5 h) (Hw.cat (Cx.b 6 h) (Hw.lit 2 0)))))
+-- C.LW / C.SW uimm[6|5:3|2]
+def Cx.lwuimm {r : HwTy → Type} [Hw r] (h : r B16) : r B12 :=
+  Hw.cat (Hw.lit 5 0) (Hw.cat (Cx.b 5 h) (Hw.cat (Hw.slice 10 3 h)
+    (Hw.cat (Cx.b 6 h) (Hw.lit 2 0))))
+-- C.LWSP uimm[7:6|5|4:2]
+def Cx.lwspimm {r : HwTy → Type} [Hw r] (h : r B16) : r B12 :=
+  Hw.cat (Hw.lit 4 0) (Hw.cat (Hw.slice 2 2 h) (Hw.cat (Cx.b 12 h)
+    (Hw.cat (Hw.slice 4 3 h) (Hw.lit 2 0))))
+-- C.SWSP uimm[7:6|5:2]
+def Cx.swspimm {r : HwTy → Type} [Hw r] (h : r B16) : r B12 :=
+  Hw.cat (Hw.lit 4 0) (Hw.cat (Hw.slice 7 2 h) (Hw.cat (Hw.slice 9 4 h) (Hw.lit 2 0)))
+-- C.ADDI16SP nzimm[9|4|6|8:7|5], sign-extended to 12
+def Cx.spoff {r : HwTy → Type} [Hw r] (h : r B16) : r B12 :=
+  Hw.cat (rep 2 (Cx.b 12 h)) (Hw.cat (Cx.b 12 h) (Hw.cat (Cx.b 4 h)
+    (Hw.cat (Cx.b 3 h) (Hw.cat (Cx.b 5 h) (Hw.cat (Cx.b 2 h)
+      (Hw.cat (Cx.b 6 h) (Hw.lit 4 0)))))))
+-- C.LUI imm[17|16:12], sign-extended with the low 12 bits zero
+def Cx.luiimm {r : HwTy → Type} [Hw r] (h : r B16) : r B32 :=
+  Hw.cat (rep 14 (Cx.b 12 h)) (Hw.cat (Cx.b 12 h) (Hw.cat (Hw.slice 2 5 h) (Hw.lit 12 0)))
+-- C.J / C.JAL imm[11|4|9:8|10|6|7|3:1|5], sign-extended
+def Cx.joff {r : HwTy → Type} [Hw r] (h : r B16) : r B32 :=
+  Hw.cat (rep 20 (Cx.b 12 h)) (Hw.cat (Cx.b 12 h) (Hw.cat (Cx.b 8 h)
+    (Hw.cat (Hw.slice 10 2 h) (Hw.cat (Cx.b 6 h) (Hw.cat (Cx.b 7 h)
+      (Hw.cat (Cx.b 2 h) (Hw.cat (Cx.b 11 h)
+        (Hw.cat (Hw.slice 3 3 h) (Hw.lit 1 0)))))))))
+-- C.BEQZ / C.BNEZ imm[8|4:3|7:6|2:1|5], sign-extended
+def Cx.boff {r : HwTy → Type} [Hw r] (h : r B16) : r B32 :=
+  Hw.cat (rep 23 (Cx.b 12 h)) (Hw.cat (Cx.b 12 h) (Hw.cat (Cx.b 6 h)
+    (Hw.cat (Cx.b 5 h) (Hw.cat (Cx.b 2 h) (Hw.cat (Cx.b 11 h)
+      (Hw.cat (Cx.b 10 h) (Hw.cat (Cx.b 4 h)
+        (Hw.cat (Cx.b 3 h) (Hw.lit 1 0)))))))))
+
+def Cx.expand {r : HwTy → Type} [Hw r] (h : r B16) : r B32 :=
+  let bad := Hw.cat (Hw.lit 16 0) h;
+  let q := Hw.slice 0 2 h;
+  let f3 := Hw.slice 13 3 h;
+  let b12 := Cx.b 12 h;
+  let rd := Cx.rd h; let rs2 := Cx.rs2 h;
+  let rdp := Cx.rdp h; let rs1p := Cx.rs1p h;
+  let imm6 := Cx.imm6 h; let sh := Cx.shamt h;
+  -- Q0 (00): C.ADDI4SPN, C.LW, C.SW (the FP forms are illegal on this machine)
+  let q0w := Hw.mux (isK f3 0)
+      (Hw.mux (Hw.eq (Cx.uimm10 h) (Hw.lit 12 0)) bad
+        (Cx.I12 Op.opimm 0 rdp (Hw.lit 5 2) (Cx.uimm10 h)))
+    (Hw.mux (isK f3 2) (Cx.I12 Op.load 2 rdp rs1p (Cx.lwuimm h))
+      (Hw.mux (isK f3 6) (Cx.S12 Op.store 2 rs1p rdp (Cx.lwuimm h)) bad));
+  -- Q1 (01)
+  let subw := Hw.mux (isK (Hw.slice 10 2 h) 0)
+      (Hw.mux b12 bad (Cx.I12 Op.opimm 5 rdp rdp (Cx.shamt12 h)))
+    (Hw.mux (isK (Hw.slice 10 2 h) 1)
+      (Hw.mux b12 bad (Cx.I12 Op.opimm 5 rdp rdp (Cx.shamtSra h)))
+      (Hw.mux (isK (Hw.slice 10 2 h) 2)
+        (Cx.I12 Op.opimm 7 rdp rdp imm6)
+        (Hw.mux b12 bad
+          (Hw.mux (isK (Hw.slice 5 2 h) 0) (Cx.R Op.op 0 32 rs1p rs1p rdp)
+          (Hw.mux (isK (Hw.slice 5 2 h) 1) (Cx.R Op.op 4 0 rs1p rs1p rdp)
+          (Hw.mux (isK (Hw.slice 5 2 h) 2) (Cx.R Op.op 6 0 rs1p rs1p rdp)
+            (Cx.R Op.op 7 0 rs1p rs1p rdp)))))));
+  let q1w := Hw.mux (isK f3 0) (Cx.I12 Op.opimm 0 rd rd imm6)
+    (Hw.mux (isK f3 1) (Cx.J (Hw.lit 5 1) (Cx.joff h))
+      (Hw.mux (isK f3 2) (Cx.I12 Op.opimm 0 rd (Hw.lit 5 0) imm6)
+        (Hw.mux (isK f3 3)
+          (Hw.mux (isK rd 2)
+            (Hw.mux (Hw.eq (Cx.spoff h) (Hw.lit 12 0)) bad
+              (Cx.I12 Op.opimm 0 (Hw.lit 5 2) (Hw.lit 5 2) (Cx.spoff h)))
+            (Hw.mux (isK rd 0) bad (Cx.U Op.lui rd (Cx.luiimm h))))
+          (Hw.mux (isK f3 4) subw
+            (Hw.mux (isK f3 5) (Cx.J (Hw.lit 5 0) (Cx.joff h))
+              (Hw.mux (isK f3 6) (Cx.B 0 rs1p (Hw.lit 5 0) (Cx.boff h))
+                (Cx.B 1 rs1p (Hw.lit 5 0) (Cx.boff h))))))));
+  -- Q2 (10)
+  let jrmv := Hw.mux (Hw.not b12)
+      (Hw.mux (isK rs2 0)
+        (Hw.mux (isK rd 0) bad (Cx.I12 Op.jalr 0 (Hw.lit 5 0) rd (Hw.lit 12 0)))
+        (Cx.R Op.op 0 0 rd (Hw.lit 5 0) rs2))
+      (Hw.mux (isK rd 0)
+        (Hw.mux (isK rs2 0) (Hw.lit 32 1048691) bad)
+        (Hw.mux (isK rs2 0) (Cx.I12 Op.jalr 0 (Hw.lit 5 1) rd (Hw.lit 12 0))
+          (Cx.R Op.op 0 0 rd rd rs2)));
+  let q2w := Hw.mux (isK f3 0)
+      (Hw.mux b12 bad (Cx.I12 Op.opimm 1 rd rd (Cx.shamt12 h)))
+    (Hw.mux (isK f3 2)
+      (Hw.mux (isK rd 0) bad (Cx.I12 Op.load 2 rd (Hw.lit 5 2) (Cx.lwspimm h)))
+      (Hw.mux (isK f3 4) jrmv
+        (Hw.mux (isK f3 6) (Cx.S12 Op.store 2 (Hw.lit 5 2) rs2 (Cx.swspimm h)) bad)));
+  Hw.mux (isK q 0) q0w (Hw.mux (isK q 1) q1w (Hw.mux (isK q 2) q2w bad))
 
 def decode {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (w : r B32) : Dec r :=
-  let opc : r B7 := Hw.slice 0 7 w;
-  let rd : r B5 := Hw.slice 7 5 w;
-  let f3 : r B3 := Hw.slice 12 3 w;
-  let r1 : r B5 := Hw.slice 15 5 w;
-  let r2 : r B5 := Hw.slice 20 5 w;
-  let f7 : r B7 := Hw.slice 25 7 w;
-  let sgn := bitOf 31 w;
+  let c : r W1 := Hw.not (isK (Hw.slice 0 2 w : r B2) 3);
+  let we : r B32 := Hw.mux c (Cx.expand (Hw.slice 0 16 w : r B16)) w;
+  let opc : r B7 := Hw.slice 0 7 we;
+  let rd : r B5 := Hw.slice 7 5 we;
+  let f3 : r B3 := Hw.slice 12 3 we;
+  let r1 : r B5 := Hw.slice 15 5 we;
+  let r2 : r B5 := Hw.slice 20 5 we;
+  let f7 : r B7 := Hw.slice 25 7 we;
+  let sgn := bitOf 31 we;
   let lui := isK opc Op.lui;
   let auipc := isK opc Op.auipc;
   let jal := isK opc Op.jal;
@@ -224,12 +371,12 @@ def decode {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (w : r B32) : Dec r
   let store := isK opc Op.store;
   let opimm := isK opc Op.opimm;
   let opRaw := isK opc Op.op;
-  let f7one := isK (Hw.slice 25 7 w : r B7) 1;
+  let f7one := isK (Hw.slice 25 7 we : r B7) 1;
   let op : r W1 := if mx then Hw.and opRaw (Hw.not f7one) else opRaw;
   let md : r W1 := if mx then Hw.and opRaw f7one else Hw.lit 1 0;
   let fence := isK opc Op.fence;
-  let ecall := isK w 115;
-  let ebreak := isK w 1048691;
+  let ecall := isK we 115;
+  let ebreak := isK we 1048691;
   let okd := regOk ab rd;
   let ok1 := regOk ab r1;
   let ok2 := regOk ab r2;
@@ -245,15 +392,15 @@ def decode {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (w : r B32) : Dec r
             (Hw.mux (isK f3 1) f7z (Hw.mux (isK f3 5) (Hw.or f7z f7a) (Hw.lit 1 1))))))
           (Hw.and op (Hw.and (Hw.and okd (Hw.and ok1 ok2)) (Hw.or f7z (Hw.and f7a f30)))))
         (Hw.or (Hw.or fence (Hw.or ecall ebreak)) (Hw.and md (Hw.and okd (Hw.and ok1 ok2))))));
-  let immI : r B32 := Hw.cat (rep 20 sgn) (Hw.slice 20 12 w : r B12);
-  let immS : r B32 := Hw.cat (rep 20 sgn) (Hw.cat (Hw.slice 25 7 w : r B7) (Hw.slice 7 5 w : r B5));
-  let immB : r B32 := Hw.cat (rep 20 sgn) (Hw.cat (bitOf 7 w) (Hw.cat (Hw.slice 25 6 w : r (HwTy.bits 6))
-      (Hw.cat (Hw.slice 8 4 w : r (HwTy.bits 4)) (Hw.lit 1 0))));
-  let immU : r B32 := Hw.cat (Hw.slice 12 20 w : r B20) (Hw.lit 12 0);
-  let immJ : r B32 := Hw.cat (rep 12 sgn) (Hw.cat (Hw.slice 12 8 w : r W8) (Hw.cat (bitOf 20 w)
-      (Hw.cat (Hw.slice 21 10 w : r (HwTy.bits 10)) (Hw.lit 1 0))));
-  Dec.mk rd f3 r1 r2 (bitOf 30 w) lui auipc jal jalr branch load store opimm op md ecall ebreak legal
-    immI immS immB immU immJ
+  let immI : r B32 := Hw.cat (rep 20 sgn) (Hw.slice 20 12 we : r B12);
+  let immS : r B32 := Hw.cat (rep 20 sgn) (Hw.cat (Hw.slice 25 7 we : r B7) (Hw.slice 7 5 we : r B5));
+  let immB : r B32 := Hw.cat (rep 20 sgn) (Hw.cat (bitOf 7 we) (Hw.cat (Hw.slice 25 6 we : r (HwTy.bits 6))
+      (Hw.cat (Hw.slice 8 4 we : r (HwTy.bits 4)) (Hw.lit 1 0))));
+  let immU : r B32 := Hw.cat (Hw.slice 12 20 we : r B20) (Hw.lit 12 0);
+  let immJ : r B32 := Hw.cat (rep 12 sgn) (Hw.cat (Hw.slice 12 8 we : r W8) (Hw.cat (bitOf 20 we)
+      (Hw.cat (Hw.slice 21 10 we : r (HwTy.bits 10)) (Hw.lit 1 0))));
+  Dec.mk rd f3 r1 r2 (bitOf 30 we) lui auipc jal jalr branch load store opimm op md ecall ebreak legal
+    immI immS immB immU immJ c we
 
 ------------------------------------------------------------------------------------
 -- One cycle
@@ -270,6 +417,7 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
   let inV : r W1 := if mx then isK ph Ph.v else Hw.lit 1 0;
   let inP := isK ph Ph.p;
   let inQ := isK ph Ph.q;
+  let inJ := isK ph Ph.j;
   -- the L1: a hit is the tag read with the line equal to the address's
   let lb := L1.bits wb;
   let l1idx := fun (a : r B32) => (Hw.slice 4 lb a : r (HwTy.bits lb));
@@ -277,14 +425,21 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
   let hit := Hw.eq s.l1t (l1tagOf s.ra);
   let l1w : r B32 := Hw.mux (bitOf 3 s.ra) (Hw.mux (bitOf 2 s.ra) (Hw.slice 96 32 s.l1q) (Hw.slice 64 32 s.l1q))
     (Hw.mux (bitOf 2 s.ra) (Hw.slice 32 32 s.l1q) (Hw.slice 0 32 s.l1q));
-  let miss := gate (Hw.or inD inM) (gate s.fromL1 (Hw.not hit));
+  let miss := gate (Hw.or inD (Hw.or inM inJ)) (gate s.fromL1 (Hw.not hit));
   -- the word read: from block RAM (the q lanes), the L1, or the bus
   let w : r B32 := Hw.mux s.fromL1 l1w (Hw.mux s.fromBus s.busq (Hw.cat s.q3 (Hw.cat s.q2 (Hw.cat s.q1 s.q0))));
+  -- C: the instruction as the decoder sees it. A 16-bit instruction is the halfword
+  -- selected by pc[1]; a 32-bit instruction at pc[1] = 1 is the two words `j` fetched.
+  let win : r B32 := Hw.mux s.half s.ins
+    (Hw.mux s.al (Hw.cat (Hw.lit 16 0) (Hw.slice 16 16 w : r B16)) w);
+  -- C: a 32-bit instruction at an odd halfword: its second word is at pc + 2
+  let need2 : r W1 := Hw.and (Hw.not s.half)
+    (Hw.and s.al (isK (Hw.slice 16 2 w : r B2) 3));
   let wq0 : r W8 := Hw.slice 0 8 w;
   let wq1 : r W8 := Hw.slice 8 8 w;
   let wq2 : r W8 := Hw.slice 16 8 w;
   let wq3 : r W8 := Hw.slice 24 8 w;
-  let ω d := decode ab mx w;
+  let ω d := decode ab mx win;
   let a := s.x1;
   let rs2v := s.x2;
   let regB := Hw.or d.op d.branch;
@@ -306,8 +461,8 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
   let aluRes := Hw.mux (isK f3 0) sum (Hw.mux (isK f3 2) (zext32 slt) (Hw.mux (isK f3 3) (zext32 ult)
     (Hw.mux (isK f3 4) (Hw.xor a b) (Hw.mux (isK f3 6) (Hw.or a b) (Hw.mux (isK f3 7) (Hw.and a b) shRes)))));
   let shift := Hw.lit 1 0;
-  -- the next PC
-  let pcInc := Hw.add s.pc (Hw.lit 32 4);
+  -- the next PC (2 bytes on for a 16-bit instruction)
+  let pcInc := Hw.add s.pc (Hw.mux d.c (Hw.lit 32 2) (Hw.lit 32 4));
   let pcImm := Hw.add s.pc (Hw.mux d.jal d.immJ (Hw.mux d.branch d.immB d.immU));
   let jalrT : r B32 := Hw.cat (Hw.slice 1 31 sum : r (HwTy.bits 31)) (Hw.lit 1 0);
   let jump := Hw.mux (Hw.or d.jal d.jalr) (Hw.lit 1 1) (gate d.branch taken);
@@ -317,7 +472,7 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
   let lo2 : r B2 := Hw.slice 0 2 sum;
   let mis := Hw.mux (isK (Hw.slice 0 2 f3 : r B2) 2) (Hw.not (isK lo2 0))
     (Hw.mux (isK (Hw.slice 0 2 f3 : r B2) 1) (bitOf 0 sum) (Hw.lit 1 0));
-  let misJ := gate jump (bitOf 1 target);
+  let misJ := gate jump (bitOf 0 target);
   let misL := gate d.load mis;
   let misS := gate d.store mis;
   let code : r B3 := Hw.mux (Hw.not d.legal) (Hw.lit 3 Trap.illegal) (Hw.mux d.ecall (Hw.lit 3 Trap.ecall)
@@ -325,8 +480,10 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
     (Hw.mux misL (Hw.lit 3 Trap.load) (Hw.mux misS (Hw.lit 3 Trap.store) (Hw.lit 3 0))))));
   -- what a trap records (mtval): the instruction word for an illegal instruction, the
   -- target for a misaligned jump, the effective address for a misaligned access, 0 for
-  -- ECALL/EBREAK. The PC is not written on a trap, so it is the epc as it stands.
-  let tvalE : r B32 := Hw.mux (Hw.not d.legal) w
+  -- ECALL/EBREAK. A C encoding is recorded as its 16 bits. The PC is not written on a
+  -- trap, so it is the epc as it stands.
+  let tvalI : r B32 := Hw.mux d.c (Hw.cat (Hw.lit 16 0) (Hw.slice 0 16 win : r B16)) win;
+  let tvalE : r B32 := Hw.mux (Hw.not d.legal) tvalI
     (Hw.mux d.ecall (Hw.lit 32 0) (Hw.mux d.ebreak (Hw.lit 32 0)
     (Hw.mux misJ target (Hw.mux misL sum (Hw.mux misS sum (Hw.lit 32 0))))));
   let trapE := Hw.and inE (Hw.not (isK code 0));
@@ -390,18 +547,20 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
   -- the memory read: the load's address, else the next instruction's
   -- (one address for reading and writing, so that each lane is a single-port RAM: a
   -- store's read is not used, the next cycle fetches again)
-  let raddr := Hw.mux inQ s.rline (Hw.mux (gate goE (Hw.or d.load d.store)) sum (Hw.mux goE npc s.pc));
+  let raddr := Hw.mux inQ s.rline (Hw.mux (gate goE (Hw.or d.load d.store)) sum
+    (Hw.mux goE npc (Hw.mux (Hw.or (gate inD need2) inJ) (Hw.add s.pc (Hw.lit 32 2)) s.pc)));
   let rix : r (HwTy.bits wb) := Hw.slice 2 wb raddr;
-  let nphB : r B4 := Hw.mux inF (Hw.lit 4 Ph.d) (Hw.mux inD (Hw.lit 4 Ph.e)
+  let nphB : r B4 := Hw.mux inF (Hw.lit 4 Ph.d) (Hw.mux inD (Hw.mux need2 (Hw.lit 4 Ph.j) (Hw.lit 4 Ph.e))
     (Hw.mux inE (Hw.mux trapE (Hw.lit 4 Ph.h) (Hw.mux wait (Hw.lit 4 Ph.e) (Hw.mux d.md (Hw.mux (bitOf 2 f3) (Hw.lit 4 Ph.v) (Hw.lit 4 Ph.x)) (Hw.mux d.load (Hw.lit 4 Ph.m) (Hw.mux shift (Hw.lit 4 Ph.s)
       (Hw.mux d.store (Hw.lit 4 Ph.f) (Hw.lit 4 Ph.d)))))))
     (Hw.mux inM (Hw.lit 4 Ph.d) (Hw.mux inS (Hw.mux sDone (Hw.lit 4 Ph.d) (Hw.lit 4 Ph.s))
-    (Hw.mux inX (Hw.lit 4 Ph.d) (Hw.mux inV (Hw.mux sDone (Hw.lit 4 Ph.d) (Hw.lit 4 Ph.v)) ph))))));
+    (Hw.mux inX (Hw.lit 4 Ph.d) (Hw.mux inV (Hw.mux sDone (Hw.lit 4 Ph.d) (Hw.lit 4 Ph.v))
+    (Hw.mux inJ (Hw.lit 4 Ph.d) ph)))))));
   -- DDR (bit 30 set, bit 31 clear): a fetch or load reads the L1 (a miss in D or M fills
   -- the line over the bus, word by word, then reads it again: P, Q); a store goes to the
   -- bus (write-through) and updates the line if it is present
   let ddrR := Hw.and (bitOf 30 raddr) (Hw.not (bitOf 31 raddr));
-  let readNext := Hw.or (isK nphB Ph.d) (isK nphB Ph.m);
+  let readNext := Hw.or (isK nphB Ph.d) (Hw.or (isK nphB Ph.m) (isK nphB Ph.j));
   let busRd := Hw.lit 1 0;
   let busWr := gate goE (gate d.store ddrS);
   let enterP := Hw.or miss busWr;
@@ -462,7 +621,11 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
       (gate inP fillWord)
       (Hw.mux fillWord fillLine s.rbuf)
       (Hw.mux (gate enterP miss) s.ra s.rline)
-      busWr))
+      busWr
+      (Hw.mux inD w s.w1)
+      (Hw.mux inJ (Hw.cat (Hw.slice 0 16 w : r B16) (Hw.slice 16 16 s.w1 : r B16)) s.ins)
+      (Hw.mux inE (Hw.lit 1 0) (Hw.mux inJ (Hw.lit 1 1) s.half))
+      (Hw.mux goE (bitOf 1 npc) (Hw.mux inF (bitOf 1 s.pc) s.al))))
     (Out.pack (Out.mk s.trap (gate goE (gate d.store io)) (Hw.slice 0 8 rs2v) (gate goE (gate d.load io)) sum rs2v
       (gate inP (Hw.and (Hw.not s.bsent) (Hw.not s.rgap)))
       (Hw.mux s.rmode (Hw.cat (Hw.slice 4 28 s.rline : r (HwTy.bits 28)) (Hw.cat s.rk (Hw.lit 2 0))) s.badr)
@@ -471,9 +634,10 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
 ------------------------------------------------------------------------------------
 -- The core as a circuit, with a program in memory from address 0
 
--- byte `l` of word `k` of the program
+-- byte `l` of word `k` of the program (the image is halfwords: 2k + l/2, byte l%2)
 def Core.lane (prog : List Nat) (wb l : Nat) : HwTy.El (HwTy.mem wb 8) :=
-  fun (a : BitVec wb) => BitVec.ofNat 8 (Rv.bits (Rv.wordAt prog a.toNat) (8 * l) 8)
+  fun (a : BitVec wb) =>
+    BitVec.ofNat 8 (Rv.bits (Rv.halfAt prog (2 * a.toNat + Nat.div l 2)) (8 * Nat.mod l 2) 8)
 
 def CoreSt.init (ab wb : Nat) (prog : List Nat) : CoreSt ab wb HwTy.El :=
   CoreSt.mk (BitVec.ofNat 4 Ph.f) (BitVec.ofNat 32 0)
@@ -488,6 +652,7 @@ def CoreSt.init (ab wb : Nat) (prog : List Nat) : CoreSt ab wb HwTy.El :=
     (BitVec.ofNat 32 0) (BitVec.ofNat 128 0) (BitVec.ofNat (L1.tagW wb) 0)
     (fun (a : BitVec (L1.bits wb)) => BitVec.ofNat 128 0) (fun (a : BitVec (L1.bits wb)) => BitVec.ofNat (L1.tagW wb) 0)
     (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 2 0) (BitVec.ofNat 1 0) (BitVec.ofNat 128 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0)
+    (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
 
 def core (ab wb : Nat) (mx : Bool) (prog : List Nat) : Circuit In.code Out.code :=
   Circuit.mk (CoreSt.code ab wb) (Bundle.toEl (CoreSt.bundle ab wb) (CoreSt.init ab wb prog))
