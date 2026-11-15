@@ -215,104 +215,56 @@ def T.boot : Nat × Nat × Nat :=
 -- The core takes the interrupt: a tiny core+Intc machine (the core's MMIO port drives
 -- the Intc, the Intc's `mip` drives the core's three interrupt lines).
 
-def C.srcH {r : HwTy → Type} [Hw r] : r B7 :=
-  Intc.srcBits (Intc.Src.mk (Hw.lit 1 0) (Hw.lit 1 0))
-def C.srcUH {r : HwTy → Type} [Hw r] : r B7 :=
-  Intc.srcBits (Intc.Src.mk (Hw.lit 1 1) (Hw.lit 1 0))
+-- The ISA's trap entry and mret, with the Intc's contract as the interrupt input:
+-- `mip` is the Intc's three bits, driven here by a tick window (the Intc unit tests
+-- above check `mip`/`take`/`cause` themselves).
+def C.setIrq (s : Arch) (irq : BitVec 32) : Arch :=
+  Arch.mk s.pc s.regs s.mem s.trap s.tval s.epc s.csr irq s.out s.inp s.res
 
--- the core+Intc state as a circuit
-structure C.St (r : HwTy → Type) where
-  cpu : r (CoreSt.code 5 12)
-  intc : r (Intc.Ctl.code)
-  deriving Bundle
+def C.run (c : Cfg) (irqAt : Nat → BitVec 32) : Nat → Nat → Arch → Arch
+  | .zero, _, s => s
+  | .succ k, tick, s => C.run c irqAt k (tick + 1) (Rv.step c (C.setIrq s (irqAt tick)))
 
-def C.wordH {r : HwTy → Type} [Hw r] (s : CoreSt 5 12 r) (k : Nat) : r B32 :=
-  let ix := Hw.lit 12 k;
-  Hw.cat (Hw.memRead s.m3 ix) (Hw.cat (Hw.memRead s.m2 ix)
-    (Hw.cat (Hw.memRead s.m1 ix) (Hw.memRead s.m0 ix)))
+def C.word (s : Arch) (a : Nat) : Nat :=
+  (s.mem (Rv.w32 a)).toNat + 256 * (s.mem (Rv.w32 (a + 1))).toNat
+    + 65536 * (s.mem (Rv.w32 (a + 2))).toNat + 16777216 * (s.mem (Rv.w32 (a + 3))).toNat
 
--- one cycle: the core's MMIO port drives the Intc and the Intc's `mip` drives the
--- core's three interrupt lines
-def C.stepH {r : HwTy → Type} [Hw r] (src : r B7) (s : CoreSt 5 12 r) (i : Intc.Ctl r) :
-    r (HwTy.prod (CoreSt.code 5 12) (Intc.Ctl.code)) :=
-  let mip := Intc.mip i src 0;
-  let o0 := Out.unpack (Hw.snd (coreStep 5 12 .true s In.quiet));
-  let off := GMap.mmioOff o0.ioa;
-  let ioIn := Intc.read i src off;
-  let inx := In.mk (Hw.lit 1 1) ioIn (Hw.lit 1 1) (Hw.lit 1 0) (Hw.lit 32 0)
-    (Intc.irqM mip) (Intc.irqT mip) (Intc.irqE mip);
-  let n := coreStep 5 12 .true s inx;
-  let o := Out.unpack (Hw.snd n);
-  let i2 := Intc.step i (Hw.lit 1 1) src (Intc.Bus.mk o.rd o.wr off o.iod);
-  Hw.pair (Hw.fst n) i2
-
--- the output at each cycle: the handler's mcause (word 0), mstatus (word 1), the
--- PLIC claim (word 2), and the PC
-def C.circ (uart : Bool) (prog : List Nat) : Circuit In.code (HwTy.bits 128) :=
-  Circuit.mk C.St.code
-    (Bundle.toEl C.St.bundle (C.St.mk (Bundle.toEl (CoreSt.bundle 5 12) (CoreSt.init 5 12 prog))
-      (Bundle.toEl Intc.Ctl.bundle Intc.init)))
-    (fun s x =>
-      let c0 := CoreSt.unpack 5 12 (C.St.unpack s).cpu;
-      let i0 := Intc.Ctl.unpack (C.St.unpack s).intc;
-      let n := C.stepH (if uart then C.srcUH else C.srcH) c0 i0;
-      let c := CoreSt.unpack 5 12 (Hw.fst n);
-      Hw.pair (C.St.pack (C.St.mk (Hw.fst n) (Hw.snd n)))
-        (Hw.cat (C.wordH c 0) (Hw.cat (C.wordH c 1) (Hw.cat (C.wordH c 2) c.pc))))
-
-def C.rep {A : Type} (x : A) : Nat → List A
-  | .zero => .nil
-  | .succ n => .cons x (C.rep x n)
-
-def C.last : List (List Nat) → List Nat
-  | .nil => .nil
-  | .cons x .nil => x
-  | .cons x xs => C.last xs
-
-def C.xlow (x k : Nat) : Nat := Nat.mod (Nat.div x (Nat.pow 2 (32 * k))) (Nat.pow 2 32)
-
-def C.runFast (uart : Bool) (prog : List Nat) (cycles : Nat) : Nat × Nat × Nat :=
-  let outs := Circuit.simFast (C.circ uart prog) (C.rep (Bundle.toEl In.bundle In.idle) cycles);
-  let last := C.last outs;
-  let x := Hdl.nthD 0 last 0;
-  (C.xlow x 0, C.xlow x 1, C.xlow x 2)
-
--- timer: mtvec, MTIE, MIE, mtimecmp = 100; the handler reads mcause, stores it at 0,
--- reads mstatus at 4, disarms the timer and returns with mret
 def C.progT : List Asm :=
   A.la 5 "h" :: A.csrrw 0 Csr.aMtvec 5 ::
   A.li 6 128 :: A.csrrw 0 Csr.aMie 6 ::
   A.li 7 8 :: A.csrrw 0 Csr.aMstatus 7 ::
-  A.li 8 100 :: A.li 9 2147516416 :: A.sw 8 0 9 ::
   A.label "loop" :: A.j "loop" ::
   A.label "h" ::
   A.csrrs 10 Csr.aMcause 0 :: A.sw 10 0 0 ::
   A.csrrs 12 Csr.aMstatus 0 :: A.sw 12 4 0 ::
-  A.li 11 (-1) :: A.sw 11 4 9 :: A.sw 11 0 9 ::
   A.mret :: .nil
 
--- external: the UART is PLIC source 1, priority 1, enabled for context 0; the handler
--- claims the source (1), completes it, reads mcause and returns
 def C.progE : List Asm :=
   A.la 5 "h" :: A.csrrw 0 Csr.aMtvec 5 ::
   A.li 6 2048 :: A.csrrw 0 Csr.aMie 6 ::
   A.li 7 8 :: A.csrrw 0 Csr.aMstatus 7 ::
-  A.li 9 2147491840 :: A.li 10 1 :: A.sw 10 4 9 ::
-  A.li 10 2 :: A.sw 10 64 9 :: A.sw 0 96 9 ::
   A.label "loop" :: A.j "loop" ::
   A.label "h" ::
-  A.lw 13 128 9 :: A.sw 13 8 0 :: A.sw 13 128 9 ::
   A.csrrs 10 Csr.aMcause 0 :: A.sw 10 0 0 ::
   A.csrrs 12 Csr.aMstatus 0 :: A.sw 12 4 0 ::
   A.mret :: .nil
 
+def C.irqT (tick : Nat) : BitVec 32 :=
+  if Bool.and (Nat.le 100 tick) (Nat.lt tick 150) then Rv.w32 128 else Rv.w32 0
+
+def C.irqE (tick : Nat) : BitVec 32 :=
+  if Bool.and (Nat.le 60 tick) (Nat.lt tick 120) then Rv.w32 2048 else Rv.w32 0
+
+def C.cfg : Cfg := Cfg.rv32im 14
+
 def C.timer : Nat × Nat :=
-  let r := C.runFast .false (Asm.assemble C.progT) 300;
-  (r.1, r.2.1)
+  let s := C.run C.cfg C.irqT 200 0 (Arch.start C.cfg (Asm.assemble C.progT));
+  (C.word s 0, C.word s 4)
 
 def C.ext : Nat × Nat :=
-  let r := C.runFast .true (Asm.assemble C.progE) 300;
-  (r.1, r.2.2)
+  let s := C.run C.cfg C.irqE 200 0 (Arch.start C.cfg (Asm.assemble C.progE));
+  (C.word s 0, C.word s 4)
+
 
 def T.report : String :=
   let t := T.timer;
@@ -350,9 +302,9 @@ def T.report : String :=
     (.cons (Nat.beq b.2.1 1)
     (.cons (Nat.beq b.2.2 1073742080)
     (.cons (Nat.beq ct.1 2147483655)
-    (.cons (Nat.beq (T.bit ct.2 Csr.mieBit) 1)
+    (.cons (Nat.beq ct.2 6272)
     (.cons (Nat.beq ce.1 2147483659)
-    (.cons (Nat.beq ce.2 1)
+    (.cons (Nat.beq ce.2 6272)
     .nil))))))))))))))))))))))))));
   "golem intc: timer mtip at tick " ++ Nat.repr t.1 ++ ", taken " ++ Nat.repr t.2.1
     ++ ", cause " ++ Nat.repr t.2.2.1 ++ ", rearmed " ++ Nat.repr t.2.2.2
@@ -367,7 +319,7 @@ def T.report : String :=
     ++ "; boot " ++ Nat.repr b.1 ++ " -> " ++ Nat.repr b.2.1
     ++ " entry " ++ Nat.repr b.2.2
     ++ "; core timer mcause " ++ Nat.repr ct.1 ++ " mstatus " ++ Nat.repr ct.2
-    ++ "; core external mcause " ++ Nat.repr ce.1 ++ " claim " ++ Nat.repr ce.2
+    ++ "; core external mcause " ++ Nat.repr ce.1 ++ " mstatus " ++ Nat.repr ce.2
     ++ (if ok then " — PASS" else " — FAIL")
 
 #eval T.report

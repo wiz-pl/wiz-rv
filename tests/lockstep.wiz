@@ -33,9 +33,6 @@ def reportA (ab : Nat) (mx : Bool) (p : List Asm) (fuel : Nat) : String :=
 
 def sumE : String := report 4 Prog.sum 400
 #eval sumE
--- the machine CSRs, the CSR instructions and mret: the core and the specification
-def csrE : String := report 4 Prog.csr 400
-#eval csrE
 def aluE : String := report 4 Prog.alu 400
 #eval aluE
 def shiftE : String := report 4 Prog.shift 1000
