@@ -385,3 +385,29 @@ killed), and printed nothing" as the expected output.
 negated; the specification ran the wrong program happily. A lockstep against a second
 implementation would not have caught it either, since both run the same image: what
 caught it was a program whose output was known.)
+
+### H12. The C extension: one expansion, two fetch cases, and what it does to `rfl` (gap)
+
+The decoder is one function. `Rv.expand` (`src/Rv/Isa.wiz`) maps a 16-bit encoding to its
+32-bit equivalent; `Cx.expand` (`src/Rv/Core.wiz`) is the same table in gates, and
+`tests/spec.wiz` walks all 65536 encodings to check the two agree. `decode` is the only
+decode path: it expands a 16-bit word and both cores consume the expanded form. A
+program image is a list of 16-bit halfwords, so compressed and uncompressed instructions
+share one layout (`Asm.assemble`, `Rv.image`, `Core.lane`).
+
+The second fetch case is a 32-bit instruction at `pc[1] = 1` (legal with C): its first
+half is the upper half of the word at `pc` and its second is the lower half of the word
+at `pc + 2`. The multi-cycle core has a `J` phase for it; the pipeline holds D one cycle
+while F reads `pc + 2` (`Pp.dWord` assembles the two halves, `fe.al` is bit 1 of the
+instruction PC). `Rv.jump` now checks 2-byte alignment, so `Trap.jump` is unreachable
+through JAL/JALR/branch encodings (JALR clears bit 0; JAL/branch offsets are even); the
+old `trap_jump` fixture is now `jump2`, a C.J to the C.ADDI at 2.
+
+The two-cycle `rfl` proofs are about an aligned 32-bit instruction (the state's `al` is
+0). With the expansion in `decode`, the kernel's reduction of the core step for those
+claims grows past the 4 GiB heavy cap (it took >15 minutes and hundreds of megabytes of
+kernel terms before that), so `proofs/CoreProofs.wiz` is now opt-in
+(`scripts/core-proofs.sh`) instead of being checked by `grail build`. The claims
+themselves are unchanged; the next step is a C-aware restatement that caches the decoded
+instruction (or a proof about `decode`'s expansion separately) so `rfl` sees the small
+32-bit path. This is a real gap: `grail build` no longer checks the core proofs.

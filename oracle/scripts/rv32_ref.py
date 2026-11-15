@@ -120,11 +120,11 @@ def expand_c(h):
             sub = u(h, 10, 2)
             sh = (b12 << 5) | u(h, 2, 5)
             if sub == 0:                                   # C.SRLI
-                return None if b12 == 1 else enc_i(0x13, 5, rdp, rdp, sh)
+                return None if b12 == 1 else enc_i(0x13, 5, rs1p, rs1p, sh)
             if sub == 1:                                   # C.SRAI
-                return None if b12 == 1 else enc_i(0x13, 5, rdp, rdp, 0x400 | sh)
+                return None if b12 == 1 else enc_i(0x13, 5, rs1p, rs1p, 0x400 | sh)
             if sub == 2:                                   # C.ANDI
-                return enc_i(0x13, 7, rdp, rdp, imm6)
+                return enc_i(0x13, 7, rs1p, rs1p, imm6)
             if b12 == 1:                                   # C.SUBW/C.ADDW: RV64 only
                 return None
             g = u(h, 5, 2)

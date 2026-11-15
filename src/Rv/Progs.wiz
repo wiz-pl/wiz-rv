@@ -226,6 +226,7 @@ def P.cBody : List Asm :=
   A.cswsp 10 0 :: A.clwsp 12 0 ::
   A.la 14 "ctgt" :: A.cjalr 14 :: A.cj "cdone" ::
   A.label "ctgt" :: A.cjr 1 :: A.label "cdone" ::
+  A.li 1 0 :: A.li 14 0 ::
   A.sb 8 0 15 :: A.sb 10 0 15 :: A.sb 11 0 15 :: A.sb 12 0 15 ::
   A.srli 13 13 16 :: A.sb 13 0 15 :: .nil
 
@@ -241,12 +242,13 @@ def P.uBody : List Asm :=
   A.beq 0 0 "us1" :: A.li 12 99 :: A.label "us1" ::
   A.bne 8 0 "ug1" :: A.li 12 99 :: A.label "ug1" ::
   A.j "uc1" :: A.li 12 99 :: A.label "uc1" ::
-  A.nop :: A.lui 13 65536 ::
+  A.nop :: A.lui 13 16 ::
   A.jal 1 "usub" :: A.j "uafter" ::
   A.label "usub" :: A.jalr 0 1 0 :: A.label "uafter" ::
   A.sw 10 0 2 :: A.lw 12 0 2 ::
   A.la 14 "utgt" :: A.jalr 1 14 0 :: A.j "udone" ::
   A.label "utgt" :: A.jalr 0 1 0 :: A.label "udone" ::
+  A.li 1 0 :: A.li 14 0 ::
   A.sb 8 0 15 :: A.sb 10 0 15 :: A.sb 11 0 15 :: A.sb 12 0 15 ::
   A.srli 13 13 16 :: A.sb 13 0 15 :: A.ebreak :: .nil
 

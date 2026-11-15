@@ -230,10 +230,10 @@ def Cx.rs2 {r : HwTy → Type} [Hw r] (h : r B16) : r B5 := Hw.slice 2 5 h
 def Cx.shamt {r : HwTy → Type} [Hw r] (h : r B16) : r B5 := Hw.slice 2 5 h
 -- 8 + bits[4:2] (x8 … x15)
 def Cx.rdp {r : HwTy → Type} [Hw r] (h : r B16) : r B5 :=
-  Hw.cat (Hw.lit 2 2) (Hw.slice 2 3 h)
+  Hw.cat (Hw.lit 2 1) (Hw.slice 2 3 h)
 -- 8 + bits[9:7]
 def Cx.rs1p {r : HwTy → Type} [Hw r] (h : r B16) : r B5 :=
-  Hw.cat (Hw.lit 2 2) (Hw.slice 7 3 h)
+  Hw.cat (Hw.lit 2 1) (Hw.slice 7 3 h)
 
 def Cx.I12 {r : HwTy → Type} [Hw r] (op f3 : Nat) (rd rs1 : r B5) (imm : r B12) : r B32 :=
   Hw.cat imm (Hw.cat rs1 (Hw.cat (Hw.lit 3 f3) (Hw.cat rd (Hw.lit 7 op))))
@@ -313,11 +313,11 @@ def Cx.expand {r : HwTy → Type} [Hw r] (h : r B16) : r B32 :=
       (Hw.mux (isK f3 6) (Cx.S12 Op.store 2 rs1p rdp (Cx.lwuimm h)) bad));
   -- Q1 (01)
   let subw := Hw.mux (isK (Hw.slice 10 2 h) 0)
-      (Hw.mux b12 bad (Cx.I12 Op.opimm 5 rdp rdp (Cx.shamt12 h)))
+      (Hw.mux b12 bad (Cx.I12 Op.opimm 5 rs1p rs1p (Cx.shamt12 h)))
     (Hw.mux (isK (Hw.slice 10 2 h) 1)
-      (Hw.mux b12 bad (Cx.I12 Op.opimm 5 rdp rdp (Cx.shamtSra h)))
+      (Hw.mux b12 bad (Cx.I12 Op.opimm 5 rs1p rs1p (Cx.shamtSra h)))
       (Hw.mux (isK (Hw.slice 10 2 h) 2)
-        (Cx.I12 Op.opimm 7 rdp rdp imm6)
+        (Cx.I12 Op.opimm 7 rs1p rs1p imm6)
         (Hw.mux b12 bad
           (Hw.mux (isK (Hw.slice 5 2 h) 0) (Cx.R Op.op 0 32 rs1p rs1p rdp)
           (Hw.mux (isK (Hw.slice 5 2 h) 1) (Cx.R Op.op 4 0 rs1p rs1p rdp)

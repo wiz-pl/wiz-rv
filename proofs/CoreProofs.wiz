@@ -17,6 +17,9 @@ import Rv.Asm
 -- `J` phase), so these two-cycle claims are about an aligned 32-bit instruction: the
 -- core state's `al` (bit 1 of the instruction's PC) is 0. That is the case the claims
 -- are about; `tests/lockstep.wiz` and `tests/plockstep.wiz` cover the unaligned one.
+-- The C expansion's terms make the kernel's `rfl` reduction of the 32-bit path exceed a
+-- 4 GiB cap, so this file is opt-in (`scripts/core-proofs.sh`) rather than part of
+-- `grail build`; FINDINGS.md H12.
 --
 -- What goes through by `rfl` and what does not: FINDINGS.md, P1.
 

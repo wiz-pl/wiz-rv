@@ -144,7 +144,7 @@ boundary; cause, tval and epc, all memory and the output at the end), on program
 exercising every RV32I instruction, the traps, RV32E's register limit, and (RV32IM)
 every M instruction on the edge cases.
 
-Proofs (`src/Rv/Proofs.wiz`, kernel-checked): from the decode phase, two cycles of the
+Proofs (`proofs/CoreProofs.wiz`, kernel-checked; `scripts/core-proofs.sh`): from the decode phase, two cycles of the
 RV32E core give the specification's PC and rd for XOR, OR, AND, XORI, ORI, ANDI, LUI and
 AUIPC, for every PC, register file, memory (holding the instruction at PC) and every
 value of the core's other registers. The trap-state claims (`Pf.TrapClaimAt`) give the

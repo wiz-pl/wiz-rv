@@ -201,16 +201,16 @@ def Rv.expand (h : Nat) : Option Nat :=
         else .some (Rv.encU Op.lui rd (C.luiimm h)))
      else if Nat.beq f3 4 then
        (if Nat.beq (Rv.bits h 10 2) 0 then
-          (if Nat.beq b12 1 then .none else .some (Rv.encI Op.opimm 5 rdp rdp sh))
+          (if Nat.beq b12 1 then .none else .some (Rv.encI Op.opimm 5 rs1p rs1p sh))
         else if Nat.beq (Rv.bits h 10 2) 1 then
-          (if Nat.beq b12 1 then .none else .some (Rv.encI Op.opimm 5 rdp rdp (1024 + sh)))
+          (if Nat.beq b12 1 then .none else .some (Rv.encI Op.opimm 5 rs1p rs1p (1024 + sh)))
         else if Nat.beq (Rv.bits h 10 2) 2 then
-          .some (Rv.encI Op.opimm 7 rdp rdp imm6)
+          .some (Rv.encI Op.opimm 7 rs1p rs1p imm6)
         else if Nat.beq b12 1 then .none
-        else if Nat.beq (Rv.bits h 5 2) 0 then .some (Rv.encR Op.op 0 32 rdp rdp rs2p)
-        else if Nat.beq (Rv.bits h 5 2) 1 then .some (Rv.encR Op.op 4 0 rdp rdp rs2p)
-        else if Nat.beq (Rv.bits h 5 2) 2 then .some (Rv.encR Op.op 6 0 rdp rdp rs2p)
-        else .some (Rv.encR Op.op 7 0 rdp rdp rs2p))
+        else if Nat.beq (Rv.bits h 5 2) 0 then .some (Rv.encR Op.op 0 32 rs1p rs1p rdp)
+        else if Nat.beq (Rv.bits h 5 2) 1 then .some (Rv.encR Op.op 4 0 rs1p rs1p rdp)
+        else if Nat.beq (Rv.bits h 5 2) 2 then .some (Rv.encR Op.op 6 0 rs1p rs1p rdp)
+        else .some (Rv.encR Op.op 7 0 rs1p rs1p rdp))
      else if Nat.beq f3 5 then .some (Rv.encJ 0 (C.joff h))
      else if Nat.beq f3 6 then .some (Rv.encB 0 rs1p 0 (C.boff h))
      else .some (Rv.encB 1 rs1p 0 (C.boff h)))
