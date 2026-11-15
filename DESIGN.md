@@ -45,13 +45,17 @@ wiz-ddr3's cache and controller at the full rate and the existing bus adapter
 | `0x8000_0000` + `0x40` | DDR status | bit 0 calibration done, bit 1 failed |
 | `0x8000_0000` + `0x50 … 0x7c` | performance counters | instructions, bus/memory cycles, cache hits/misses, framebuffer writes, OLED refreshes |
 | `0x8000_0000` + `0x80` | OLED controller | the pins and program counter (debug) |
+| `0x8000_1000` + `0x00/0x10` | mailbox | per hart: message/valid, and the boot entry address |
+| `0x8000_2000` | PLIC-style controller | priorities, pending, per-context enable/threshold, claim/complete |
+| `0x8000_4000` + `0x00/0x4000/0xbff8` | CLINT-like timer | `msip` per hart, `mtimecmp` (64-bit per hart), `mtime` |
 | `0x8100_0000` – `0x8100_2FFF` | framebuffer | 96 × 64 RGB 565, row-major, halfword stores (12 KB) |
 
 Everything is word-addressable except the framebuffer, which the core writes as
 halfwords; byte and halfword stores work everywhere the core's memory does. The map is
 `src/Rv/Golem/Map.wiz` (hardware constants and the decode predicates) and
 `sw/golem.h` (the same for C). It is the Doom machine's map, so Doom's software keeps
-working; `golem.h` adds the UART status register.
+working; `golem.h` adds the UART status register, the interrupt/timer blocks and their
+helpers.
 
 The bus decode sends every address with bit 30 set (and bit 31 clear) to DDR, as the
 core's memory does; an address in `0x5000_0000` – `0x7FFF_FFFF` is answered at once
@@ -80,11 +84,124 @@ machine at the core's I/O port (`DOut.ioa`, bit 31 set), not on this bus: the co
 Both the adapter and the arbiter are registers around combinational code, so they run
 at the bus's 100 MHz whatever rate the core runs at.
 
+## Interrupts, timer and harts
+
+The multicore decisions M6/M7 (`wiz-notes/golem-multicore-decisions.md`) ask for a
+CLINT-like per-hart timer, a simple PLIC-style external path, an IPI mailbox, and a
+documented boot ABI. All three blocks are in `src/Rv/Golem/Intc.wiz`, inside the
+machine's I/O window; the machine decodes a 16-bit register offset (`GMap.mmioOff`) so
+that they do not alias the 8-bit-address UART and performance registers. The framebuffer
+(bit 24 of the address) is excluded from their decode.
+
+| register | address | meaning |
+|---|---|---|
+| `msip(h)` | `0x8000_4000 + 4h` | the doorbell: write 1 releases hart `h`, write 0 clears it |
+| `mtimecmp(h)` | `0x8000_8000 + 8h` | 64-bit compare value (low word, then `+4`) |
+| `mtime` | `0x8000_fff8/fffc` | 64-bit counter, incremented every machine cycle |
+| `PRIO(s)` | `0x8000_2000 + 4s` | source priority, 3 bits (0: never taken) |
+| `PENDING` | `0x8000_2020` | the pending bitmap (read) |
+| `ENABLE(c)` | `0x8000_2040 + 4c` | enabled sources of context `c` |
+| `THRESH(c)` | `0x8000_2060 + 4c` | the priority threshold of context `c` |
+| `CLAIM(c)` | `0x8000_2080 + 4c` | read: take the highest-priority source (0: none); write: complete it |
+| `IPI_DATA(h)` | `0x8000_1000 + 8h` | a message for hart `h`; a read takes it and clears its valid bit |
+| `IPI_STATUS(h)` | `0x8000_1004 + 8h` | bit 0: a message is waiting |
+| `BOOT_ENTRY(h)` | `0x8000_1010 + 4h` | the entry address hart 0 gives hart `h` |
+
+The `mtimecmp`/`mtime` layout is the standard CLINT's (msip at `+0`, mtimecmp at
+`+0x4000`, mtime at `+0xbff8`), rebased from `0x0200_0000` to `0x8000_4000` so that it
+stays inside the I/O window. Two contexts: 0 is hart 0's M-mode, 1 is hart 1's. The
+four sources are 1 the UART's received byte (a live level), 2 hart 0's mailbox, 3 hart
+1's mailbox, and 4 a spare external input (tied low on this board). A message posted to
+hart `h` raises source `2 + h`; a claim clears the pending bit and marks the source in
+service for that context (so a second claim returns 0), a write to the same claim
+register (the completion) clears the in-service bit, and a live level such as the
+UART's sets the pending bit again until software drains the UART.
+
+`mip` is assembled from the blocks, and this is the contract the core's interrupt input
+must implement (`Intc.mip`, `Intc.take`, `Intc.cause`):
+
+| bit | name | source |
+|---|---|---|
+| 3 | MSIP | `msip(hart)` |
+| 7 | MTIP | `mtime >= mtimecmp(hart)` |
+| 11 | MEIP | the PLIC has a source for the hart's context |
+
+The other `mip` bits read 0 (no supervisor or user mode). `mie` has the same three bits
+and an interrupt is taken when `mstatus.MIE` is set and `mip & mie != 0`; the code is
+MEI (11), then MSI (3), then MTI (7), matching the privileged specification's priority.
+Trap entry is the standard M-mode one: `mepc = pc`, `mcause = 0x8000_0000 | code`,
+`mstatus.MPIE = mstatus.MIE`, `mstatus.MIE = 0`, `mstatus.MPP = M`, `pc = mtvec` (direct
+mode only). `mret` restores `MIE = MPIE` and returns to `mepc`.
+
+**The core does not implement this yet.** `Rv.Core`/`Rv.Pipe` have no machine CSRs and
+no interrupt input (`In` has no `irq`); the blocks are the prerequisite, and the
+`Intc.mip`/`Intc.take`/`Intc.cause` functions are the specification to wire in. Until
+then software polls: `MTIME_LO/HI` against `MTIMECMP`, `IPI_STATUS`, and `PENDING`
+(`sw/golem.h` has the addresses, the `mip`/`mie` bits and the helper calls).
+`tests/golem_intc.wiz` checks the timer, the UART and mailbox paths, claim/complete,
+the `mip`/`mie` gating, the priority between MSI and MTI, and the boot handshake.
+
+### The boot ABI
+
+Reset sets every hart's `pc` to 0 (the boot ROM) and `mhartid` to its index; hart 0 is
+the boot hart. The protocol:
+
+1. Hart 0 runs the ROM: it waits for the DDR3 calibration, sets up its own traps, and
+   initialises the PLIC (priorities, then enables, then its threshold).
+2. For each other hart `h`, hart 0 writes the address of `h`'s entry point to
+   `BOOT_ENTRY(h)`, then writes 1 to `msip(h)`. This is one store each, in that order;
+   the message is the doorbell, the entry address is the sticky register.
+3. Hart `h`, if `mhartid != 0`, parks before touching anything shared: it polls
+   `msip(h)` (or `IPI_STATUS(h)` for a mailbox message). When the doorbell reads 1 it
+   reads `BOOT_ENTRY(h)`, clears `msip(h)` by writing 0, and jumps there. Its stack and
+   its page tables (none, AMP) are the entry point's responsibility.
+
+Because a hart cannot read `mhartid` through the (yet non-existent) CSR file, the ROM
+in this tree is still single-hart: the park loop and the hart-id branch are the first
+two instructions of a second hart's image, not of `GProg.golem`. Hart 1's park loop can
+be polled with `MSIP(1)`; there is no `wfi` (it needs the CSR file too).
+
+An IPI after boot uses the same registers: `IPI_DATA(h) = msg` posts a 32-bit word and
+raises PLIC source `2 + h`; the receiver claims it (`PLIC_CLAIM(1)` in hart 1's
+context), reads the word (which clears `IPI_STATUS`), and completes the source.
+
+The park loop, with the addresses of `sw/golem.h`:
+
+```
+park:
+    lw   t0, 0x80004004      # MSIP(1): hart 0's doorbell for hart 1
+    beqz t0, park
+    lw   t1, 0x80001014      # BOOT_ENTRY(1)
+    sw   zero, 0x80004004    # clear the doorbell
+    jalr zero, 0(t1)         # enter the program hart 0 placed there
+```
+
+Because `mtimecmp` is two 32-bit registers, write the high half first and then the low
+half: the other order makes a transient compare value from the old high half, which can
+raise MTIP for a cycle. `sw/golem.h`'s `golem_set_mtimecmp` does it in that order.
+
+### What this changes in the machines
+
+`Mini.machine` (the simulation) and `Doom.dSys` (the board) both carry `Intc.Ctl` in
+their state, decode the 16-bit register offset, read the block into the core's `ioIn`,
+and step it once per machine cycle with the UART's received byte as the live source.
+Two limits are recorded here rather than hidden:
+
+* `mtime` counts the machine's cycles. On `golem` (pipelined core) that is 100 MHz; on
+  `golemMc` the machine is under `Circuit.half`, so `mtime` is 50 MHz. Software that
+  needs wall time must scale by the variant (a gap to close by putting the timer in the
+  full-rate part, which needs a second MMIO path).
+* The block is at the core's I/O port, so an I/O store waits for the UART transmitter to
+  be idle (the existing machine's rule for every I/O store). It costs at most the
+  remaining byte time, but it means a timer compare write can be delayed.
+
 ## Files
 
 ```
 src/Rv/Golem/Map.wiz    the memory map: constants, decode predicates, MMIO offsets
 src/Rv/Golem/Bus.wiz    GBus.route (decode), GBus.arb (two masters), GBus.ramStep (sim DDR)
+src/Rv/Golem/Intc.wiz   the CLINT-like timer, the PLIC-style controller, the inter-hart
+                        mailbox, `mip`/`mie` and the boot ABI's registers
 src/Rv/Golem/Prog.wiz   the boot ROM: banner, DDR/host/timer checks, three pixels, a DDR call
 src/Rv/Golem.wiz        GIn/GOut, Golem.step (cache + controller + bus + machine),
                         golem / golemMc (board, with the PHY), the reset/LED policy
@@ -98,15 +215,17 @@ src/Rv/DPipe.wiz        the pipelined core in the Doom machine (`doomFull`, `sim
 app/golem.wiz           the board flow: gen, synth, bit, timing, dry (`golem …`)
 scripts/golem-board.sh  the flow wrapper: finds the tools, refuses to flash unsigned
 tests/golem.wiz         the executable simulation (UART bytes and the OLED SPI stream)
+tests/golem_intc.wiz    the timer, the external interrupt path and the boot handshake at values
 tests/golem_board.wiz   the `golem board` config/constraints check
 sw/golem.h              the memory map and MMIO for software
 sw/golem.c              a tiny C hello (banner, cycle counter, three rows)
 ```
 
 The machine itself is `Doom.doomSysCfg` (src/Rv/Doom.wiz), which is `doomSys` with
-the OLED timing configuration as a parameter. The OLED configuration is the only
-change to that file along with the UART status register; `doomHalf`/`doomFull` and
-their tests are unchanged.
+the OLED timing configuration as a parameter. The OLED configuration, the UART status
+register and the interrupt/timer block (`Intc.Ctl` in the machine's state and its
+16-bit I/O decode) are the changes to that file; `doomHalf`/`doomFull` and their tests
+are otherwise unchanged.
 
 ## Simulation
 
@@ -118,7 +237,7 @@ tests do. Compiling the machine with `Circuit.simFast` is over the 5 GB build ca
 (FINDINGS.md, S1 — the core's IR alone takes tens of minutes and gigabytes), so the
 executable checks use values and short runs.
 
-There are four checks, one per piece, because each kernel run's state is large
+There are five checks, one per piece, because each kernel run's state is large
 (`tests/golem*.wiz`):
 
 | test | what it runs | checks |
@@ -126,6 +245,7 @@ There are four checks, one per piece, because each kernel run's state is large
 | `tests/golem.wiz` | the boot ROM (`GProg.sim`) as a program on the ISA specification (`Rv.run`) | trap 2 (EBREAK), the UART text |
 | `tests/golem_oled.wiz` | the framebuffer and the SSD1331 streamer (`OledSim`, the controller at its `pixels` step) | the first six SPI data bytes: red, green, blue (RGB 565, high byte first) |
 | `tests/golem_bus.wiz` | `GBus.route`/`arb`/`ramStep` at values | the host writes `0x600d` to DDR[0], the core reads it back, no error |
+| `tests/golem_intc.wiz` | `Intc` at values | MTIP rises exactly when `mtime` reaches `mtimecmp` (tick 100), cause 7; `mstatus.MIE` gates it; MSI outranks MTI; the UART and mailbox PLIC paths claim, in-service, complete and re-arm (sources 1 and 3); the boot entry and doorbell handshake |
 | `tests/golem_board.wiz` | `GBoard` (the Arty configuration) | 75 pins, 55 top ports, clocks 100/400/400/200 MHz, reset domains as the design |
 
 The boot check is the program on the specification (the core is the multi-cycle one
@@ -136,6 +256,13 @@ bytes of a frame; the boot ROM also writes those pixels in the board image, but 
 specification sends every store with bit 31 set to the output port, so the lockstep
 program (`GProg.sim`) leaves the framebuffer out.
 
+The interrupt check runs the `Intc` step function at values, not the machine: there is
+no two-hart prototype in this tree (the second core, the `mhartid` CSR and the core's
+interrupt input are the next change), so the inter-hart part of the check is the
+mailbox between two harts' registers — hart 0 posts, hart 1's context claims and reads —
+rather than two cores executing. The timer half is the single-hart smoke test M6 asks
+for: `mtimecmp = 100` makes MTIP and the cause visible exactly at tick 100.
+
 ```sh
 # the design and the checks, with the toolchain of wiz-toolchain (see README,
 # "Toolchain"):
@@ -143,6 +270,7 @@ wiz check src/Rv/Golem.wiz   -I src -I ../wiz-ddr3/src
 wiz check tests/golem.wiz    -I src -I ../wiz-ddr3/src
 wiz check tests/golem_oled.wiz -I src -I ../wiz-ddr3/src
 wiz check tests/golem_bus.wiz  -I src -I ../wiz-ddr3/src
+wiz check tests/golem_intc.wiz -I src -I ../wiz-ddr3/src
 wiz check tests/golem_board.wiz -I src -I ../wiz-ddr3/src
 # or through grail (checks the library and runs the tests):
 grail build && grail test golem
@@ -158,6 +286,7 @@ ddr ok
 ", PASS
 golem oled: 11 data bytes, first six f8 00 07 e0 00 1f  — PASS
 golem bus: host wrote 0x600d, core read 24589, err 0 — PASS
+golem intc: timer mtip at tick 100, taken 1, cause 7, rearmed 0, csr 0/3; uart claim 1, again 0, completed 1, pending 2; ipi valid 1, meip 1, claim 3, pending 0, msg 24589; boot 0 -> 1 entry 1073742080 — PASS
 golem board: 75 pins, 55 top ports, 3 reset domains, clocks 100/400/400/200 MHz, PASS
 ```
 

@@ -1,0 +1,1 @@
+tests/golem_intc.wiz:164:1: info: "golem intc: timer mtip at tick 100, taken 1, cause 7, rearmed 0, csr 0/3; uart claim 1, again 0, completed 1, pending 2; ipi valid 1, meip 1, claim 3, pending 0, msg 24589; boot 0 -> 1 entry 1073742080 — PASS"

@@ -7,6 +7,9 @@ import Hdl.Core
 --   0x00000000  16 KB on-chip RAM: the boot ROM (the core's m0 … m3, wb = 12)
 --   0x40000000  256 MB DDR3 (through wiz-ddr3's cache and controller)
 --   0x80000000  MMIO: UART, cycle counter, DDR status, performance counters
+--   0x80001000  the inter-hart mailbox and the boot ABI (src/Rv/Golem/Intc.wiz)
+--   0x80002000  the PLIC-style external interrupt controller
+--   0x80004000  the CLINT-like timer (`msip`, `mtimecmp`, `mtime`)
 --   0x81000000  the 96 × 64 RGB 565 framebuffer (12 KB, halfword stores)
 
 def GMap.ramBase : Nat := 0
@@ -29,6 +32,17 @@ def GMap.soundFree : Nat := 52
 def GMap.ddrStatus : Nat := 64      -- bit 0 calibration done, bit 1 it failed
 def GMap.perf : Nat := 80           -- the performance counters, 0x50 … 0x7c
 def GMap.cycles : Nat := 0x50       -- alias of GMap.perf's first counter (instructions)
+
+-- the interrupt/timer blocks (offsets from GMap.mmioBase; the registers themselves are
+-- in src/Rv/Golem/Intc.wiz, and sw/golem.h mirrors them)
+def GMap.mbox : Nat := 4096         -- 0x1000: the inter-hart mailbox and boot entry
+def GMap.plic : Nat := 8192         -- 0x2000: the external interrupt controller
+def GMap.clint : Nat := 16384       -- 0x4000: msip, mtimecmp, mtime
+
+-- the 16-bit register offset the machine decodes in the I/O window (the blocks above
+-- are 256 bytes or more apart; the framebuffer at 0x81000000 is bit 24)
+def GMap.mmioOff {r : HwTy → Type} [Hw r] (a : r (HwTy.bits 32)) : r (HwTy.bits 16) :=
+  Hw.slice 0 16 a
 
 -- the framebuffer's shape
 def GMap.width : Nat := 96

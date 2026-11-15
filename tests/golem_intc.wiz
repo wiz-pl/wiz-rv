@@ -1,0 +1,164 @@
+-- test: check
+import Rv.Golem.Intc
+import Text
+-- golem's interrupt/timer block at values (`Intc`, src/Rv/Golem/Intc.wiz): the
+-- single-hart timer (mtime reaches mtimecmp, MTIP rises, `mip`/`mie` and the cause),
+-- the PLIC-style external path (a UART level and a mailbox message: priority, enable,
+-- threshold, claim and complete), and the boot ABI's handshake (hart 0 writes hart 1's
+-- entry address and sets its doorbell). There is no second core yet (DESIGN.md,
+-- "Interrupts, timer and harts"), so the inter-hart part is the mailbox between two
+-- harts' registers, not two harts executing; the timer is the single-hart smoke test.
+
+def T.bus (rd wr : Nat) (off d : Nat) : Intc.Bus HwTy.El :=
+  Intc.Bus.mk (BitVec.ofNat 1 rd) (BitVec.ofNat 1 wr) (BitVec.ofNat 16 off) (BitVec.ofNat 32 d)
+
+def T.src (uart : Nat) : Intc.Src HwTy.El :=
+  Intc.Src.mk (BitVec.ofNat 1 uart) (BitVec.ofNat 1 0)
+
+-- one clock: `tick` counts mtime, `rd`/`wr` are the core's access at `off`, `uart` is
+-- the live UART source level
+def T.step (s : Intc.Ctl HwTy.El) (tick uart rd wr : Nat) (off d : Nat) : Intc.Ctl HwTy.El :=
+  Intc.Ctl.unpack (Intc.step s (BitVec.ofNat 1 tick) (Intc.srcBits (T.src uart)) (T.bus rd wr off d))
+
+def T.write (s : Intc.Ctl HwTy.El) (off d : Nat) : Intc.Ctl HwTy.El := T.step s 0 0 0 1 off d
+def T.tick (s : Intc.Ctl HwTy.El) : Intc.Ctl HwTy.El := T.step s 1 0 0 0 0 0
+
+-- a read (`rd` lets a claim or a mailbox read take effect) and the value it returned
+def T.read (s : Intc.Ctl HwTy.El) (off : Nat) : Nat :=
+  (Intc.read s (Intc.srcBits (T.src 0)) (BitVec.ofNat 16 off)).toNat
+def T.readSrc (s : Intc.Ctl HwTy.El) (uart off : Nat) : Nat :=
+  (Intc.read s (Intc.srcBits (T.src uart)) (BitVec.ofNat 16 off)).toNat
+
+def T.bit (v k : Nat) : Nat := Nat.mod (Nat.div v (Nat.pow 2 k)) 2
+
+def T.mipOf (s : Intc.Ctl HwTy.El) (hart : Nat) : Nat :=
+  (Intc.mip s (Intc.srcBits (T.src 0)) hart).toNat
+
+def T.takeOf (mip mie mstatus : Nat) : Nat :=
+  let m : HwTy.El B32 := BitVec.ofNat 32 mip;
+  let e : HwTy.El B32 := BitVec.ofNat 32 mie;
+  let s : HwTy.El W1 := BitVec.ofNat 1 mstatus;
+  (Intc.take m e s).toNat
+
+def T.causeOf (mip mie : Nat) : Nat :=
+  let m : HwTy.El B32 := BitVec.ofNat 32 mip;
+  let e : HwTy.El B32 := BitVec.ofNat 32 mie;
+  (Intc.cause m e).toNat
+
+-- the first tick at which hart 0's MTIP is high (0: never within `n`)
+def T.firstMtip : Nat → Intc.Ctl HwTy.El → Nat → Nat
+  | .zero, _, acc => acc
+  | .succ n, s, acc =>
+    let s' := T.tick s;
+    if Nat.beq (T.bit (T.mipOf s' 0) Intc.mtipBit) 1 then acc + 1
+    else T.firstMtip n s' (acc + 1)
+
+def T.runTicks : Nat → Intc.Ctl HwTy.El → Intc.Ctl HwTy.El
+  | .zero, s => s
+  | .succ k, s => T.runTicks k (T.tick s)
+
+def T.all : List Bool → Bool
+  | .nil => .true
+  | .cons b bs => Bool.and b (T.all bs)
+
+-- `mip`/`mie`/`mstatus.MIE`: MIE low gates every interrupt; with MSIP and MTIP both
+-- pending and enabled, the software interrupt (cause 3) wins over the timer (cause 7)
+def T.csr : Nat × Nat :=
+  let mip : Nat := Nat.pow 2 Intc.mtipBit + Nat.pow 2 Intc.msipBit;
+  let mie : Nat := Nat.pow 2 Intc.mtipBit + Nat.pow 2 Intc.msipBit;
+  (T.takeOf mip mie 0, T.causeOf mip mie)
+
+-- mtimecmp[0] = 100, 150 ticks: MTIP must rise at tick 100, and `mip & mie` with
+-- MTIE and mstatus.MIE must say timer interrupt, cause 7; re-arming above mtime
+-- clears it again
+def T.timer : Nat × Nat × Nat × Nat :=
+  let s0 := T.write Intc.init Intc.clintMtimecmp 100;
+  let first := T.firstMtip 150 s0 0;
+  let s100 := T.runTicks 100 s0;
+  let mip := T.mipOf s100 0;
+  let mie : Nat := Nat.pow 2 Intc.mtipBit;
+  let taken := T.takeOf mip mie 1;
+  let cause := T.causeOf mip mie;
+  let sRearm := T.write s100 Intc.clintMtimecmp 200;
+  let after := T.bit (T.mipOf sRearm 0) Intc.mtipBit;
+  (first, taken, cause, after)
+
+-- the UART as PLIC source 1 for hart 0: a claim returns 1 and marks it in service (a
+-- second claim returns 0), completing it lets the still-live level be claimed again
+def T.uartPath : Nat × Nat × Nat × Nat :=
+  let s0 := T.write Intc.init (Intc.plicPrio + 4) 2;          -- priority 2
+  let s1 := T.write s0 Intc.plicEnable 2;                     -- source 1 for hart 0
+  let claim := T.readSrc s1 1 Intc.plicClaim;                 -- the level is live
+  let s2 := T.step s1 0 1 1 0 Intc.plicClaim 0;               -- claim it
+  let again := T.readSrc s2 1 Intc.plicClaim;                 -- in service: none
+  let s3 := T.step s2 0 1 0 1 Intc.plicClaim 1;               -- complete source 1
+  let after := T.readSrc s3 1 Intc.plicClaim;                 -- live again
+  let pend := T.readSrc s3 1 Intc.plicPending;
+  (claim, again, after, pend)
+
+-- hart 0 posts a message to hart 1: pending for hart 1, MEIP, claim 2, the message and
+-- its valid bit; hart 0's context stays quiet
+def T.mboxPath : Nat × Nat × Nat × Nat × Nat :=
+  let s0 := T.write Intc.init (Intc.plicPrio + 12) 1;         -- source 3: priority 1
+  let s1 := T.write s0 (Intc.plicEnable + 4) 8;               -- source 3 for hart 1
+  let s2 := T.write s1 (Intc.mboxData + 8) 24589;             -- 0x600d to hart 1
+  let valid := T.read s2 (Intc.mboxStatus + 8);
+  let meip1 := T.bit (T.mipOf s2 1) Intc.meipBit;
+  let meip0 := T.bit (T.mipOf s2 0) Intc.meipBit;
+  let claim := T.read s2 (Intc.plicClaim + 4);
+  let s3 := T.step s2 0 0 1 0 (Intc.plicClaim + 4) 0;         -- claim for hart 1
+  let pend := T.read s3 Intc.plicPending;
+  let msg := T.read s3 (Intc.mboxData + 8);
+  let s4 := T.step s3 0 0 1 0 (Intc.mboxData + 8) 0;          -- take the message
+  let valid2 := T.read s4 (Intc.mboxStatus + 8);
+  (valid, meip1 + meip0, claim, pend, msg + valid2)
+
+-- the boot ABI: hart 0 sets hart 1's entry and rings its doorbell; hart 1's park loop
+-- sees `released`, reads the entry, and the doorbell clears
+def T.boot : Nat × Nat × Nat :=
+  let s0 := T.write Intc.init (Intc.mboxBoot + 4) 1073742080; -- 0x40000100
+  let before := (Intc.released s0.clint 1).toNat;
+  let s1 := T.write s0 (Intc.clintMsip + 4) 1;
+  let after := (Intc.released s1.clint 1).toNat;
+  let entry := (Intc.entry s1.clint 1).toNat;
+  let s2 := T.write s1 (Intc.clintMsip + 4) 0;
+  let cleared := (Intc.released s2.clint 1).toNat;
+  (before, after + cleared, entry)
+
+def T.report : String :=
+  let t := T.timer;
+  let c := T.csr;
+  let u := T.uartPath;
+  let m := T.mboxPath;
+  let b := T.boot;
+  let ok := T.all (.cons (Nat.beq t.1 100)
+    (.cons (Nat.beq t.2.1 1)
+    (.cons (Nat.beq t.2.2.1 Intc.mtiCause)
+    (.cons (Nat.beq t.2.2.2 0)
+    (.cons (Nat.beq c.1 0)
+    (.cons (Nat.beq c.2 Intc.msiCause)
+    (.cons (Nat.beq u.1 1)
+    (.cons (Nat.beq u.2.1 0)
+    (.cons (Nat.beq u.2.2.1 1)
+    (.cons (Nat.beq u.2.2.2 2)
+    (.cons (Nat.beq m.1 1)
+    (.cons (Nat.beq m.2.1 1)
+    (.cons (Nat.beq m.2.2.1 3)
+    (.cons (Nat.beq m.2.2.2.1 0)
+    (.cons (Nat.beq m.2.2.2.2 24589)
+    (.cons (Nat.beq b.1 0)
+    (.cons (Nat.beq b.2.1 1)
+    (.cons (Nat.beq b.2.2 1073742080)
+    .nil))))))))))))))))));
+  "golem intc: timer mtip at tick " ++ Nat.repr t.1 ++ ", taken " ++ Nat.repr t.2.1
+    ++ ", cause " ++ Nat.repr t.2.2.1 ++ ", rearmed " ++ Nat.repr t.2.2.2
+    ++ ", csr " ++ Nat.repr c.1 ++ "/" ++ Nat.repr c.2
+    ++ "; uart claim " ++ Nat.repr u.1 ++ ", again " ++ Nat.repr u.2.1
+    ++ ", completed " ++ Nat.repr u.2.2.1 ++ ", pending " ++ Nat.repr u.2.2.2
+    ++ "; ipi valid " ++ Nat.repr m.1 ++ ", meip " ++ Nat.repr m.2.1
+    ++ ", claim " ++ Nat.repr m.2.2.1 ++ ", pending " ++ Nat.repr m.2.2.2.1
+    ++ ", msg " ++ Nat.repr m.2.2.2.2 ++ "; boot " ++ Nat.repr b.1
+    ++ " -> " ++ Nat.repr b.2.1 ++ " entry " ++ Nat.repr b.2.2
+    ++ (if ok then " — PASS" else " — FAIL")
+
+#eval T.report

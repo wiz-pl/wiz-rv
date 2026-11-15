@@ -1,5 +1,7 @@
 import Rv.Oled
 import Rv.Board
+import Rv.Golem.Map
+import Rv.Golem.Intc
 -- The Doom machine on the Arty A7 (README.md, "Doom"): the RV32IM core with 16 KB of
 -- on-chip RAM (the boot loader, `Prog.boot`) and a bus to DDR (through the 8 KB
 -- write-back cache of wiz-ddr3), and its I/O:
@@ -13,6 +15,9 @@ import Rv.Board
 --   0x80000050 … 0x80000068    performance counters (read): instructions, cycles in the bus
 --                              phase, in M, in shifts/products/divisions, after stores;
 --                              the cache's hits, misses
+--   0x80001000  mailbox         inter-hart messages and the boot ABI (Intc.wiz)
+--   0x80002000  PLIC            the external interrupt controller (Intc.wiz)
+--   0x80004000  CLINT           msip, mtimecmp and mtime (Intc.wiz)
 --   0x81000000  framebuffer    96 × 64 RGB 565, halfword stores (sw/hw.h)
 --
 -- The sound FIFO is played at 11025 Hz (a sample every 4535 cycles) as 8-bit PWM on
@@ -170,6 +175,7 @@ structure DSys (fl : Nat) (h : HwTy) (r : HwTy → Type) where
   full : r W1
   byte : r W8
   cyc : r B65     -- (the low bit is a prescaler at the full rate)
+  intc : Intc.Ctl r
   snd : Snd r
   fb : Fb r
   oled : RCtl fl r
@@ -186,9 +192,13 @@ def dSys (full : Bool) (cfg : RgbCfg) (ediv : Nat) (cc : Circuit CIn.code COut.c
   let ω got := Byte.unpack (Hw.snd rr);
   let rst := bitOf 0 x.btn;
   let ω o0 := (COut.unpack (Hw.snd (Circuit.inst cc s.cpu (CIn.pack (CIn.mk In.quiet rst))))).o;
-  let off : r W8 := Hw.slice 0 8 o0.ioa;
+  let off : r B16 := GMap.mmioOff o0.ioa;
   let fbA := bitOf 24 o0.ioa;
   let uartA := Hw.and (isK off 0) (Hw.not fbA);
+  -- the interrupt/timer block's register offset, and the live external sources (a
+  -- received UART byte; the spare input is tied low)
+  let ioff : r B16 := Hw.mux fbA (Hw.lit 16 0) off;
+  let isrc : r B5 := Intc.srcBits (Intc.Src.mk s.full (Hw.lit 1 0));
   let ω sn := s.snd;
   let count : r B13 := Hw.sub sn.wp sn.rp;
   let free : r B32 := Hw.sub (Hw.lit 32 4096) (Hw.cat (Hw.lit 19 0) count);
@@ -201,11 +211,13 @@ def dSys (full : Bool) (cfg : RgbCfg) (ediv : Nat) (cc : Circuit CIn.code COut.c
     (Hw.mux (isK off 100) s.edge.hits (Hw.mux (isK off 104) s.edge.misses (Hw.mux (isK off 108) s.perf.fbw
     (Hw.mux (isK off 112) s.perf.refreshes (Hw.mux (isK off 116) s.perf.odd (Hw.mux (isK off 120) s.perf.lastSum (Hw.mux (isK off 124) s.perf.under (Hw.mux (isK off 128)
       (Hw.cat (Hw.lit 20 0) (Hw.cat s.oled.pins.pmoden (Hw.cat s.oled.pins.vccen (Hw.cat s.oled.pins.res
-        (Hw.cat s.oled.pins.dc (Hw.cat s.oled.pins.cs s.oled.sq.pc)))))) (Hw.lit 32 0)))))))))))))))))));
+        (Hw.cat s.oled.pins.dc (Hw.cat s.oled.pins.cs s.oled.sq.pc)))))) (Intc.read s.intc isrc ioff)))))))))))))))))));
   let cr := Circuit.inst cc s.cpu (CIn.pack (CIn.mk (In.mk (Hw.and (txIdle s.tx) (Hw.not s.txGo)) ioIn s.edge.ready s.edge.rvalid s.edge.rdata) rst));
   let ω co := COut.unpack (Hw.snd cr);
   let ω o := co.o;
   let ω ev := co.ev;
+  let intcNext := Intc.step s.intc (Hw.lit 1 1) isrc
+    (Intc.Bus.mk o.rd (Hw.and o.wr (Hw.not fbA)) ioff o.iod);
   -- sound: a write at 0x30 while there is room; a sample every `sndDiv` cycles
   let sw := Hw.and o.wr (Hw.and (isK off 48) (Hw.and (Hw.not fbA) (Hw.ult count (Hw.lit 13 4096))));
   let tick := isK sn.div (Doom.sndDivK full - 1);
@@ -240,6 +252,7 @@ def dSys (full : Bool) (cfg : RgbCfg) (ediv : Nat) (cc : Circuit CIn.code COut.c
       (Hw.mux got.valid hi (Hw.mux (Hw.and o.rd uartA) lo s.full))
       (Hw.mux got.valid got.data s.byte)
       (inc s.cyc)
+      (Intc.Ctl.unpack intcNext)
       (Snd.mk
         (Hw.memWrite sn.fifo sn.we (Hw.slice 0 12 sn.wp) sn.wd)
         (Hw.mux sn.we (inc sn.wp) sn.wp)
@@ -284,7 +297,7 @@ def dSys (full : Bool) (cfg : RgbCfg) (ediv : Nat) (cc : Circuit CIn.code COut.c
 def DSys.init (cfg : RgbCfg) (cc : Circuit CIn.code COut.code) : DSys cfg.frameLog cc.st HwTy.El :=
   DSys.mk (Edge.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
       (BitVec.ofNat 32 0) (BitVec.ofNat 32 0))
-    cc.init Sync.init Rx.init UTx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 65 0)
+    cc.init Sync.init Rx.init UTx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 65 0) Intc.init
     (Snd.mk (fun (a : BitVec 12) => BitVec.ofNat 8 128) (BitVec.ofNat 13 0) (BitVec.ofNat 13 0) (BitVec.ofNat 8 128)
       (BitVec.ofNat 8 128) (BitVec.ofNat 14 0) (BitVec.ofNat 9 0) (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 32 4096))
     (Fb.mk (fun (a : BitVec 13) => BitVec.ofNat 16 0) (BitVec.ofNat 16 0) (BitVec.ofNat 4 0) (BitVec.ofNat 1 0) (BitVec.ofNat 16 0)
