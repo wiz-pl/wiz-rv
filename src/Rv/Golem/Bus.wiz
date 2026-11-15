@@ -1,6 +1,7 @@
 import Hdl.Core
 import Rv.Uart
 import Rv.Golem.Map
+import Ddr3.Util
 
 ------------------------------------------------------------------------------------
 -- The bus adapter, at the full rate, between the core (at half rate: it sees the bus
@@ -59,6 +60,10 @@ def busStep {r : HwTy → Type} [Hw r] (s : BusA r) (valid pend we : r W1) (addr
 def BusA.init : BusA HwTy.El := BusA.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0)
   (BitVec.ofNat 32 0) (BitVec.ofNat 4 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0)
 
+-- the same state at any wire type (the reset value in a design, not just in a test)
+def BusA.zero {r : HwTy → Type} [Hw r] : BusA r := BusA.mk lo lo (Hw.lit 32 0) lo
+  (Hw.lit 32 0) (Hw.lit 4 0) lo lo (Hw.lit 32 0)
+
 -- The golem bus: one request/one answer at a time, as wiz-ddr3's native port
 -- (`CacheReq`/`CacheResp`, below) and the DDR cache use it. Three pieces:
 --
@@ -68,6 +73,11 @@ def BusA.init : BusA HwTy.El := BusA.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (B
 --   `GBus.arb`    two masters (the core and a host loader) onto that port: the first
 --                 request wins, the owner keeps the bus until its answer, so the core
 --                 (which holds its request until `ready`) is never starved mid-word.
+--   `GBus.arbN`   the N-master interconnect (Phase 0/1, decisions M4/M5): the same
+--                 contract with round-robin arbitration, per-master QoS and a burst
+--                 cap. `GBus.arb` is the frozen two-master fast path used by the
+--                 single-hart SoC; `golem_four` (src/Rv/Golem/Four.wiz) and
+--                 tests/golem_four.wiz run this one.
 --   `GBus.ramStep` a behavioural DDR for simulation: words with byte masks, answering
 --                 two cycles after the request (the cache and the controller are
 --                 replaced by it in `golemSim`; `golemSimDdr` has the real ones).
@@ -139,6 +149,202 @@ def GBus.arb {r : HwTy → Type} [Hw r] (s : GBus.Arb r) (c h : CacheReq r) (res
       (Hw.mux s.busy s.owner g)))
     (Hw.pair sel
       (Hw.pair (Hw.mux g zeroC respC) (Hw.mux g respC zeroC)))
+--------------------------------------------------------------------------------
+-- N masters: the same contract as `GBus.arb` (one request and one answer at a time,
+-- the owner keeps the bus until its answer, a master that drops `valid` mid-request
+-- ends it) with round-robin arbitration, a per-master QoS level and a burst cap.
+--
+-- Configuration is elaboration-time:
+--   n    the number of masters (masters are the list `qs`, in order)
+--   cap  how many consecutive requests one master may be granted before another
+--        master with a request is considered; 0 disables the cap (pure round-robin)
+--   qos  one level per master; only the highest level with an eligible request
+--        competes, and within a level the masters take turns (equal levels are pure
+--        round-robin). A level is a static priority, the turns make it fair.
+--
+-- The state is busy, the owner's index, the owner's remaining burst credit and the
+-- round-robin pointer (the first index to consider next). The contract is exactly
+-- `GBus.arb`'s: `sel` is the one request the slave sees, the returned mask says which
+-- master owns the answer this cycle, and every other master sees `GBus.noResp`. A
+-- request is therefore never lost (the owner holds it until `ready`/`rvalid`) and
+-- never duplicated (the mask is one-hot, or zero when no master asks).
+--
+-- `GBus.arb` above stays the two-master fast path the single-hart SoC uses
+-- (`Golem.step`); its behavior is unchanged. `tests/golem_four.wiz` checks the
+-- four-master no-loss and no-starvation properties of `GBus.arbN`.
+
+-- the index width for n masters: at least one bit, otherwise ceil(log2 n)
+def GBus.ixw (n : Nat) : Nat :=
+  match Nat.le n 1 with
+  | .true => 1
+  | .false => Hdl.clog2 n
+
+structure GBus.NArb (n cap : Nat) (r : HwTy → Type) where
+  busy : r W1
+  owner : r (HwTy.bits (GBus.ixw n))
+  rem : r (HwTy.bits 8)      -- the owner's remaining burst credit
+  rr : r (HwTy.bits (GBus.ixw n))
+  deriving Bundle
+
+def GBus.nArbInit (n cap : Nat) : GBus.NArb n cap HwTy.El :=
+  GBus.NArb.mk (BitVec.ofNat 1 0) (BitVec.ofNat (GBus.ixw n) 0)
+    (BitVec.ofNat 8 cap) (BitVec.ofNat (GBus.ixw n) 0)
+
+-- the zero request, and the answer a master that does not own the bus sees
+def GBus.zeroReq {r : HwTy → Type} [Hw r] : CacheReq r :=
+  CacheReq.mk lo (Hw.lit 28 0) lo (Hw.lit 32 0) (Hw.lit 4 0)
+
+def GBus.respFor {r : HwTy → Type} [Hw r] {ω n : Nat}
+    (mask : r (HwTy.bits n)) (k : Nat) (resp : CacheResp r) : CacheResp r :=
+  CacheResp.unpack (Hw.mux (bitOf k mask) (CacheResp.pack resp)
+    (CacheResp.pack (GBus.noResp (r := r))))
+
+-- the highest QoS level in a configuration
+def GBus.maxQos : List Nat → Nat
+  | .nil => 0
+  | .cons q qs => match Nat.lt (GBus.maxQos qs) q with
+    | .true => q
+    | .false => GBus.maxQos qs
+
+-- [k, k-1, …, 0], the levels to try from the highest down
+def GBus.downFrom : Nat → List Nat
+  | .zero => .cons 0 .nil
+  | .succ k => .cons (Nat.succ k) (GBus.downFrom k)
+
+-- `or` over the n masters of a per-master predicate
+def GBus.anyAtGo {r : HwTy → Type} [Hw r] : Nat → (Nat → r W1) → r W1
+  | .zero, _ => lo
+  | .succ k, f => Hw.or (f k) (GBus.anyAtGo k f)
+def GBus.anyAt {r : HwTy → Type} [Hw r] (n : Nat) (f : Nat → r W1) : r W1 :=
+  GBus.anyAtGo n f
+
+-- the highest level (from the configuration's maximum down) with an eligible request;
+-- level 0 if none, which only happens when no master asks
+def GBus.topLevelGo {r : HwTy → Type} [Hw r] (qw : Nat) : List Nat → (Nat → r W1) → r (HwTy.bits qw)
+  | .nil, _ => Hw.lit qw 0
+  | .cons l ls, f => Hw.mux (f l) (Hw.lit qw l) (GBus.topLevelGo qw ls f)
+def GBus.topLevel {r : HwTy → Type} [Hw r] (qw maxQ : Nat) (f : Nat → r W1) : r (HwTy.bits qw) :=
+  GBus.topLevelGo qw (GBus.downFrom maxQ) f
+
+-- `(rr + d) mod n` in the index width: the natural wrap for a power of two, a
+-- subtract otherwise (the sum is computed one bit wider so that it cannot wrap first)
+def GBus.addMod {r : HwTy → Type} [Hw r] (iw n d : Nat) (rr : r (HwTy.bits iw)) : r (HwTy.bits iw) :=
+  match Nat.beq (Nat.pow 2 iw) n with
+  | .true => Hw.add rr (Hw.lit iw d)
+  | .false =>
+      let wide : r (HwTy.bits (Nat.add 1 iw)) :=
+        Hw.add (Hw.cat (Hw.lit 1 0 : r W1) rr) (Hw.lit (Nat.add 1 iw) d);
+      let red := Hw.mux (Hw.ult wide (Hw.lit (Nat.add 1 iw) n)) wide
+        (Hw.sub wide (Hw.lit (Nat.add 1 iw) n));
+      Hw.slice 0 iw red
+
+-- the request, valid bit and QoS level at a signal index
+def GBus.atVal {r : HwTy → Type} [Hw r] (iw n : Nat) (ix : r (HwTy.bits iw))
+    (vs : List (r W1)) : r W1 :=
+  U.select ix (fun (k : Nat) => Hdl.nthD lo vs k) n
+def GBus.atQos {r : HwTy → Type} [Hw r] (iw qw n : Nat) (ix : r (HwTy.bits iw))
+    (qos : List Nat) : r (HwTy.bits qw) :=
+  U.select ix (fun (k : Nat) => Hw.lit qw (Hdl.nthD 0 qos k)) n
+def GBus.atReq {r : HwTy → Type} [Hw r] (iw n : Nat) (ix : r (HwTy.bits iw))
+    (qs : List (CacheReq r)) : CacheReq r :=
+  CacheReq.unpack (U.select ix
+    (fun (k : Nat) => CacheReq.pack (Hdl.nthD (GBus.zeroReq (r := r)) qs k)) n)
+
+-- the burst cap for a static master index: a master other than the current owner may
+-- always start; the owner may continue while it has credit (or when the cap is off)
+def GBus.capOk {r : HwTy → Type} [Hw r] (n cap : Nat) (s : GBus.NArb n cap r)
+    (k : Nat) : r W1 :=
+  match Nat.beq cap 0 with
+  | .true => hi
+  | .false =>
+      Hw.or (Hw.not (Hw.eq (Hw.lit (GBus.ixw n) k) s.owner))
+        (Hw.not (Hw.eq s.rem (Hw.lit 8 0)))
+
+-- the same, for a master index that is a signal (the round-robin scan)
+def GBus.capOkIdx {r : HwTy → Type} [Hw r] (n cap : Nat) (s : GBus.NArb n cap r)
+    (ix : r (HwTy.bits (GBus.ixw n))) : r W1 :=
+  match Nat.beq cap 0 with
+  | .true => hi
+  | .false =>
+      Hw.or (Hw.not (Hw.eq ix s.owner)) (Hw.not (Hw.eq s.rem (Hw.lit 8 0)))
+
+-- `g + 1`, wrapped to `n`
+def GBus.nextIdx {r : HwTy → Type} [Hw r] (iw n : Nat) (g : r (HwTy.bits iw)) : r (HwTy.bits iw) :=
+  let s := Hw.add g (Hw.lit iw 1);
+  match Nat.beq (Nat.pow 2 iw) n with
+  | .true => s
+  | .false => Hw.mux (Hw.eq s (Hw.lit iw n)) (Hw.lit iw 0) s
+
+-- the first candidate, in round-robin order from `rr`, whose predicate is high:
+-- `scanGo k` considers the first k offsets, with offset 0 outermost (highest priority)
+def GBus.scanGo {r : HwTy → Type} [Hw r] (iw n : Nat) (rr : r (HwTy.bits iw))
+    (cand : Nat → r W1) : Nat → r (HwTy.bits iw)
+  | .zero => Hw.lit iw 0
+  | .succ k =>
+      let d := Nat.sub n (Nat.succ k);
+      let ix := GBus.addMod iw n d rr;
+      Hw.mux (cand d) ix (GBus.scanGo iw n rr cand k)
+def GBus.scan {r : HwTy → Type} [Hw r] (iw n : Nat) (rr : r (HwTy.bits iw))
+    (cand : Nat → r W1) (k : Nat) : r (HwTy.bits iw) :=
+  GBus.scanGo iw n rr cand k
+
+-- the next arbiter state, the request the slave sees, and a one-hot grant mask (one
+-- bit per master, the owner of this cycle's answer; zero when nobody asks)
+def GBus.arbN (n cap : Nat) (qos : List Nat) {r : HwTy → Type} [Hw r]
+    (s : GBus.NArb n cap r) (qs : List (CacheReq r)) (resp : CacheResp r) :
+    r (HwTy.prod (GBus.NArb.code n cap) (HwTy.prod CacheReq.code (HwTy.bits n))) :=
+  let qw := 8;
+  let vs := List.map (fun (q : CacheReq r) => q.valid) qs;
+  let maxQ := GBus.maxQos qos;
+  -- strict eligibility (a request that the burst cap lets in) and loose (any request);
+  -- the strict set decides when it is non-empty, the loose one is the fallback that
+  -- keeps the bus busy when only the current owner may ask
+  let strict := fun (k : Nat) => Hw.and (Hdl.nthD lo vs k) (GBus.capOk n cap s k);
+  let loose := fun (k : Nat) => Hdl.nthD lo vs k;
+  let isLev := fun (k l : Nat) => match Nat.beq (Hdl.nthD 0 qos k) l with
+    | .true => hi
+    | .false => lo;
+  let levAny := fun (elig : Nat → r W1) (l : Nat) =>
+    GBus.anyAt n (fun (k : Nat) => Hw.and (elig k) (isLev k l));
+  let chosenS := GBus.topLevel qw maxQ (levAny strict);
+  let chosenL := GBus.topLevel qw maxQ (levAny loose);
+  let hasS := GBus.anyAt n strict;
+  let hasAny := GBus.anyAt n loose;
+  let chosen := Hw.mux hasS chosenS chosenL;
+  -- the round-robin scan, in index order rr, rr+1, …: the first eligible master at
+  -- the chosen level wins (so ties at reset go to master 0, the core)
+  let cand := fun (d : Nat) =>
+    let ix := GBus.addMod (GBus.ixw n) n d s.rr;
+    let v := GBus.atVal (GBus.ixw n) n ix vs;
+    let lv := GBus.atQos (GBus.ixw n) qw n ix qos;
+    let ok := GBus.capOkIdx n cap s ix;
+    let elig := Hw.mux hasS (Hw.and v ok) v;
+    Hw.and elig (Hw.eq lv chosen);
+  let gRR := GBus.scan (GBus.ixw n) n s.rr cand n;
+  -- a burst: while the cap is on and the owner still has credit and is at the
+  -- winning level, it continues; otherwise the round-robin scan decides
+  let ownerV := GBus.atVal (GBus.ixw n) n s.owner vs;
+  let ownerQ := GBus.atQos (GBus.ixw n) qw n s.owner qos;
+  let cont := match Nat.beq cap 0 with
+    | .true => lo
+    | .false => Hw.and (Hw.and (Hw.not s.busy) ownerV)
+        (Hw.and (Hw.eq ownerQ chosen) (GBus.capOkIdx n cap s s.owner));
+  let g := Hw.mux s.busy s.owner (Hw.mux cont s.owner gRR);
+  let gV := Hw.mux s.busy ownerV (Hw.mux cont hi hasAny);
+  let sel := GBus.atReq (GBus.ixw n) n g qs;
+  let mask := Hw.mux gV (Hw.shlBy (Hw.lit n 1 : r (HwTy.bits n)) g) (Hw.lit n 0);
+  -- the answer ends the request; so does the owner dropping `valid` mid-request
+  let done := Hw.or (Hw.or resp.ready resp.rvalid) (Hw.and s.busy (Hw.not gV));
+  let started := Hw.and gV (Hw.not s.busy);
+  let nextRem := Hw.mux started
+    (Hw.mux (Hw.eq g s.owner) (U.down s.rem) (Hw.lit 8 (Nat.sub cap 1))) s.rem;
+  Hw.pair
+    (GBus.NArb.pack n cap (GBus.NArb.mk
+      (Hw.mux done lo (Hw.mux s.busy hi gV))
+      (Hw.mux s.busy s.owner g)
+      nextRem
+      (Hw.mux started (GBus.nextIdx (GBus.ixw n) n g) s.rr)))
+    (Hw.pair (CacheReq.pack sel) mask)
 --------------------------------------------------------------------------------
 -- A behavioural DDR for simulation. Words of 32 bits with byte masks, `wait` counts
 -- the cycles since the request: an answer on the second one. The address is the

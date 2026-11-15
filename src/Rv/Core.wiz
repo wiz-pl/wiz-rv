@@ -48,6 +48,7 @@ def Ph.x : Nat := 6   -- M: the product (one cycle)
 def Ph.v : Nat := 7   -- M: division, one quotient bit per cycle
 def Ph.p : Nat := 8   -- a bus access (DDR), until it is answered
 def Ph.q : Nat := 9   -- after a cache line was filled: read it again
+def Ph.w : Nat := 10  -- FENCE: the drain point between two instructions
 
 -- The L1 cache in front of DDR (unified: the core reads one word at a time, an
 -- instruction or data): 2^lb lines of 16 bytes in block RAM, direct-mapped, write-through
@@ -57,6 +58,19 @@ def Ph.q : Nat := 9   -- after a cache line was filled: read it again
 def L1.bits (wb : Nat) : Nat := if Nat.lt wb 12 then 1 else 10
 def L1.tagW (wb : Nat) : Nat := Nat.add 1 (24 - L1.bits wb)
 def B128 : HwTy := HwTy.bits 128
+
+-- The uncached shared aperture: the top 16 MB of DDR (0x4F00_0000 … 0x4FFF_FFFF) is
+-- never read into or written from the private L1. A word there is one bus request, so
+-- every access goes to the single shared DDR cache, the point where the harts' stores
+-- are serialised. Golem's mailbox flags and shared data live here; `GMap.uncBase`
+-- repeats the constant for the memory map (this module does not import the SoC).
+-- (`Rv.Isa`/`Rv.Golem.CohModel` call the aperture `ldu`/`stu`.)
+def Core.uncBase : Nat := 1325400064   -- 0x4F00_0000
+def Core.uncBytes : Nat := 16777216    -- 16 MB
+
+def Core.isUncached {r : HwTy → Type} [Hw r] (a : r B32) : r W1 :=
+  Hw.and (Hw.not (Hw.ult a (Hw.lit 32 Core.uncBase)))
+    (Hw.ult a (Hw.lit 32 (Core.uncBase + Core.uncBytes)))
 
 structure CoreSt (ab wb : Nat) (r : HwTy → Type) where
   ph : r B4
@@ -197,6 +211,7 @@ structure Dec (r : HwTy → Type) where
   md : r W1       -- M: OP with funct7 = 1
   ecall : r W1
   ebreak : r W1
+  fence : r W1
   legal : r W1
   immI : r B32
   immS : r B32
@@ -249,13 +264,16 @@ def decode {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (w : r B32) : Dec r
   let immU : r B32 := Hw.cat (Hw.slice 12 20 w : r B20) (Hw.lit 12 0);
   let immJ : r B32 := Hw.cat (rep 12 sgn) (Hw.cat (Hw.slice 12 8 w : r W8) (Hw.cat (bitOf 20 w)
       (Hw.cat (Hw.slice 21 10 w : r (HwTy.bits 10)) (Hw.lit 1 0))));
-  Dec.mk rd f3 r1 r2 (bitOf 30 w) lui auipc jal jalr branch load store opimm op md ecall ebreak legal
+  Dec.mk rd f3 r1 r2 (bitOf 30 w) lui auipc jal jalr branch load store opimm op md ecall ebreak fence legal
     immI immS immB immU immJ
 
 ------------------------------------------------------------------------------------
 -- One cycle
 
-def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab wb r) (x : In r) :
+-- `cache` enables the private L1. With `cache = false` every DDR access is one word
+-- on the bus (no tag, no line fill) and the L1's memories are never written, so yosys
+-- removes them: the hart is then 4 RAMB36 (16 KB of local RAM) instead of 8.
+def coreStepC {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx cache : Bool) (s : CoreSt ab wb r) (x : In r) :
     r (HwTy.prod (CoreSt.code ab wb) Out.code) :=
   let ph := s.ph;
   let inF := isK ph Ph.f;
@@ -267,11 +285,14 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
   let inV : r W1 := if mx then isK ph Ph.v else Hw.lit 1 0;
   let inP := isK ph Ph.p;
   let inQ := isK ph Ph.q;
-  -- the L1: a hit is the tag read with the line equal to the address's
+  let inW := isK ph Ph.w;
+  -- the L1: a hit is the tag read with the line equal to the address's. An uncached
+  -- address (the shared aperture, or any DDR address when `cache` is false) never hits.
   let lb := L1.bits wb;
   let l1idx := fun (a : r B32) => (Hw.slice 4 lb a : r (HwTy.bits lb));
   let l1tagOf := fun (a : r B32) => (Hw.cat (Hw.lit 1 1) (Hw.slice (4 + lb) (24 - lb) a : r (HwTy.bits (24 - lb))) : r (HwTy.bits (L1.tagW wb)));
-  let hit := Hw.eq s.l1t (l1tagOf s.ra);
+  let cached := if cache then Hw.not (Core.isUncached s.ra) else Hw.lit 1 0;
+  let hit := Hw.and cached (Hw.eq s.l1t (l1tagOf s.ra));
   let l1w : r B32 := Hw.mux (bitOf 3 s.ra) (Hw.mux (bitOf 2 s.ra) (Hw.slice 96 32 s.l1q) (Hw.slice 64 32 s.l1q))
     (Hw.mux (bitOf 2 s.ra) (Hw.slice 32 32 s.l1q) (Hw.slice 0 32 s.l1q));
   let miss := gate (Hw.or inD inM) (gate s.fromL1 (Hw.not hit));
@@ -384,10 +405,12 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
   let raddr := Hw.mux inQ s.rline (Hw.mux (gate goE (Hw.or d.load d.store)) sum (Hw.mux goE npc s.pc));
   let rix : r (HwTy.bits wb) := Hw.slice 2 wb raddr;
   let nphB : r B4 := Hw.mux inF (Hw.lit 4 Ph.d) (Hw.mux inD (Hw.lit 4 Ph.e)
-    (Hw.mux inE (Hw.mux trapE (Hw.lit 4 Ph.h) (Hw.mux wait (Hw.lit 4 Ph.e) (Hw.mux d.md (Hw.mux (bitOf 2 f3) (Hw.lit 4 Ph.v) (Hw.lit 4 Ph.x)) (Hw.mux d.load (Hw.lit 4 Ph.m) (Hw.mux shift (Hw.lit 4 Ph.s)
-      (Hw.mux d.store (Hw.lit 4 Ph.f) (Hw.lit 4 Ph.d)))))))
+    (Hw.mux inE (Hw.mux trapE (Hw.lit 4 Ph.h) (Hw.mux wait (Hw.lit 4 Ph.e) (Hw.mux d.fence (Hw.lit 4 Ph.w)
+      (Hw.mux d.md (Hw.mux (bitOf 2 f3) (Hw.lit 4 Ph.v) (Hw.lit 4 Ph.x)) (Hw.mux d.load (Hw.lit 4 Ph.m) (Hw.mux shift (Hw.lit 4 Ph.s)
+      (Hw.mux d.store (Hw.lit 4 Ph.f) (Hw.lit 4 Ph.d))))))))
     (Hw.mux inM (Hw.lit 4 Ph.d) (Hw.mux inS (Hw.mux sDone (Hw.lit 4 Ph.d) (Hw.lit 4 Ph.s))
-    (Hw.mux inX (Hw.lit 4 Ph.d) (Hw.mux inV (Hw.mux sDone (Hw.lit 4 Ph.d) (Hw.lit 4 Ph.v)) ph))))));
+    (Hw.mux inX (Hw.lit 4 Ph.d) (Hw.mux inV (Hw.mux sDone (Hw.lit 4 Ph.d) (Hw.lit 4 Ph.v))
+    (Hw.mux inW (Hw.lit 4 Ph.d) ph)))))));
   -- DDR (bit 30 set, bit 31 clear): a fetch or load reads the L1 (a miss in D or M fills
   -- the line over the bus, word by word, then reads it again: P, Q); a store goes to the
   -- bus (write-through) and updates the line if it is present
@@ -400,6 +423,9 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
   let fillWord := gate inP (gate s.rmode (gate (Hw.not s.rgap) x.rvalid));
   let fillDone := gate fillWord (isK s.rk 3);
   let done := Hw.mux s.rmode fillDone (Hw.mux s.bwe x.ready x.rvalid);
+  -- a one-word bus read (an uncached address, or a hart with the L1 off) leaves P
+  -- after its answer; the L1 word it was reading is stale, so clear `fromL1`
+  let wordP := gate inP (gate (Hw.not s.rmode) done);
   let nph : r B4 := Hw.mux inP (Hw.mux done (Hw.mux s.rmode (Hw.lit 4 Ph.q) s.bret) ph)
     (Hw.mux inQ s.bret (Hw.mux enterP (Hw.lit 4 Ph.p) nphB));
   -- the L1's writes: a filled line (and its tag), or a store's bytes into a present line
@@ -446,8 +472,8 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
       (Hw.memRead s.l1tag (l1idx raddr))
       (Hw.memWrite s.l1d (Hw.or fillDone storeHit) l1wIdx (Hw.mux fillDone fillLine stLine))
       (Hw.memWrite s.l1tag fillDone (l1idx s.rline) (l1tagOf s.rline))
-      (Hw.mux inQ (Hw.lit 1 1) (Hw.mux (gate (Hw.not enterP) readNext) ddrR s.fromL1))
-      (Hw.mux enterP miss (Hw.mux fillDone (Hw.lit 1 0) s.rmode))
+      (Hw.mux inQ (Hw.lit 1 1) (Hw.mux wordP (Hw.lit 1 0) (Hw.mux (gate (Hw.not enterP) readNext) ddrR s.fromL1)))
+      (Hw.mux enterP (Hw.and miss cached) (Hw.mux fillDone (Hw.lit 1 0) s.rmode))
       (Hw.mux enterP (Hw.lit 2 0) (Hw.mux fillWord (Hw.add rk (Hw.lit 2 1)) rk))
       (gate inP fillWord)
       (Hw.mux fillWord fillLine s.rbuf)
@@ -460,6 +486,27 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
 
 ------------------------------------------------------------------------------------
 -- The core as a circuit, with a program in memory from address 0
+
+-- The state next cycle, with a synchronous reset and a clock enable: `rst` sets the
+-- phase, the PC and the trap code and keeps the memories and registers (`Doom.oldStep`
+-- did this by hand); `en` low holds the whole state (the multi-cycle harts run at half
+-- rate behind it). The reset wins over the hold.
+def CoreSt.held {r : HwTy → Type} [Hw r] (ab wb : Nat) (rst en : r W1)
+    (next cur : r (CoreSt.code ab wb)) : r (CoreSt.code ab wb) :=
+  let ω c := CoreSt.unpack ab wb next;
+  let z := CoreSt.pack ab wb (CoreSt.mk
+    (Hw.mux rst (Hw.lit 4 Ph.f) c.ph) (Hw.mux rst (Hw.lit 32 0) c.pc)
+    c.q0 c.q1 c.q2 c.q3 c.m0 c.m1 c.m2 c.m3 c.rfa c.rfb c.x1 c.x2 c.acc c.dv c.rm c.cnt c.srd c.sf3
+    c.slo c.sio (Hw.mux rst (Hw.lit 3 0) c.trap)
+    c.busq c.fromBus c.badr c.bwe c.bwd c.bst c.bret c.bsent c.ra c.l1q c.l1t c.l1d c.l1tag c.fromL1
+    c.rmode c.rk c.rgap c.rbuf c.rline c.bnew);
+  Hw.hold en z cur
+
+-- the single-hart configurations (the Arty board, the Doom machine, the proofs) keep
+-- the private L1; `coreStepC` is the parameterised form
+def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab wb r) (x : In r) :
+    r (HwTy.prod (CoreSt.code ab wb) Out.code) :=
+  coreStepC ab wb mx .true s x
 
 -- byte `l` of word `k` of the program
 def Core.lane (prog : List Nat) (wb l : Nat) : HwTy.El (HwTy.mem wb 8) :=

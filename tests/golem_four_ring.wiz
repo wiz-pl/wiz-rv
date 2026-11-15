@@ -1,0 +1,135 @@
+-- test: check
+import Rv.Golem.Four
+import Text
+-- The 4-hart mailbox ring at the MMIO level, with the real `Intc`: four harts, each
+-- with a private counter (started at 4), pass their counter through the mailbox in
+-- order h0 -> h1 -> h2 -> h3 -> h0. The shared MMIO port serves one hart per cycle,
+-- round-robin, so no hart starves. The ordered handoff is proved by the final
+-- counters [20, 8, 12, 16] (a wrong order gives a different sum); hart 0 also writes
+-- the done flag. This is the software half of `FProg.four` (the boot/park ring) and
+-- runs in the ordinary `check` budget.
+--
+-- The interconnect (four real bus masters, no loss, fairness) is checked in
+-- `tests/golem_four.wiz`; the four real cores and their boot/park program are in
+-- `src/Rv/Golem/FourProg.wiz`.
+
+structure R.S where
+  intc : Intc.Ctl HwTy.El
+  p0 : Nat
+  p1 : Nat
+  p2 : Nat
+  p3 : Nat
+  c0 : Nat
+  c1 : Nat
+  c2 : Nat
+  c3 : Nat
+  v0 : Nat
+  v1 : Nat
+  v2 : Nat
+  v3 : Nat
+  turn : Nat
+  done : Nat
+  cycles : Nat
+
+def R.showL (xs : List Nat) : String :=
+  "[" ++ Hdl.concat (List.map (fun (k : Nat) => Nat.repr k ++ " ") xs) ++ "]"
+
+def R.init : R.S :=
+  R.S.mk Intc.init 0 1 1 1 4 4 4 4 0 0 0 0 0 0 0
+
+def R.src : Intc.Src HwTy.El := Intc.Src.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
+def R.srcB : HwTy.El (HwTy.bits 5) := Intc.srcBits R.src
+
+def R.ph (s : R.S) (h : Nat) : Nat :=
+  if Nat.beq h 0 then s.p0 else if Nat.beq h 1 then s.p1 else if Nat.beq h 2 then s.p2 else s.p3
+def R.cn (s : R.S) (h : Nat) : Nat :=
+  if Nat.beq h 0 then s.c0 else if Nat.beq h 1 then s.c1 else if Nat.beq h 2 then s.c2 else s.c3
+def R.vn (s : R.S) (h : Nat) : Nat :=
+  if Nat.beq h 0 then s.v0 else if Nat.beq h 1 then s.v1 else if Nat.beq h 2 then s.v2 else s.v3
+def R.next (h : Nat) : Nat := if Nat.beq h 3 then 0 else Nat.succ h
+
+def R.setP (s : R.S) (h p : Nat) : R.S :=
+  if Nat.beq h 0 then R.S.mk s.intc p s.p1 s.p2 s.p3 s.c0 s.c1 s.c2 s.c3 s.v0 s.v1 s.v2 s.v3 s.turn s.done s.cycles
+  else if Nat.beq h 1 then R.S.mk s.intc s.p0 p s.p2 s.p3 s.c0 s.c1 s.c2 s.c3 s.v0 s.v1 s.v2 s.v3 s.turn s.done s.cycles
+  else if Nat.beq h 2 then R.S.mk s.intc s.p0 s.p1 p s.p3 s.c0 s.c1 s.c2 s.c3 s.v0 s.v1 s.v2 s.v3 s.turn s.done s.cycles
+  else R.S.mk s.intc s.p0 s.p1 s.p2 p s.c0 s.c1 s.c2 s.c3 s.v0 s.v1 s.v2 s.v3 s.turn s.done s.cycles
+
+def R.setC (s : R.S) (h c : Nat) : R.S :=
+  if Nat.beq h 0 then R.S.mk s.intc s.p0 s.p1 s.p2 s.p3 c s.c1 s.c2 s.c3 s.v0 s.v1 s.v2 s.v3 s.turn s.done s.cycles
+  else if Nat.beq h 1 then R.S.mk s.intc s.p0 s.p1 s.p2 s.p3 s.c0 c s.c2 s.c3 s.v0 s.v1 s.v2 s.v3 s.turn s.done s.cycles
+  else if Nat.beq h 2 then R.S.mk s.intc s.p0 s.p1 s.p2 s.p3 s.c0 s.c1 c s.c3 s.v0 s.v1 s.v2 s.v3 s.turn s.done s.cycles
+  else R.S.mk s.intc s.p0 s.p1 s.p2 s.p3 s.c0 s.c1 s.c2 c s.v0 s.v1 s.v2 s.v3 s.turn s.done s.cycles
+
+def R.setV (s : R.S) (h v : Nat) : R.S :=
+  if Nat.beq h 0 then R.S.mk s.intc s.p0 s.p1 s.p2 s.p3 s.c0 s.c1 s.c2 s.c3 v s.v1 s.v2 s.v3 s.turn s.done s.cycles
+  else if Nat.beq h 1 then R.S.mk s.intc s.p0 s.p1 s.p2 s.p3 s.c0 s.c1 s.c2 s.c3 s.v0 v s.v2 s.v3 s.turn s.done s.cycles
+  else if Nat.beq h 2 then R.S.mk s.intc s.p0 s.p1 s.p2 s.p3 s.c0 s.c1 s.c2 s.c3 s.v0 s.v1 v s.v3 s.turn s.done s.cycles
+  else R.S.mk s.intc s.p0 s.p1 s.p2 s.p3 s.c0 s.c1 s.c2 s.c3 s.v0 s.v1 s.v2 v s.turn s.done s.cycles
+
+-- the next hart in round-robin order with work to do, or 4 if none
+def R.pick (s : R.S) : Nat :=
+  let a := Nat.mod s.turn 4;
+  let b := Nat.mod (Nat.add s.turn 1) 4;
+  let c := Nat.mod (Nat.add s.turn 2) 4;
+  let d := Nat.mod (Nat.add s.turn 3) 4;
+  if Nat.lt (R.ph s a) 3 then a
+  else if Nat.lt (R.ph s b) 3 then b
+  else if Nat.lt (R.ph s c) 3 then c
+  else if Nat.lt (R.ph s d) 3 then d
+  else 4
+
+def R.bus (rd wr off d : Nat) : Intc.Bus HwTy.El :=
+  Intc.Bus.mk (BitVec.ofNat 1 rd) (BitVec.ofNat 1 wr) (BitVec.ofNat 16 off) (BitVec.ofNat 32 d)
+
+def R.step (s : R.S) : R.S :=
+  let h := R.pick s;
+  if Nat.beq h 4 then s
+  else
+    let p := R.ph s h;
+    let nx := R.next h;
+    let offD := Intc.mboxData + 8 * h;
+    let offS := Intc.mboxStatus + 8 * h;
+    if Nat.beq p 0 then
+      -- post the counter to the next hart; h0 then polls for the ack
+      let s1 := R.S.mk (Intc.Ctl.unpack (Intc.step s.intc (BitVec.ofNat 1 0) R.srcB
+        (R.bus 0 1 (Intc.mboxData + 8 * nx) (R.cn s h))))
+        s.p0 s.p1 s.p2 s.p3 s.c0 s.c1 s.c2 s.c3 s.v0 s.v1 s.v2 s.v3
+        (Nat.mod (Nat.add h 1) 4) s.done (Nat.succ s.cycles);
+      let p1 := if Nat.beq h 0 then 1 else 3;
+      R.setP s1 h p1
+    else if Nat.beq p 1 then
+      -- poll the status: a message advances to the read
+      let v := (Intc.read s.intc R.srcB (BitVec.ofNat 16 offS)).toNat;
+      let s1 := R.S.mk (Intc.Ctl.unpack (Intc.step s.intc (BitVec.ofNat 1 0) R.srcB
+        (R.bus 1 0 offS 0)))
+        s.p0 s.p1 s.p2 s.p3 s.c0 s.c1 s.c2 s.c3 s.v0 s.v1 s.v2 s.v3
+        (Nat.mod (Nat.add h 1) 4) s.done (Nat.succ s.cycles);
+      let s2 := R.setV s1 h v;
+      if Nat.beq v 0 then R.setP s2 h 1 else R.setP s2 h 2
+    else
+      -- read the message, add it to the counter; h0 is done, the others pass it on
+      let v := (Intc.read s.intc R.srcB (BitVec.ofNat 16 offD)).toNat;
+      let s1 := R.S.mk (Intc.Ctl.unpack (Intc.step s.intc (BitVec.ofNat 1 0) R.srcB
+        (R.bus 1 0 offD 0)))
+        s.p0 s.p1 s.p2 s.p3 s.c0 s.c1 s.c2 s.c3 s.v0 s.v1 s.v2 s.v3
+        (Nat.mod (Nat.add h 1) 4) s.done (Nat.succ s.cycles);
+      let s2 := R.setC s1 h (Nat.add (R.cn s h) v);
+      if Nat.beq h 0 then
+        R.S.mk s2.intc 3 s2.p1 s2.p2 s2.p3 s2.c0 s2.c1 s2.c2 s2.c3 s2.v0 s2.v1 s2.v2 s2.v3 s2.turn 1 s2.cycles
+      else R.setP s2 h 0
+
+def R.run : Nat → R.S → R.S
+  | .zero, s => s
+  | .succ k, s => R.run k (R.step s)
+
+def R.report (cycles : Nat) : String :=
+  let s := R.run cycles R.init;
+  let cs : List Nat := .cons s.c0 (.cons s.c1 (.cons s.c2 (.cons s.c3 .nil)));
+  let ps : List Nat := .cons s.p0 (.cons s.p1 (.cons s.p2 (.cons s.p3 .nil)));
+  let ok := Bool.and (Hdl.natsEq cs (.cons 20 (.cons 8 (.cons 12 (.cons 16 .nil)))))
+    (Bool.and (Hdl.natsEq ps (.cons 3 (.cons 3 (.cons 3 (.cons 3 .nil))))) (Nat.beq s.done 1));
+  "golem four ring: counters " ++ R.showL cs ++ ", phases " ++ R.showL ps
+    ++ ", done " ++ Nat.repr s.done ++ ", " ++ Nat.repr s.cycles ++ " cycles"
+    ++ (if ok then " — PASS" else " — FAIL")
+
+#eval R.report 400

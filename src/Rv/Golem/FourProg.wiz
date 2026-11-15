@@ -1,0 +1,82 @@
+import Rv.Asm
+-- The four-hart ring: the boot/park protocol and the mailbox handoff the 4-hart test
+-- runs (`tests/golem_four.wiz`). One image runs on all four harts; each reads its
+-- `mhartid` from MMIO offset 8 (the core has no CSR file), harts 1..3 park on their
+-- `msip(h)` doorbell, and every hart then runs the same ring:
+--
+--   hart 0: increments its private counter 20 times, sends it to hart 1, waits for
+--           hart 3's value, adds it and writes the done flag.
+--   hart h: waits for hart h-1's message, adds it to its counter (20) and sends the
+--           sum to hart h+1 (hart 3 sends to hart 0).
+--
+-- The counters are in the uncached aperture (0x4F00_0000 + 0x100 * h) and the
+-- messages are the MMIO mailbox (0x8000_1000 + 8 * h): both are uncached, so the
+-- handoff is ordered at the single shared DDR/MMIO port. Expected counters:
+-- h0 = 100, h1 = 40, h2 = 60, h3 = 80 (a wrong order gives a different sum).
+--
+-- Registers: x15 the MMIO base, x5 the hart id, x1 the counter, x2 the loop count,
+-- x3 the counter value, x4 an address, x6 the message/next hart, x7/x8 temporaries,
+-- x9 the return address of the receive routine.
+
+def FProg.incCount : List Asm :=
+  A.label "f.inc" :: A.lw 3 0 1 :: A.addi 3 3 1 :: A.sw 3 0 1 :: A.addi 2 2 (-1) ::
+  A.bnez 2 "f.inc" :: .nil
+
+-- x4 = &status[h]; returns the message added to the counter (x3) and the counter stored
+def FProg.recv : List Asm :=
+  A.label "f.recv" :: A.lw 6 0 4 :: A.beqz 6 "f.recv" ::
+  A.addi 4 4 (-4) :: A.lw 6 0 4 :: A.lw 3 0 1 :: A.add 3 3 6 :: A.sw 3 0 1 ::
+  A.jalr 0 9 0 :: .nil
+
+-- send x3 to hart x6
+def FProg.send : List Asm :=
+  A.li 4 2147487744 ::                                -- 0x80001000, the mailbox's data
+  A.slli 7 6 3 :: A.add 4 4 7 :: A.sw 3 0 4 :: .nil
+
+def FProg.ringN (n : Nat) : List Asm :=
+  List.append
+    (A.label "f.ring" ::
+     A.li 1 1325400064 ::                                -- 0x4F000000, uncached aperture
+     A.slli 2 5 8 :: A.add 1 1 2 ::                      -- &counter[h]
+     A.li 2 (Int.ofNat n) :: FProg.incCount)
+    (List.append
+      (A.beqz 5 "f.h0" ::
+       -- h != 0: wait for the predecessor, add it, pass the sum on
+       A.li 4 2147487748 :: A.slli 7 5 3 :: A.add 4 4 7 :: A.jal 9 "f.recv" ::
+       A.addi 6 5 1 :: A.li 7 3 :: A.bne 5 7 "f.next" :: A.li 6 0 ::
+       A.label "f.next" :: List.append FProg.send (A.ebreak :: .nil))
+      (A.label "f.h0" ::
+       -- hart 0: send its counter to hart 1, then wait for hart 3's sum
+       A.lw 3 0 1 :: A.li 6 1 :: List.append FProg.send
+       (A.li 4 2147487748 ::                                -- &status[0]
+        A.jal 9 "f.recv" ::
+        A.li 4 1325402624 ::                                -- 0x4F000800, the done flag
+        A.li 7 1 :: A.sw 7 0 4 :: A.ebreak :: .nil)))
+
+-- the reset entry: read the hart id; hart 0 releases harts 1..3 and enters the ring,
+-- the others park on their msip doorbell, read their boot entry and jump there
+def FProg.start : List Asm :=
+  A.li 15 2147483648 ::                              -- 0x80000000
+  A.lw 5 8 15 ::                                     -- x5 = hart id
+  A.beqz 5 "f.boot0" ::
+  A.label "f.park" ::
+  A.li 6 2147485696 ::                               -- 0x80004000 (msip)
+  A.slli 7 5 2 :: A.add 6 6 7 ::                     -- &msip[h]
+  A.lw 7 0 6 :: A.beqz 7 "f.park" ::
+  A.li 8 2147487776 ::                               -- 0x80001020 (boot entry)
+  A.slli 7 5 2 :: A.add 8 8 7 :: A.lw 8 0 8 ::
+  A.sw 0 0 6 ::                                      -- clear the doorbell
+  A.jalr 0 8 0 ::
+  A.label "f.boot0" ::
+  A.la 8 "f.ring" ::                                 -- the common ring entry
+  A.li 6 2147487776 :: A.sw 8 4 6 :: A.sw 8 8 6 :: A.sw 8 12 6 ::
+  A.li 7 1 :: A.li 6 2147485700 ::                   -- 0x80004004, msip[1]
+  A.sw 7 0 6 :: A.sw 7 4 6 :: A.sw 7 8 6 ::
+  A.j "f.ring" :: .nil
+
+def FProg.ring : List Asm := FProg.ringN 20
+
+def FProg.fourN (n : Nat) : List Asm :=
+  List.append FProg.start (List.append (FProg.ringN n) FProg.recv)
+
+def FProg.four : List Asm := FProg.fourN 20

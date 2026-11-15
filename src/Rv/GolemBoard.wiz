@@ -1,6 +1,10 @@
 import Rv.Golem
 import Rv.Golem.Board
--- golem's board circuits: `golem` and `golemMc` for `Timing.arty`, in the wrapper
+import Rv.Golem.FourProg
+import Rv.Asm
+-- golem's board circuits: `golem`, `golemMc` and the four-hart variants (which always
+-- use the four-hart boot/park image, src/Rv/Golem/FourProg.wiz, whatever --boot says) for
+-- `Timing.arty`, in the wrapper
 -- `Verilog.emitTop` builds from `GBoard.clocking`. The board's values (boot images,
 -- clocking, pins, XDC, reset domains, the check) are in src/Rv/Golem/Board.wiz, which
 -- does not import the SoC; this module is only what elaborates it.
@@ -8,16 +12,22 @@ import Rv.Golem.Board
 inductive GBoard.Variant where
   | full      -- golem: the pipelined core at 100 MHz
   | mc        -- golemMc: the multi-cycle core at 50 MHz effective
+  | four      -- golem_four: four multi-cycle harts, shared peripherals, per-hart L1
+  | fourNocache -- golem_four_nol1: the same with every hart's L1 disabled
 
 def GBoard.Variant.name : GBoard.Variant → String
   | .full => "golem"
   | .mc => "golem_mc"
+  | .four => "golem_four"
+  | .fourNocache => "golem_four_nol1"
 
 def GBoard.Variant.circuit (v : GBoard.Variant) (boot : GBoard.Boot) :
     Circuit GIn.code (HwTy.prod Ddr3Pads.code GOut.code) :=
   match v with
   | .full => Golem.golem Timing.arty (GBoard.Boot.prog boot)
   | .mc => Golem.golemMc Timing.arty (GBoard.Boot.prog boot)
+  | .four => Golem.four Timing.arty G4.allL1 (Asm.assemble FProg.four)
+  | .fourNocache => Golem.four Timing.arty G4.noL1 (Asm.assemble FProg.four)
 
 def GBoard.Variant.netlist (v : GBoard.Variant) (boot : GBoard.Boot) : Netlist :=
   Circuit.netlist (GBoard.Variant.name v) (GBoard.Variant.circuit v boot)
@@ -27,7 +37,13 @@ def GBoard.variantOf (s : String) : Option GBoard.Variant :=
   | .true, _, _ => .some .full
   | _, .true, _ => .some .mc
   | _, _, .true => .some .mc
-  | _, _, _ => .none
+  | _, _, _ => match Hdl.strEq s "four", Hdl.strEq s "golem_four" with
+    | .true, _ => .some .four
+    | _, .true => .some .four
+    | _, _ => match Hdl.strEq s "four_nol1", Hdl.strEq s "four_nocache" with
+      | .true, _ => .some .fourNocache
+      | _, .true => .some .fourNocache
+      | _, _ => .none
 
 def GBoard.variantsOf (s : String) : Option (List GBoard.Variant) :=
   match Hdl.strEq s "both" with

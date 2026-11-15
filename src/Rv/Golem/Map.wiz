@@ -16,6 +16,12 @@ def GMap.ramBase : Nat := 0
 def GMap.ramBytes : Nat := 16384
 def GMap.ddrBase : Nat := 1073741824        -- 0x40000000
 def GMap.ddrBytes : Nat := 268435456        -- 256 MB
+-- the top 16 MB of DDR is the uncached shared aperture (`Core.uncBase`): every access
+-- is one bus request to the shared cache, never a private L1 line. The multicore
+-- mailbox data and the flags live here, so a flag write is visible to the other harts
+-- in program order at the single serialisation point.
+def GMap.uncBase : Nat := 1325400064        -- 0x4F000000
+def GMap.uncBytes : Nat := 16777216         -- 16 MB
 def GMap.mmioBase : Nat := 2147483648       -- 0x80000000
 def GMap.mmioBytes : Nat := 16777216        -- 16 MB: 0x80000000 … 0x80ffffff
 def GMap.fbBase : Nat := 2164260864         -- 0x81000000
@@ -25,6 +31,7 @@ def GMap.fbBytes : Nat := 12288             -- 96 * 64 * 2
 def GMap.uart : Nat := 0            -- read: the next byte or -1; write: send
 def GMap.uartStatus : Nat := 4      -- read: bit 0 the transmitter is idle,
                                     --       bit 1 a received byte is waiting
+def GMap.hartId : Nat := 8          -- read: this hart's `mhartid` (0 … 3)
 def GMap.timerLo : Nat := 16        -- the cycle counter, low word
 def GMap.timerHi : Nat := 20        -- and high word
 def GMap.sound : Nat := 48

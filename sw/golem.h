@@ -14,6 +14,11 @@
 /* 0x40000000: 256 MB DDR3, through wiz-ddr3's 8 KB write-back cache */
 #define DDR_BASE       0x40000000u
 #define DDR_BYTES      0x10000000u
+/* 0x4F000000: the top 16 MB of DDR is the uncached shared aperture: every access is
+   one bus request to the shared cache, never a private L1 line. Use it for any word
+   two harts share (mailbox data, flags); there is no hardware coherence. */
+#define UNC_BASE       0x4F000000u
+#define UNC_BYTES      0x01000000u
 #define WAD_LEN_ADDR   0x47fffff0u          /* the boot loader's convention (Doom) */
 #define WAD_BASE       0x48000000u
 #define HEAP_END       0x47f00000u
@@ -22,6 +27,8 @@
 #define UART_DATA      IO(0x00)             /* read: the next byte, or -1; write: send */
 #define UART_STATUS    IO(0x04)             /* bit 0: the transmitter is idle
                                                bit 1: a received byte is waiting */
+#define HART_ID         IO(0x08)            /* this hart's mhartid (0 … 3): the core has
+                                               no CSR file, so mhartid is an MMIO word */
 #define CYCLES_LO      IO(0x10)             /* the cycle counter (GOLEM_CLOCK_HZ) */
 #define CYCLES_HI      IO(0x14)
 #define DDR_STATUS     IO(0x40)             /* bit 0: calibration done, bit 1: failed */
@@ -51,12 +58,14 @@
    CLINT doorbell); a parked hart polls MSIP(h), reads BOOT_ENTRY(h) and jumps. */
 #define IPI_DATA(h)     IO(0x1000u + 8u * (h))
 #define IPI_STATUS(h)   IO(0x1004u + 8u * (h))   /* bit 0: a message is waiting */
-#define BOOT_ENTRY(h)   IO(0x1010u + 4u * (h))
+#define BOOT_ENTRY(h)   IO(0x1020u + 4u * (h))
 #define BOOT_HART0      0u
+/* Hart ids are 0 … 3 (four harts on golem_four). Harts 2/3's mailbox data is MSIP-only
+   in the PLIC (sources 2/3 are harts 0/1); every hart has its own msip and mtimecmp. */
 
 /* 0x80002000: the PLIC-style external controller. Sources: 1 UART received byte,
    2 hart 0's mailbox, 3 hart 1's mailbox, 4 the spare external input. Contexts:
-   0 hart 0 M-mode, 1 hart 1 M-mode. A source is taken when it is pending, enabled for
+   0 … 3 the M-mode context of each hart. A source is taken when it is pending, enabled for
    the context and its priority is above the context's threshold; a read of the claim
    register returns the source (0: none) and marks it in service, a write completes it. */
 #define PLIC_PRIO(s)    IO(0x2000u + 4u * (s))       /* 3 bits, 0: masked */

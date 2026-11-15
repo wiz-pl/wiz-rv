@@ -38,14 +38,16 @@ wiz-ddr3's cache and controller at the full rate and the existing bus adapter
 |---|---|---|
 | `0x0000_0000` – `0x0000_3FFF` | 16 KB on-chip RAM | the boot ROM at reset; the core's `m0` … `m3` (wb = 12) |
 | `0x4000_0000` – `0x4FFF_FFFF` | 256 MB DDR3 | through wiz-ddr3's 8 KB write-back cache, controller and PHY |
+| `0x4F00_0000` – `0x4FFF_FFFF` | uncached shared aperture | the top 16 MB of DDR: never in a private L1; one bus request per word |
 | `0x8000_0000` + `0x00` | UART data | read: the next byte or `-1`; write: send (1 Mbaud, 8N1) |
 | `0x8000_0000` + `0x04` | UART status | bit 0 transmitter idle, bit 1 a byte is waiting |
+| `0x8000_0000` + `0x08` | hart id | read: this hart's `mhartid` (0 … 3) |
 | `0x8000_0000` + `0x10/0x14` | cycle counter | 64 bits, low/high; 100 MHz |
 | `0x8000_0000` + `0x30/0x34` | sound FIFO | sample out / free places (PWM on JB1) |
 | `0x8000_0000` + `0x40` | DDR status | bit 0 calibration done, bit 1 failed |
 | `0x8000_0000` + `0x50 … 0x7c` | performance counters | instructions, bus/memory cycles, cache hits/misses, framebuffer writes, OLED refreshes |
 | `0x8000_0000` + `0x80` | OLED controller | the pins and program counter (debug) |
-| `0x8000_1000` + `0x00/0x10` | mailbox | per hart: message/valid, and the boot entry address |
+| `0x8000_1000` + `0x00` | mailbox | per hart: message and valid bit (`+8h`), and the boot entry (`+0x20 + 4h`) |
 | `0x8000_2000` | PLIC-style controller | priorities, pending, per-context enable/threshold, claim/complete |
 | `0x8000_4000` + `0x00/0x4000/0xbff8` | CLINT-like timer | `msip` per hart, `mtimecmp` (64-bit per hart), `mtime` |
 | `0x8100_0000` – `0x8100_2FFF` | framebuffer | 96 × 64 RGB 565, row-major, halfword stores (12 KB) |
@@ -78,6 +80,15 @@ machine at the core's I/O port (`DOut.ioa`, bit 31 set), not on this bus: the co
   that traps) ends the request instead of owning the bus forever. The hardware top ties
   the loader's request off; the simulation top exposes it (useful for bring-up: put a
   word or a program in DDR without bit-banging the UART).
+* `GBus.arbN n cap qos` is the N-master form used by `golem_four`: the same contract
+  (one request and one answer at a time, the owner holds until its answer) with a
+  rotating round-robin pointer, one QoS level per master and a per-master burst cap.
+  Each grant advances the pointer, so a master that asks while another is served is at
+  most one round away; with `cap = 4` an owner yields after four requests when another
+  asks, and an idle set of harts lets the busy one use the bus. The two-master
+  `GBus.arb` stays the single-hart fast path, so `golem`/`golemMc` are unchanged;
+  `tests/golem_four.wiz` checks the four-hart no-loss and no-starvation properties
+  (every window of 20 grants has all four harts).
 * `GBus.ramStep` is a behavioural DDR (words with byte masks, answering two cycles
   after the request) behind the same interface, for simulation.
 
@@ -105,14 +116,16 @@ that they do not alias the 8-bit-address UART and performance registers. The fra
 | `CLAIM(c)` | `0x8000_2080 + 4c` | read: take the highest-priority source (0: none); write: complete it |
 | `IPI_DATA(h)` | `0x8000_1000 + 8h` | a message for hart `h`; a read takes it and clears its valid bit |
 | `IPI_STATUS(h)` | `0x8000_1004 + 8h` | bit 0: a message is waiting |
-| `BOOT_ENTRY(h)` | `0x8000_1010 + 4h` | the entry address hart 0 gives hart `h` |
+| `BOOT_ENTRY(h)` | `0x8000_1020 + 4h` | the entry address hart 0 gives hart `h` (0 … 3) |
 
 The `mtimecmp`/`mtime` layout is the standard CLINT's (msip at `+0`, mtimecmp at
 `+0x4000`, mtime at `+0xbff8`), rebased from `0x0200_0000` to `0x8000_4000` so that it
-stays inside the I/O window. Two contexts: 0 is hart 0's M-mode, 1 is hart 1's. The
-four sources are 1 the UART's received byte (a live level), 2 hart 0's mailbox, 3 hart
-1's mailbox, and 4 a spare external input (tied low on this board). A message posted to
-hart `h` raises source `2 + h`; a claim clears the pending bit and marks the source in
+stays inside the I/O window. Four contexts, 0 … 3, are the M-mode context of each hart
+of `golem_four`; the two-hart machines simply leave 2 and 3 unused. The four sources are
+1 the UART's received byte (a live level), 2 hart 0's mailbox, 3 hart 1's mailbox, and
+4 a spare external input (tied low on this board). A message posted to hart 0 or 1
+raises source `2 + h`; harts 2/3's mailboxes are MSIP/status only (their msip and
+mtimecmp are still per-hart), so a message to them rings the doorbell or is polled: a claim clears the pending bit and marks the source in
 service for that context (so a second claim returns 0), a write to the same claim
 register (the completion) clears the in-service bit, and a live level such as the
 UART's sets the pending bit again until software drains the UART.
@@ -156,10 +169,10 @@ the boot hart. The protocol:
    reads `BOOT_ENTRY(h)`, clears `msip(h)` by writing 0, and jumps there. Its stack and
    its page tables (none, AMP) are the entry point's responsibility.
 
-Because a hart cannot read `mhartid` through the (yet non-existent) CSR file, the ROM
-in this tree is still single-hart: the park loop and the hart-id branch are the first
-two instructions of a second hart's image, not of `GProg.golem`. Hart 1's park loop can
-be polled with `MSIP(1)`; there is no `wfi` (it needs the CSR file too).
+The core still has no CSR file, so `mhartid` is the read-only MMIO word `HART_ID`
+(`0x8000_0008`, `GMap.hartId`); each hart's machine returns its own index. `GProg.golem`
+is still a single-hart image; `FProg.four` (`src/Rv/Golem/FourProg.wiz`) is the
+four-hart boot and park loop. There is no `wfi` (it needs the CSR file too).
 
 An IPI after boot uses the same registers: `IPI_DATA(h) = msg` posts a 32-bit word and
 raises PLIC source `2 + h`; the receiver claims it (`PLIC_CLAIM(1)` in hart 1's
@@ -168,12 +181,14 @@ context), reads the word (which clears `IPI_STATUS`), and completes the source.
 The park loop, with the addresses of `sw/golem.h`:
 
 ```
+    lw   t0, 0x80000008      # HART_ID: mhartid
+    beqz t0, boot            # hart 0 boots; harts 1 … 3 park
 park:
-    lw   t0, 0x80004004      # MSIP(1): hart 0's doorbell for hart 1
-    beqz t0, park
-    lw   t1, 0x80001014      # BOOT_ENTRY(1)
+    lw   t1, 0x80004004      # MSIP(1) for hart 1: 0x80004000 + 4h
+    beqz t1, park
+    lw   t2, 0x80001024      # BOOT_ENTRY(1): 0x80001020 + 4h
     sw   zero, 0x80004004    # clear the doorbell
-    jalr zero, 0(t1)         # enter the program hart 0 placed there
+    jalr zero, 0(t2)         # enter the program hart 0 placed there
 ```
 
 Because `mtimecmp` is two 32-bit registers, write the high half first and then the low
@@ -195,18 +210,162 @@ Two limits are recorded here rather than hidden:
   be idle (the existing machine's rule for every I/O store). It costs at most the
   remaining byte time, but it means a timer compare write can be delayed.
 
+## Four harts
+
+`golem_four` is the multi-cycle 4-hart variant of the area study
+(`wiz-notes/golem-multicore-area.md`): four independent RV32IM harts, one shared
+peripheral set, and one shared DDR. It is the A7-35T configuration — four full-speed
+pipelined harts with their 16 KB L1s need 71 RAMB36, 142 % of the 35T, while four
+multi-cycle harts fit (39) — and it is an AMP platform, not SMP.
+
+```
+  hart 0 core ─ BusA ─ GBus.route ─┐
+  hart 1 core ─ BusA ─ GBus.route ─┼─ GBus.arbN (4, round-robin, burst cap 4) ─┐
+  hart 2 core ─ BusA ─ GBus.route ─┤                                           │
+  hart 3 core ─ BusA ─ GBus.route ─┘                wiz-ddr3 8 KB cache ─ controller ─ PHY ─ DDR3
+                                                    ┌───────────────────────┐
+  shared peripherals (one instance, 100 MHz):       │ Intc (4 harts, 4 PLIC│
+  UART · cycle counter · 96×64 framebuffer · OLED · │ contexts) · IPI · CLINT
+```
+
+The code is `src/Rv/Golem/Four.wiz`; the board wrapper is `Golem.four` in
+`src/Rv/Golem.wiz` and the boot/ring program is `src/Rv/Golem/FourProg.wiz`. The core is
+`Rv.Core` (multi-cycle) with two new parameters:
+
+* `coreStepC … cache` — `cache = false` disables the private L1: every DDR access is
+  one bus request, the L1's memories are never written and yosys removes them. The
+  single-hart call sites keep `coreStep` (`cache = true`), so `golem`, `golemMc`, the
+  Doom machine and the proofs are unchanged. A hart's L1 is selected by `G4.Cfg.l1`
+  (one `Bool` per hart): `G4.allL1` is the default, `G4.noL1` is the area cut.
+* the uncached shared aperture (`Core.uncBase` = `0x4F00_0000`, 16 MB): an address there
+  never hits or fills the L1. It is a property of the *address*, so it works with the L1
+  on or off. Mailbox data, flags and any word two harts share belong there; a hart's
+  private working set can stay in its L1.
+
+The harts see a clock enable every other cycle (50 MHz effective at the 100 MHz board
+clock); the bus, the DDR cache/controller/PHY and the shared peripherals run at
+100 MHz. The multi-cycle core is the same one `golemMc` uses, so each hart is ~1
+instruction per 2–34 cycles (2 for an ALU instruction); this is the "multi-cycle, not
+full rate" limit, and it is why the four-hart target is an AMP/control platform rather
+than four Doom-class harts.
+
+### Counts
+
+Yosys `synth_xilinx -flatten -abc9 -arch xc7` for the checked-in netlists, and
+nextpnr-xilinx 1.0.0 on the Arty chip database:
+
+| variant | LUT | FF | RAMB36 | RAMB18 | DSP48 | nextpnr |
+|---|---:|---:|---:|---:|---:|---|
+| `golem` (1 pipelined hart) | 5,063 | 3,815 | 23 | 4 | 4 | 107.30 MHz |
+| `golem_four` (4 multi-cycle harts, L1 on) | 11,980 | 4,706 | 38 | 5 | 40 | 46.63 MHz |
+| `golem_four_nol1` (L1 off) | 10,519 | 4,286 | 22 | 1 | 40 | 47.63 MHz |
+
+`LUT` is the sum of yosys `LUT1 … LUT6` cells (the area study's convention; nextpnr's
+`SLICE_LUTX` is 15,398 for `golem_four` and 13,851 for `golem_four_nol1`, because it
+counts LUT6 pairs). Against the real 35T capacity: `golem_four` is 58 % LUT, 11 % FF,
+**38/50 RAMB36 (76 %)**, 40/90 DSP (44 %); `golem_four_nol1` is 51 % LUT, 10 % FF,
+22/50 RAMB36 (44 %), 40/90 DSP. Both fit. The four-hart netlist is within 1 RAMB36 of
+the area study's 39-RAMB36 model; the no-L1 cut is within 1 of its 23. The 38 vs 39 is
+one shared memory landing in RAMB18 instead of RAMB36.
+
+**The timing number is the multi-cycle limit, not a 100 MHz pass.** nextpnr reports
+46.63 MHz for `golem_four` (47.63 for `nol1`) at the 100 MHz clock constraint, and the
+critical path is inside a hart (`core.*`), not the arbiter or the DDR path. The harts
+are enabled every other cycle, so the path has two clock periods; the effective hart
+ceiling is therefore ~46.6 MHz (just under the 50 MHz target), while the 100 MHz bus
+and DDR paths are not the limit. The current XDC constrains the whole design at
+100 MHz; a real 50 MHz hart domain (a second PLL output and the existing registered
+adapter as the CDC) or a multicycle constraint is the open item. The openXC7 database maps `xc7a35t*` to an A7-50T fabric, so the Fmax is A7-50T timing for
+a 35T bitstream (and optimistic for the real part); the fit verdicts above are the
+yosys counts against the 35T capacities.
+
+### Boot, park and the doorbell
+
+Every hart starts at PC 0 in its own 16 KB local RAM and reads `HART_ID` (MMIO offset 8)
+for its `mhartid`. Hart 0 is the boot hart: it writes each other hart's entry address to
+`BOOT_ENTRY(h)` (`0x8000_1020 + 4h`) and then writes 1 to `msip(h)`
+(`0x8000_4000 + 4h`). Harts 1–3 poll `msip(h)`, read the entry, clear the doorbell and
+`jalr` there. The same protocol is the park loop in `FProg.start`; the ring program then
+uses `IPI_DATA(h)`/`IPI_STATUS(h)` (`0x8000_1000 + 8h`) for the ordered handoff. The
+`mhartid` register is MMIO, not a CSR, because `Rv.Core` has no CSR file yet; when it
+gains one, `mhartid` moves to the CSR and the MMIO word can stay as a debug alias.
+
+### Limits (read this before claiming SMP)
+
+* **No coherence.** The L1 is private and write-through; a line another hart wrote stays
+  stale in it. There is no snoop, no directory and no shared L2. Shared data must go
+  through the uncached aperture or a non-shared region; the mailbox/flags are MMIO and
+  uncached by construction. The formal statement is the coherence note
+  (`/workspace/wiz-notes/golem-coherence-model.md`): cold DDR-only litmus is exactly SC,
+  but a private L1 can return stale words (and can livelock a spin), so a warm L1 plus
+  shared DDR is not SC.
+* **Multi-cycle is not full rate.** Four harts only fit the 35T because the core is
+  multi-cycle and (optionally) the L1 is off; the effective rate is ~50 MHz and the IPC
+  is the multi-cycle core's (2 cycles per ALU instruction, more for loads, shifts,
+  divide). Do not run Doom on all four: Doom is a single-hart workload. A 4-hart
+  full-rate build needs the A7-100T (71/135 RAMB36, 20 % LUT) or the L1-off pipelined
+  parameter, not this target.
+* **`FENCE` and the store buffer.** The multi-cycle core has no store buffer: a store's
+  bus phase (`P`) waits for `ready` before the next instruction, so a store followed by
+  a flag store is ordered at the shared cache. `FENCE` is decoded and takes one drain
+  phase (`Ph.w`); on this core it is a one-cycle ordering point, not a wait for a
+  buffer. The pipelined core is different: its one-entry store buffer can let an MMIO
+  flag pass a pending DDR store, which is the `ring pipe` anomaly in
+  `tests/golem_litmus.wiz`; that is why this target uses the multi-cycle core. A real
+  drain fence on `Rv.Pipe` (wait for `bu.sbv == 0` and the bus idle) is a separate
+  change, and `agent/golem-atomics` must rebase on it.
+* **One MMIO port per cycle.** The four harts share one UART/Intc/framebuffer decode.
+  If two harts write in the same cycle the lowest hart id wins (and the other write is
+  dropped); if a read and a write coincide, the write's register is used for the
+  interrupt block and the read is non-consuming. Software uses the mailbox rather than
+  concurrent MMIO writes; the conflict policy is deterministic, not a lock.
+* **Mailbox/PLIC widths.** All four harts have their own `msip` and `mtimecmp` and a
+  mailbox data/status pair. The PLIC has four contexts but four sources: only harts 0
+  and 1's mailboxes raise an external interrupt; harts 2/3 poll their status or use
+  `msip`. There is no A extension and no LR/SC (M3 is still open), so shared counters
+  are single-writer or mailbox-ordered.
+* **No sound or performance counters** on this target (JB is tied low); the UART,
+  timer, framebuffer and OLED are shared. The `Intc` test still covers the block.
+
+### Simulation and synthesis
+
+`tests/golem_four.wiz` (check) runs the interconnect with four scripted masters: no lost
+or duplicated request, and fairness — every window of 20 grants contains all four harts,
+and the grant counts differ by at most the burst cap (4). `tests/golem_four_ring.wiz`
+drives the real `Intc` with four hart state machines behind one round-robin MMIO port:
+each increments its private counter and passes it through the mailbox in order
+h0 → h1 → h2 → h3 → h0, and the final counters are exactly `[20,8,12,16]` with hart 0
+setting the done flag (24 cycles). `tests/golem_four_litmus.wiz` runs the same ring in
+the coherence model's multi-cycle mode and asserts the only allowed outcome is the SC
+one, `[4,1,2,3]`. The compiled `Circuit.simFast` run of the four real cores is in
+`src/Rv/Golem/FourProg.wiz`'s program but is not a committed test: the netlist
+construction for four cores is far over the 60 s test budget in this toolchain (the
+same limit `tests/long.wiz` hits).
+
+```
+scripts/golem-board.sh gen   --variant four        # build/golem_four.v/.xdc
+scripts/golem-board.sh synth --variant four        # yosys: build/golem_four.stat
+scripts/golem-board.sh bit   --variant four        # nextpnr + bitstream (optional)
+scripts/golem-board.sh gen   --variant four_nol1   # the no-L1 cut
+```
+
 ## Files
 
 ```
 src/Rv/Golem/Map.wiz    the memory map: constants, decode predicates, MMIO offsets
-src/Rv/Golem/Bus.wiz    GBus.route (decode), GBus.arb (two masters), GBus.ramStep (sim DDR)
+src/Rv/Golem/Bus.wiz    GBus.route (decode), GBus.arb (two masters), GBus.arbN (N masters,
+                        round-robin/QoS/burst cap), GBus.ramStep (sim DDR)
 src/Rv/Golem/Intc.wiz   the CLINT-like timer, the PLIC-style controller, the inter-hart
                         mailbox, `mip`/`mie` and the boot ABI's registers
 src/Rv/Golem/Prog.wiz   the boot ROM: banner, DDR/host/timer checks, three pixels, a DDR call
+src/Rv/Golem/Four.wiz   the four-hart SoC: G4.step (four cores, shared MMIO, GBus.arbN,
+                        cache), the board-style and behavioural-DDR tops
+src/Rv/Golem/FourProg.wiz the four-hart boot/park loop and the mailbox ring program
+src/Rv/Golem/CohModel.wiz the abstract N-master memory model behind the litmus tests
 src/Rv/Golem.wiz        GIn/GOut, Golem.step (cache + controller + bus + machine),
                         golem / golemMc (board, with the PHY), the reset/LED policy
-src/Rv/GolemBoard.wiz   the board circuits: golem and golemMc for Timing.arty, and
-                        the netlist each variant becomes
+src/Rv/GolemBoard.wiz   the board circuits: golem, golemMc, golem_four and
+                        golem_four_nol1 for Timing.arty, and each variant's netlist
 src/Rv/Golem/Board.wiz  the Arty A7-35T board: boot image, PLL clocking, pins, XDC,
                         reset domains and the `golem board` check
 src/Rv/GolemSim.wiz     golemSim: the same machine and bus with a behavioural DDR
@@ -216,6 +375,10 @@ app/golem.wiz           the board flow: gen, synth, bit, timing, dry (`golem …
 scripts/golem-board.sh  the flow wrapper: finds the tools, refuses to flash unsigned
 tests/golem.wiz         the executable simulation (UART bytes and the OLED SPI stream)
 tests/golem_intc.wiz    the timer, the external interrupt path and the boot handshake at values
+tests/golem_four.wiz    the four-hart interconnect: no loss, and fairness under the cap
+tests/golem_four_litmus.wiz the 4-hart mailbox ring in the coherence model (SC only)
+tests/golem_four_ring.wiz the four-hart mailbox ring with the real Intc (MMIO, round-robin)
+tests/golem_four_litmus.wiz the same ring in the coherence model
 tests/golem_board.wiz   the `golem board` config/constraints check
 sw/golem.h              the memory map and MMIO for software
 sw/golem.c              a tiny C hello (banner, cycle counter, three rows)

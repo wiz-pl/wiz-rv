@@ -14,7 +14,10 @@
 #                                             authorise hardware)
 #
 # Options after the command: --boot rom|loader (default loader, Prog.boot), --variant
-# golem|mc|both (default golem; mc is golemMc at 50 MHz effective).
+# golem|mc|four|four_nol1|both (default golem; mc is golemMc at 50 MHz effective;
+# four is four multi-cycle harts with per-hart L1s, four_nol1 the same without them).
+# `four` is the A7-35T multicore target: 4 harts, shared UART/OLED/timer/mailbox and
+# DDR; see DESIGN.md, "Four harts".
 #
 # Build the driver first: `grail build` (or `heavy grail build`).
 set -eu

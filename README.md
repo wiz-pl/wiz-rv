@@ -176,12 +176,15 @@ grail test golem     # or: wiz check tests/golem.wiz -I src -I ../wiz-ddr3/src â
 ### golem on the Arty A7-35T
 
 `src/Rv/Golem/Board.wiz` is the board configuration and `src/Rv/GolemBoard.wiz` its
-two circuits: `Ddr3.Board`'s DDR3, clock, UART
+circuits: `Ddr3.Board`'s DDR3, clock, UART
 and LED constraints plus JA (PmodOLEDrgb), JB (sound) and BTN; the PLL wrapper (100 MHz
 input, 800 MHz VCO, 100 MHz `sys`, 400 MHz `sys4x`, 400 MHz `sys4xDqs` at 90Â°, 200 MHz
 `ref200`); and the reset domains. `golem` runs the pipelined core at 100 MHz;
 `golemMc` keeps the 100 MHz board clock and enables the multi-cycle core every other
-cycle (50 MHz effective). The default boot image is `Prog.boot`, the UART loader that
+cycle (50 MHz effective). `golem_four` is the 4-hart AMP cut of
+[DESIGN.md](DESIGN.md#four-harts): four multi-cycle harts, one shared UART/OLED/timer/
+mailbox and DDR, behind the N-master arbiter (`--variant four`; `four_nol1` disables
+each hart's L1). The default boot image is `Prog.boot`, the UART loader that
 prints `wiz-rv boot` and `DDR ok`/`DDR fail` and accepts `rvload` records; `--boot rom`
 selects the self-contained `GProg` bring-up ROM. LD0/LD1 are calibration done/failed
 and MMIO `0x8000_0040` reports the same.
@@ -190,6 +193,7 @@ and MMIO `0x8000_0040` reports the same.
 grail build
 scripts/golem-board.sh board      # the pin/clock/reset check (also `golem board`)
 scripts/golem-board.sh gen        # build/golem.v and build/golem.xdc
+scripts/golem-board.sh gen --variant four  # build/golem_four.v (four harts)
 scripts/golem-board.sh synth      # yosys only (dry-run path if it is missing)
 scripts/golem-board.sh bit        # nextpnr-xilinx + fasm2frames + xc7frames2bit
 scripts/golem-board.sh timing     # the 100 MHz report; `bit` fails below 100 MHz
