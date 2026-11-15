@@ -559,7 +559,7 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
   Hw.pair
     (PpSt.pack ab wb (PpSt.mk feN msN wrN eN mN rN dvN buN (Hw.mux killTrap rr.trap s.trap)))
     (Out.pack (Out.mk s.trap (gate goSt m.io) (Hw.slice 0 8 m.sd) (gate goM (gate m.load m.io)) m.addr m.sd
-      (gate live (Hw.not bu.sent)) bu.addr bu.we bu.wd bu.strb live))
+      (gate live (Hw.not bu.sent)) bu.addr bu.we bu.wd bu.strb (Hw.lit 2 0) (Hw.lit 5 0) live))
 
 -- the core's reset: the front end restarts at 0, the stages are emptied, the divider,
 -- the bus and the trap code are cleared; memories and data registers keep their contents

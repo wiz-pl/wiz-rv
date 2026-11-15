@@ -434,3 +434,166 @@ def CM.aWalk (global : Bool) : Nat → List ASt → List (List Nat) → List (Li
 
 def CM.lrsc (global : Bool) : List (List Nat) :=
   CM.norm (CM.aWalk global 64 (.cons CM.aInit .nil) .nil)
+
+--------------------------------------------------------------------------------
+-- The shared-point atomics, and the litmus tests that separate them from a split
+-- implementation.
+--
+-- `MOp` is a small program language for the shared aperture: an ordinary load/store, a
+-- `guard` (wait until a word has a value), LR, SC, an AMO, and the two halves of a
+-- split AMO (`amor` reads, `amow` writes) used only to model the rejected design. The
+-- machine keeps one reservation per hart, on the 16-byte line (`a / 4`, the cache's
+-- line): any committed store, successful SC or AMO to a line clears every reservation
+-- on it. `amo` is one atomic step; `amor`/`amow` are two steps that other harts may
+-- interleave, which is exactly the lost-update bug the hardware fixes at the bus.
+
+inductive MOp where
+  | ld (a : Nat)
+  | lr (a : Nat)
+  | sc (a v : Nat)
+  | scz (a v : Nat)   -- SC.W that requires the LR value to have been 0 (a lock)
+  | amo (f5 a v : Nat)
+  | amor (f5 a v : Nat)
+  | amow (f5 a v : Nat)
+  | st (a v : Nat)
+  | guard (a v : Nat)
+  | fence
+
+structure MHar where
+  prog : List MOp
+  pc : Nat
+  res : Option Nat      -- the reserved line
+  tmp : Nat             -- the split AMO's read value
+  regs : List Nat       -- reverse order
+
+structure MSt where
+  harts : List MHar
+  mem : List (Nat × Nat)
+
+def CM.mVal (f5 a b : Nat) : Nat :=
+  if Nat.beq f5 0 then Nat.mod (Nat.add a b) 4294967296
+  else if Nat.beq f5 1 then b
+  else a
+
+def CM.mLine (a : Nat) : Nat := Nat.div a 4
+
+def CM.mMapAt (f : Nat → MHar → MHar) : Nat → List MHar → List MHar
+  | _, .nil => .nil
+  | i, .cons h hs => .cons (f i h) (CM.mMapAt f (Nat.succ i) hs)
+
+def CM.mSetAt (h : MHar) : Nat → List MHar → List MHar
+  | .zero, .nil => .nil
+  | .zero, .cons x xs => .cons h xs
+  | .succ k, .nil => .nil
+  | .succ k, .cons x xs => .cons x (CM.mSetAt h k xs)
+
+def CM.mClearLine (line : Nat) (hs : List MHar) : List MHar :=
+  CM.mMapAt (fun _ h => match h.res with
+    | .none => h
+    | .some l => if Nat.beq l line then MHar.mk h.prog h.pc .none h.tmp h.regs else h) 0 hs
+
+def CM.mClearHart (i : Nat) (hs : List MHar) : List MHar :=
+  CM.mMapAt (fun j h => if Nat.beq i j then MHar.mk h.prog h.pc .none h.tmp h.regs else h) 0 hs
+
+def CM.mNextOf (h : MHar) : Option MOp :=
+  match List.dropN h.pc h.prog with
+  | .nil => .none
+  | .cons x xs => .some x
+
+def CM.mSc (i : Nat) (h : MHar) (h0 : MHar) (a v : Nat) (zero : Bool) (s : MSt) : List MSt :=
+  let live := match h.res with
+    | .none => (.false : Bool)
+    | .some l => Nat.beq l (CM.mLine a);
+  let hit := Bool.and live (if zero then Nat.beq h.tmp 0 else (.true : Bool));
+  let s1 := if hit then MSt.mk (CM.mClearLine (CM.mLine a) s.harts) (CM.ins a v s.mem)
+    else MSt.mk (CM.mClearHart i s.harts) s.mem;
+  let h1 := MHar.mk h0.prog h0.pc .none h0.tmp (.cons (if hit then 0 else 1) h0.regs);
+  .cons (MSt.mk (CM.mSetAt h1 i s1.harts) s1.mem) .nil
+
+def CM.mStep (s : MSt) (i : Nat) (h : MHar) : List MSt :=
+  match CM.mNextOf h with
+  | .none => .nil
+  | .some op =>
+      let h0 := MHar.mk h.prog (Nat.succ h.pc) h.res h.tmp h.regs;
+      let put : MHar → List MSt := fun (h1 : MHar) => .cons (MSt.mk (CM.mSetAt h1 i s.harts) s.mem) .nil;
+      match op with
+      | .ld a => put (MHar.mk h0.prog h0.pc h0.res h0.tmp (.cons (CM.memVal s.mem a) h0.regs))
+      | .lr a => put (MHar.mk h0.prog h0.pc (.some (CM.mLine a)) (CM.memVal s.mem a)
+          (.cons (CM.memVal s.mem a) h0.regs))
+      | .sc a v => CM.mSc i h h0 a v .false s
+      | .scz a v => CM.mSc i h h0 a v .true s
+      | .amo f5 a v =>
+          let old := CM.memVal s.mem a;
+          .cons (MSt.mk (CM.mSetAt h0 i (CM.mClearLine (CM.mLine a) s.harts))
+            (CM.ins a (CM.mVal f5 old v) s.mem)) .nil
+      | .amor f5 a v => put (MHar.mk h0.prog h0.pc h0.res (CM.memVal s.mem a) h0.regs)
+      | .amow f5 a v =>
+          .cons (MSt.mk (CM.mSetAt h0 i (CM.mClearLine (CM.mLine a) s.harts))
+            (CM.ins a (CM.mVal f5 h.tmp v) s.mem)) .nil
+      | .st a v =>
+          .cons (MSt.mk (CM.mSetAt h0 i (CM.mClearLine (CM.mLine a) s.harts)) (CM.ins a v s.mem)) .nil
+      | .guard a v => if Nat.beq (CM.memVal s.mem a) v then put h0 else .nil
+      | .fence => put h0
+
+def CM.mSteps (s : MSt) : Nat → List MHar → List MSt
+  | i, .nil => .nil
+  | i, .cons h hs => List.append (CM.mStep s i h) (CM.mSteps s (Nat.succ i) hs)
+
+def CM.mNextStates (s : MSt) : List MSt := CM.mSteps s 0 s.harts
+
+def CM.mAllDone : List MHar → Bool
+  | .nil => .true
+  | .cons h hs => Bool.and (Nat.beq h.pc (List.length h.prog)) (CM.mAllDone hs)
+
+def CM.mHartKey (h : MHar) : List Nat :=
+  .cons h.pc (.cons (match h.res with | .none => 0 | .some l => Nat.succ l)
+    (.cons h.tmp (List.append h.regs (.cons (List.length h.regs) .nil))))
+
+def CM.mHartKeys : List MHar → List Nat
+  | .nil => .nil
+  | .cons h hs => List.append (CM.mHartKey h) (CM.mHartKeys hs)
+
+def CM.mKey (s : MSt) : List Nat :=
+  .cons (List.length s.harts) (List.append (CM.mHartKeys s.harts)
+    (.cons (List.length s.mem) (CM.pairKeys s.mem)))
+
+structure MWalk where
+  fuel : Nat
+  work : List MSt
+  seen : List (List Nat)
+  outs : List (List Nat)
+
+def CM.mWalk (ext : MSt → List Nat) : Nat → List MSt → List (List Nat) → List (List Nat) → MWalk
+  | .zero, work, seen, outs => MWalk.mk 0 work seen outs
+  | .succ k, .nil, seen, outs => MWalk.mk k .nil seen outs
+  | .succ k, .cons s ss, seen, outs =>
+      let key := CM.mKey s;
+      if CM.memberKey key seen then CM.mWalk ext k ss seen outs
+      else
+        let seen1 : List (List Nat) := .cons key seen;
+        if CM.mAllDone s.harts then CM.mWalk ext k ss seen1 (.cons (ext s) outs)
+        else
+          let ns := CM.mNextStates s;
+          match ns with
+          | .nil => CM.mWalk ext k ss seen1 (.cons (.cons 99 .nil) outs)
+          | .cons x xs => CM.mWalk ext k (List.append ns ss) seen1 outs
+
+def CM.mInitHarts : List (List MOp) → List MHar
+  | .nil => .nil
+  | .cons p ps => .cons (MHar.mk p 0 .none 0 .nil) (CM.mInitHarts ps)
+
+def CM.mOutcomes (progs : List (List MOp)) (ext : MSt → List Nat) : List (List Nat) :=
+  let s := MSt.mk (CM.mInitHarts progs) .nil;
+  let w := CM.mWalk ext 4000 (.cons s .nil) .nil .nil;
+  CM.norm w.outs
+
+def CM.mMemOutGo : List Nat → MSt → List Nat
+  | .nil, s => .nil
+  | .cons a as, s => .cons (CM.memVal s.mem a) (CM.mMemOutGo as s)
+
+def CM.mMemOut (as : List Nat) (s : MSt) : List Nat := CM.mMemOutGo as s
+def CM.mRegH (i : Nat) (s : MSt) : List Nat :=
+  match List.dropN i s.harts with
+  | .nil => .nil
+  | .cons h _ => CM.rev h.regs
+def CM.mMem4 (s : MSt) : List Nat := CM.mMemOut (.cons 4 .nil) s

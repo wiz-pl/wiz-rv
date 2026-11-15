@@ -33,6 +33,8 @@ structure MOut (r : HwTy → Type) where
   addr : r B32
   wdata : r B32
   wstrb : r B4
+  aop : r B2
+  af5 : r B5
   deriving Bundle
 
 def MB13 : HwTy := HwTy.bits 13
@@ -86,7 +88,7 @@ def Mini.step (cfg : RgbCfg) (n : Nat) {r : HwTy → Type} [Hw r] (s : MSt cfg.f
   -- BTN0 resets the phase, the PC and the trap code (the memories/registers keep)
   let c2 := CoreSt.mk (Hw.mux rst (Hw.lit 4 Ph.f) c.ph) (Hw.mux rst (Hw.lit 32 0) c.pc) c.q0 c.q1 c.q2 c.q3
     c.m0 c.m1 c.m2 c.m3 c.rfa c.rfb c.x1 c.x2 c.acc c.dv c.rm c.cnt c.srd c.sf3 c.slo c.sio (Hw.mux rst (Hw.lit 3 0) c.trap)
-    c.busq c.fromBus c.badr c.bwe c.bwd c.bst c.bret c.bsent c.ra c.l1q c.l1t c.l1d c.l1tag c.fromL1 c.rmode c.rk c.rgap c.rbuf c.rline c.bnew;
+    c.busq c.fromBus c.badr c.bwe c.bwd c.bst c.bret c.bsent c.ra c.l1q c.l1t c.l1d c.l1tag c.fromL1 c.rmode c.rk c.rgap c.rbuf c.rline c.bnew c.resv c.resOk c.amoA c.amoD c.amoO c.sf5 c.ak c.baop c.baf5;
   -- the OLED: the pixel at the controller's (x, y), read every cycle
   let ω ol := s.oled;
   let y13 : r MB13 := Hw.cat (Hw.lit 7 0) ol.gen.y;
@@ -112,7 +114,7 @@ def Mini.step (cfg : RgbCfg) (n : Nat) {r : HwTy → Type} [Hw r] (s : MSt cfg.f
       (Hw.cat ol.pins.pmoden (Hw.cat ol.pins.vccen (Hw.cat ol.pins.res (Hw.cat ol.pins.dc
         (Hw.cat ol.spi.sclk (Hw.cat (Hw.lit 1 0) (Hw.cat ol.spi.mosi ol.pins.cs)))))))
       (Hw.lit 8 0)
-      o.valid o.pend o.we o.addr o.wdata o.wstrb))
+      o.valid o.pend o.we o.addr o.wdata o.wstrb o.aop o.af5))
 
 -- a framebuffer preloaded with `pixels` (the test starts the streamer at the frame)
 def Mini.pix0 (pixels : List Nat) : HwTy.El (HwTy.mem 13 16) :=

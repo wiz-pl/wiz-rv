@@ -23,6 +23,13 @@ def reportM (ab : Nat) (mx : Bool) (p : List Asm) (fuel : Nat) : String :=
       | .nil => "agrees"
       | ps => "DISAGREES" ++ lines ps)) (Ls.run ab 8 mx (Asm.assemble p) fuel)
 def report (ab : Nat) (p : List Asm) (fuel : Nat) : String := reportM ab .false p fuel
+-- with the A extension in the specification
+def reportA (ab : Nat) (mx : Bool) (p : List Asm) (fuel : Nat) : String :=
+  (fun (r : Ls.Result) => Nat.repr r.instrs ++ " instructions, " ++ Nat.repr r.cycles ++ " cycles, trap "
+    ++ Nat.repr r.trap ++ ", out " ++ showBytes r.out
+    ++ (match r.problems with
+      | .nil => "agrees"
+      | ps => "DISAGREES" ++ lines ps)) (Ls.runA ab 8 mx (Asm.assemble p) fuel)
 
 def sumE : String := report 4 Prog.sum 400
 #eval sumE
@@ -54,6 +61,17 @@ def mulI : String := report 5 Prog.muldivShort 400
 #eval mulI
 def mulIM : String := reportM 5 .true Prog.muldivShort 3000
 #eval mulIM
+-- RV32A: LR/SC success and failure, every AMO, reservation invalidation, fences, and
+-- the misaligned/illegal traps
+def atomicsI : String := reportA 5 .false Prog.atomics 5000
+#eval atomicsI
+def atomicsResvI : String := reportA 5 .false Prog.atomicsResv 500
+#eval atomicsResvI
+def aTrapsI : List String :=
+  .cons (reportA 5 .false Prog.aTrapLr 50) (.cons (reportA 5 .false Prog.aTrapSc 50)
+  (.cons (reportA 5 .false Prog.aTrapAmo 50) (.cons (reportA 5 .false Prog.aTrapIo 50)
+  (.cons (reportA 5 .false Prog.aTrapF5 50) .nil))))
+#eval aTrapsI
 -- the Doom machine's boot loader (on-chip RAM, 16 KB), loading a program into DDR over
 -- the UART and running it there (the specification models every I/O load as the UART's:
 -- the boot loader's read of the DDR status takes the first byte, 1: "DDR ok")

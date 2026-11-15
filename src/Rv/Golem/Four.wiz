@@ -102,6 +102,7 @@ structure G4.St (wb : Nat) (fl : Nat) (r : HwTy → Type) where
   h2 : G4.HSt wb r
   h3 : G4.HSt wb r
   arb : GBus.NArb G4.harts G4.cap r
+  atom : GBus.Atom G4.harts r
   beat : r (HwTy.bits 27)
   deriving Bundle
 
@@ -109,10 +110,10 @@ def G4.hart {wb fl : Nat} {r : HwTy → Type} (s : G4.St wb fl r) (i : Nat) : G4
   if Nat.beq i 0 then s.h0 else if Nat.beq i 1 then s.h1 else if Nat.beq i 2 then s.h2 else s.h3
 
 def G4.withHart {wb fl : Nat} {r : HwTy → Type} (s : G4.St wb fl r) (i : Nat) (h : G4.HSt wb r) : G4.St wb fl r :=
-  if Nat.beq i 0 then G4.St.mk s.sh h s.h1 s.h2 s.h3 s.arb s.beat
-  else if Nat.beq i 1 then G4.St.mk s.sh s.h0 h s.h2 s.h3 s.arb s.beat
-  else if Nat.beq i 2 then G4.St.mk s.sh s.h0 s.h1 h s.h3 s.arb s.beat
-  else G4.St.mk s.sh s.h0 s.h1 s.h2 h s.arb s.beat
+  if Nat.beq i 0 then G4.St.mk s.sh h s.h1 s.h2 s.h3 s.arb s.atom s.beat
+  else if Nat.beq i 1 then G4.St.mk s.sh s.h0 h s.h2 s.h3 s.arb s.atom s.beat
+  else if Nat.beq i 2 then G4.St.mk s.sh s.h0 s.h1 h s.h3 s.arb s.atom s.beat
+  else G4.St.mk s.sh s.h0 s.h1 s.h2 h s.arb s.atom s.beat
 
 def G4.quietIn {r : HwTy → Type} [Hw r] : In r := In.mk (Hw.lit 1 1) (Hw.lit 32 4294967295) (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 32 0)
 
@@ -153,6 +154,7 @@ def G4.at {r : HwTy → Type} [Hw r] (ix : r (HwTy.bits G4.iw)) (v0 v1 v2 v3 : r
 -- sees, and one answer per hart (`respFor` is zero for a hart that was not granted)
 structure G4.LinkOut (r : HwTy → Type) where
   arb : GBus.NArb G4.harts G4.cap r
+  atom : GBus.Atom G4.harts r
   r0 : CacheResp r
   r1 : CacheResp r
   r2 : CacheResp r
@@ -160,15 +162,28 @@ structure G4.LinkOut (r : HwTy → Type) where
   sel : CacheReq r
   deriving Bundle
 
+-- the arbiter with the shared-point atomic engine in front of it. While an atomic is
+-- in flight only its owner's phase request is offered, and `arbNH`'s hold keeps every
+-- other master off the bus until the last write. Every hart's answer is the arbiter's,
+-- except the atomic owner's, which is the engine's (zero until the operation ends).
 def G4.linkStep {r : HwTy → Type} [Hw r]
-    (s : GBus.NArb G4.harts G4.cap r) (q0 q1 q2 q3 : CacheReq r) (resp : CacheResp r) : r G4.LinkOut.code :=
+    (s : GBus.NArb G4.harts G4.cap r) (at : GBus.Atom G4.harts r)
+    (q0 q1 q2 q3 : CacheReq r) (resp : CacheResp r) : r G4.LinkOut.code :=
+  let busy := Hw.not (isK at.st 0);
+  let ph := GBus.atomPhase G4.harts at;
   let qs : List (CacheReq r) := .cons q0 (.cons q1 (.cons q2 (.cons q3 .nil)));
-  let a := GBus.arbN G4.harts G4.cap G4.qos s qs resp;
-  let ω sel := CacheReq.unpack (Hw.fst (Hw.snd (GBus.arbN G4.harts G4.cap G4.qos s qs (GBus.noResp (r := r)))));
+  let a := GBus.arbNH G4.harts G4.cap G4.qos s qs resp busy at.h ph;
+  let na := GBus.NArb.unpack G4.harts G4.cap (Hw.fst a);
   let mask := Hw.snd (Hw.snd a);
-  G4.LinkOut.pack (G4.LinkOut.mk (GBus.NArb.unpack G4.harts G4.cap (Hw.fst a))
-    (GBus.respFor mask 0 resp) (GBus.respFor mask 1 resp) (GBus.respFor mask 2 resp) (GBus.respFor mask 3 resp)
-    sel)
+  let ω sel := CacheReq.unpack (Hw.fst (Hw.snd a));
+  let ao := GBus.AtomOut.unpack G4.harts (GBus.atomStep G4.harts at sel na.owner resp);
+  let pick := fun (i : Nat) =>
+    Hw.mux (Hw.and ao.use (isK na.owner i)) (CacheResp.pack ao.resp)
+      (CacheResp.pack (GBus.respFor mask i resp));
+  G4.LinkOut.pack (G4.LinkOut.mk na ao.next
+    (CacheResp.unpack (pick 0)) (CacheResp.unpack (pick 1))
+    (CacheResp.unpack (pick 2)) (CacheResp.unpack (pick 3))
+    (GBus.reqMux ao.use ao.req sel))
 
 -- one cycle: the four cores (with a quiet answer) give their MMIO decodes and bus
 -- requests; one shared MMIO port is chosen; the arbiter picks one DDR request; the
@@ -187,16 +202,16 @@ def G4.step (cfg : G4.Cfg) (wb : Nat) {r : HwTy → Type} [Hw r] (s : G4.St wb G
   let q1 := Out.unpack (Hw.snd (coreStepC G4.ab wb .true (G4.cacheOf cfg 1) k1 G4.quietIn));
   let q2 := Out.unpack (Hw.snd (coreStepC G4.ab wb .true (G4.cacheOf cfg 2) k2 G4.quietIn));
   let q3 := Out.unpack (Hw.snd (coreStepC G4.ab wb .true (G4.cacheOf cfg 3) k3 G4.quietIn));
-  let c0 := CacheReq.unpack (Hw.fst (Hw.snd (GBus.route (G4.hart s 0).bus q0.valid q0.pend q0.we q0.addr q0.wdata q0.wstrb (GBus.noResp (r := r)))));
-  let c1 := CacheReq.unpack (Hw.fst (Hw.snd (GBus.route (G4.hart s 1).bus q1.valid q1.pend q1.we q1.addr q1.wdata q1.wstrb (GBus.noResp (r := r)))));
-  let c2 := CacheReq.unpack (Hw.fst (Hw.snd (GBus.route (G4.hart s 2).bus q2.valid q2.pend q2.we q2.addr q2.wdata q2.wstrb (GBus.noResp (r := r)))));
-  let c3 := CacheReq.unpack (Hw.fst (Hw.snd (GBus.route (G4.hart s 3).bus q3.valid q3.pend q3.we q3.addr q3.wdata q3.wstrb (GBus.noResp (r := r)))));
-  let lk := G4.LinkOut.unpack (G4.linkStep s.arb c0 c1 c2 c3 resp);
+  let c0 := CacheReq.unpack (Hw.fst (Hw.snd (GBus.route (G4.hart s 0).bus q0.valid q0.pend q0.we q0.addr q0.wdata q0.wstrb q0.aop q0.af5 (GBus.noResp (r := r)))));
+  let c1 := CacheReq.unpack (Hw.fst (Hw.snd (GBus.route (G4.hart s 1).bus q1.valid q1.pend q1.we q1.addr q1.wdata q1.wstrb q1.aop q1.af5 (GBus.noResp (r := r)))));
+  let c2 := CacheReq.unpack (Hw.fst (Hw.snd (GBus.route (G4.hart s 2).bus q2.valid q2.pend q2.we q2.addr q2.wdata q2.wstrb q2.aop q2.af5 (GBus.noResp (r := r)))));
+  let c3 := CacheReq.unpack (Hw.fst (Hw.snd (GBus.route (G4.hart s 3).bus q3.valid q3.pend q3.we q3.addr q3.wdata q3.wstrb q3.aop q3.af5 (GBus.noResp (r := r)))));
+  let lk := G4.LinkOut.unpack (G4.linkStep s.arb s.atom c0 c1 c2 c3 resp);
   -- each core with its MMIO value and its own DDR answer
-  let b0 := GBus.route (G4.hart s 0).bus q0.valid q0.pend q0.we q0.addr q0.wdata q0.wstrb lk.r0;
-  let b1 := GBus.route (G4.hart s 1).bus q1.valid q1.pend q1.we q1.addr q1.wdata q1.wstrb lk.r1;
-  let b2 := GBus.route (G4.hart s 2).bus q2.valid q2.pend q2.we q2.addr q2.wdata q2.wstrb lk.r2;
-  let b3 := GBus.route (G4.hart s 3).bus q3.valid q3.pend q3.we q3.addr q3.wdata q3.wstrb lk.r3;
+  let b0 := GBus.route (G4.hart s 0).bus q0.valid q0.pend q0.we q0.addr q0.wdata q0.wstrb q0.aop q0.af5 lk.r0;
+  let b1 := GBus.route (G4.hart s 1).bus q1.valid q1.pend q1.we q1.addr q1.wdata q1.wstrb q1.aop q1.af5 lk.r1;
+  let b2 := GBus.route (G4.hart s 2).bus q2.valid q2.pend q2.we q2.addr q2.wdata q2.wstrb q2.aop q2.af5 lk.r2;
+  let b3 := GBus.route (G4.hart s 3).bus q3.valid q3.pend q3.we q3.addr q3.wdata q3.wstrb q3.aop q3.af5 lk.r3;
   let t0 := GBus.Resp.unpack (Hw.snd (Hw.snd b0));
   let t1 := GBus.Resp.unpack (Hw.snd (Hw.snd b1));
   let t2 := GBus.Resp.unpack (Hw.snd (Hw.snd b2));
@@ -269,13 +284,13 @@ def G4.step (cfg : G4.Cfg) (wb : Nat) {r : HwTy → Type} [Hw r] (s : G4.St wb G
     (inc sh.pre)
     uartWr (Hw.mux uartWr (Hw.slice 0 8 wiod) sh.txB);
   Hw.pair (G4.St.pack wb G4.fl (G4.St.mk shN h0 h1 h2 h3
-    lk.arb (inc s.beat)))
+    lk.arb lk.atom (inc s.beat)))
     (CacheReq.pack lk.sel)
 
 def G4.initSt (wb : Nat) (prog : List Nat) : HwTy.El (G4.St.code wb G4.fl) :=
   let h := G4.HSt.mk (Bundle.toEl (CoreSt.bundle G4.ab wb) (CoreSt.init G4.ab wb prog)) BusA.init;
   Bundle.toEl (G4.St.bundle wb G4.fl) (G4.St.mk (G4.Sh.init G4.fl) h h h h
-    (GBus.nArbInit G4.harts G4.cap) (BitVec.ofNat 27 0))
+    (GBus.nArbInit G4.harts G4.cap) (GBus.atomInit G4.harts) (BitVec.ofNat 27 0))
 
 -- the shared pins: the UART line, the OLED's Pmod pins, the LEDs and the sound pin
 structure G4.Out (r : HwTy → Type) where

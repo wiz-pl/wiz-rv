@@ -74,7 +74,7 @@ structure F.S where
 
 def F.req (i d total : Nat) : CacheReq HwTy.El :=
   CacheReq.mk (Bool.toBits (Nat.lt d total)) (BitVec.ofNat 28 (i * 256 + d))
-    (BitVec.ofNat 1 1) (BitVec.ofNat 32 (i * 65536 + d)) (BitVec.ofNat 4 15)
+    (BitVec.ofNat 1 1) (BitVec.ofNat 32 (i * 65536 + d)) (BitVec.ofNat 4 15) (BitVec.ofNat 2 0) (BitVec.ofNat 5 0)
 
 def F.init : F.S :=
   F.S.mk (GBus.nArbInit 4 4) 0 0 0 0 0 0 0 0 0 .nil .nil 0

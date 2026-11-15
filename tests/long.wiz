@@ -31,7 +31,7 @@ def L.verdict (b : Bool) : String := if b then ": agree" else ": DISAGREE"
 def L.check (name : String) (ab wb : Nat) (mx : Bool) (p : List Asm) (cycles steps : Nat) : IO Unit :=
   let prog := Asm.assemble p;
   let hw := L.bytes (Circuit.simFast (core ab wb mx prog) (L.rep (Bundle.toEl In.bundle In.idle) cycles .nil)) .nil 0;
-  let sp := Rv.run (Cfg.mk ab (wb + 2) mx) steps (Arch.start (Cfg.mk ab (wb + 2) mx) prog);
+  let sp := Rv.run (Cfg.mk ab (wb + 2) mx .false) steps (Arch.start (Cfg.mk ab (wb + 2) mx .false) prog);
   IO.println (name ++ ": core " ++ showBytes hw.1 ++ "trap " ++ Nat.repr hw.2 ++ "; spec " ++ showBytes (List.reverse sp.out)
     ++ "trap " ++ Nat.repr sp.trap ++ L.verdict (Bool.and (Ls.natsEq hw.1 (List.reverse sp.out)) (Nat.beq hw.2 sp.trap)))
 

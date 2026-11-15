@@ -75,7 +75,7 @@ def Doom.oldStep {r : HwTy → Type} [Hw r] (s : CoreSt 5 12 r) (x : CIn r) : r 
   let ω c := CoreSt.unpack 5 12 (Hw.fst cr);
   let c2 := CoreSt.mk (Hw.mux rst (Hw.lit 4 Ph.f) c.ph) (Hw.mux rst (Hw.lit 32 0) c.pc) c.q0 c.q1 c.q2 c.q3
     c.m0 c.m1 c.m2 c.m3 c.rfa c.rfb c.x1 c.x2 c.acc c.dv c.rm c.cnt c.srd c.sf3 c.slo c.sio (Hw.mux rst (Hw.lit 3 0) c.trap)
-    c.busq c.fromBus c.badr c.bwe c.bwd c.bst c.bret c.bsent c.ra c.l1q c.l1t c.l1d c.l1tag c.fromL1 c.rmode c.rk c.rgap c.rbuf c.rline c.bnew;
+    c.busq c.fromBus c.badr c.bwe c.bwd c.bst c.bret c.bsent c.ra c.l1q c.l1t c.l1d c.l1tag c.fromL1 c.rmode c.rk c.rgap c.rbuf c.rline c.bnew c.resv c.resOk c.amoA c.amoD c.amoO c.sf5 c.ak c.baop c.baf5;
   Hw.pair (CoreSt.pack 5 12 c2)
     (COut.pack (COut.mk (Out.unpack (Hw.snd cr)) (CEv.mk (isK s.ph Ph.d) (isK s.ph Ph.p) (isK s.ph Ph.m)
       (Hw.or (isK s.ph Ph.s) (Hw.or (isK s.ph Ph.x) (isK s.ph Ph.v))) (isK s.ph Ph.f))))
@@ -104,6 +104,8 @@ structure DOut (r : HwTy → Type) where
   we : r W1
   wdata : r B32
   wstrb : r B4
+  aop : r B2
+  af5 : r B5
   pend : r W1
   deriving Bundle
 
@@ -292,7 +294,7 @@ def dSys (full : Bool) (cfg : RgbCfg) (ediv : Nat) (cc : Circuit CIn.code COut.c
       -- (JB1 the PWM, JB2 its complement: a piezo from JB1 to GND, or across JB1 and JB2
       -- for twice the swing)
       (Hw.cat (Hw.lit 6 0) (Hw.cat (Hw.not (Hw.ult (Hw.slice lob 8 sn.pwm : r W8) sn.cur)) (Hw.ult (Hw.slice lob 8 sn.pwm : r W8) sn.cur)))
-      s.edge.valid o.addr o.we o.wdata o.wstrb s.edge.pend))
+      s.edge.valid o.addr o.we o.wdata o.wstrb o.aop o.af5 s.edge.pend))
 
 def DSys.init (cfg : RgbCfg) (cc : Circuit CIn.code COut.code) : DSys cfg.frameLog cc.st HwTy.El :=
   DSys.mk (Edge.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)

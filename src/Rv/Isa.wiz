@@ -11,7 +11,10 @@ import Int
 -- instruction and the cause in `trap`. A stopped machine stays as it is.
 --
 -- `Cfg.rbits` is 5 for RV32I (32 registers) and 4 for RV32E (16 registers; an
--- instruction naming x16 … x31 is illegal). FENCE is a no-op (one hart, no caches).
+-- instruction naming x16 … x31 is illegal). `Cfg.a` is the A extension (RV32A: LR.W,
+-- SC.W and the AMOs). FENCE and FENCE.I are no-ops: this is one hart, with the memory
+-- operations of an instruction sequence in program order (the memory model is in
+-- docs/atomics.md).
 -- Misaligned loads and stores trap (the ISA allows it). Memory: the on-chip memory
 -- from address 0 (wrapping), and DDR from 0x40000000 (initially zero).
 --
@@ -24,10 +27,13 @@ structure Cfg where
   rbits : Nat
   mbits : Nat
   m : Bool        -- the M extension (multiplication and division)
+  a : Bool        -- the A extension (LR.W, SC.W and the AMOs)
 
-def Cfg.rv32i (mbits : Nat) : Cfg := Cfg.mk 5 mbits .false
-def Cfg.rv32e (mbits : Nat) : Cfg := Cfg.mk 4 mbits .false
-def Cfg.rv32im (mbits : Nat) : Cfg := Cfg.mk 5 mbits .true
+def Cfg.rv32i (mbits : Nat) : Cfg := Cfg.mk 5 mbits .false .false
+def Cfg.rv32e (mbits : Nat) : Cfg := Cfg.mk 4 mbits .false .false
+def Cfg.rv32im (mbits : Nat) : Cfg := Cfg.mk 5 mbits .true .false
+def Cfg.rv32ia (mbits : Nat) : Cfg := Cfg.mk 5 mbits .false .true
+def Cfg.rv32ima (mbits : Nat) : Cfg := Cfg.mk 5 mbits .true .true
 
 -- trap codes
 def Trap.none : Nat := 0
@@ -45,6 +51,7 @@ structure Arch where
   trap : Nat
   out : List Nat                -- the bytes written to the output port, newest first
   inp : List Nat                -- the bytes still to come on the input port
+  res : Option (BitVec 32)      -- the LR reservation: the address of the reserved word
 
 ------------------------------------------------------------------------------------
 -- Bits of a number
@@ -88,6 +95,7 @@ def Op.store : Nat := 35     -- 0100011
 def Op.opimm : Nat := 19     -- 0010011
 def Op.op : Nat := 51        -- 0110011
 def Op.fence : Nat := 15     -- 0001111
+def Op.amo : Nat := 47       -- 0101111 (RV32A)
 def Op.system : Nat := 115   -- 1110011
 
 ------------------------------------------------------------------------------------
@@ -99,6 +107,9 @@ def Rv.reg (s : Arch) (i : Nat) : BitVec 32 :=
 -- on-chip memory wraps at its size; DDR (bit 30 set, bit 31 clear: 0x40000000 …
 -- 0x7fffffff) is addressed in full
 def Rv.isDdr (a : BitVec 32) : Bool := Bool.and (Rv.bit a.toNat 30) (Bool.not (Rv.bit a.toNat 31))
+-- the shared uncached aperture (the top 16 MB of DDR)
+def Rv.isUncached (a : BitVec 32) : Bool :=
+  Bool.and (Bool.not (Nat.lt a.toNat 1325400064)) (Nat.lt a.toNat (1325400064 + 16777216))
 def Rv.maddr (c : Cfg) (a : BitVec 32) : BitVec 32 :=
   if Rv.isDdr a then a else Rv.w32 (Nat.mod a.toNat (Rv.pow2 c.mbits))
 def Rv.byte (c : Cfg) (s : Arch) (a : BitVec 32) : Nat := (s.mem (Rv.maddr c a)).toNat
@@ -113,13 +124,27 @@ def Rv.next (s : Arch) : BitVec 32 := Rv.plus s.pc 4
 
 -- PC := pc, x[rd] := v (unless rd is x0)
 def Rv.write (s : Arch) (rd : Nat) (v : BitVec 32) (pc : BitVec 32) : Arch :=
-  if Nat.beq rd 0 then Arch.mk pc s.regs s.mem s.trap s.out s.inp
-  else Arch.mk pc (fun (j : BitVec 5) => if BitVec.beq j (BitVec.ofNat 5 rd) then v else s.regs j) s.mem s.trap s.out s.inp
+  if Nat.beq rd 0 then Arch.mk pc s.regs s.mem s.trap s.out s.inp s.res
+  else Arch.mk pc (fun (j : BitVec 5) => if BitVec.beq j (BitVec.ofNat 5 rd) then v else s.regs j) s.mem s.trap s.out s.inp s.res
 
-def Rv.stop (s : Arch) (t : Nat) : Arch := Arch.mk s.pc s.regs s.mem t s.out s.inp
+def Rv.stop (s : Arch) (t : Nat) : Arch := Arch.mk s.pc s.regs s.mem t s.out s.inp s.res
+
+-- the reservation (RV32A): LR.W sets it to the word's address, SC.W clears it, and a
+-- store to that word clears it. The reservation is per hart; there is no monitor and no
+-- coherence between harts (docs/atomics.md).
+def Rv.reserve (s : Arch) (a : BitVec 32) : Arch := Arch.mk s.pc s.regs s.mem s.trap s.out s.inp (.some a)
+def Rv.clearRes (s : Arch) : Arch := Arch.mk s.pc s.regs s.mem s.trap s.out s.inp .none
+-- does `a` name the reserved word?
+def Rv.resHit (c : Cfg) (s : Arch) (a : BitVec 32) : Bool := match s.res with
+  | .none => .false
+  | .some r => Nat.beq (Nat.div (Rv.maddr c a).toNat 4) (Nat.div (Rv.maddr c r).toNat 4)
+-- a store at `a` (of any size) invalidates a reservation on the word it writes
+def Rv.resAfterStore (c : Cfg) (s : Arch) (a : BitVec 32) : Option (BitVec 32) := match s.res with
+  | .none => .none
+  | .some r => if Nat.beq (Nat.div (Rv.maddr c a).toNat 4) (Nat.div (Rv.maddr c r).toNat 4) then .none else .some r
 
 -- a load from the input port into rd
-def Rv.setInp (s : Arch) (i : List Nat) : Arch := Arch.mk s.pc s.regs s.mem s.trap s.out i
+def Rv.setInp (s : Arch) (i : List Nat) : Arch := Arch.mk s.pc s.regs s.mem s.trap s.out i s.res
 def Rv.input (s : Arch) (rd : Nat) : Arch := match s.inp with
   | .nil => Rv.write s rd (Rv.w32 (Rv.pow2 32 - 1)) (Rv.next s)
   | .cons b bs => Rv.setInp (Rv.write s rd (Rv.w32 b) (Rv.next s)) bs
@@ -171,6 +196,21 @@ def Rv.muldiv (f3 : Nat) (a b : BitVec 32) : BitVec 32 :=
   else if Nat.beq f3 6 then Rv.w32 (Rv.tc 32 (Int.mod (Rv.sval a) (Rv.sval b)))
   else Rv.w32 (Nat.mod a.toNat b.toNat)
 
+-- The A extension: funct5 (bits 31 … 27) gives the operation; `a` is the old word and
+-- `b` the source register. 0 AMOADD, 1 AMOSWAP, 2 LR, 3 SC, 4 AMOXOR, 8 AMOOR,
+-- 12 AMOAND, 16 AMOMIN, 20 AMOMAX, 24 AMOMINU, 28 AMOMAXU.
+def Rv.amo (f5 : Nat) (a b : BitVec 32) : BitVec 32 :=
+  if Nat.beq f5 0 then BitVec.add a b
+  else if Nat.beq f5 1 then b
+  else if Nat.beq f5 4 then BitVec.xor a b
+  else if Nat.beq f5 8 then BitVec.or a b
+  else if Nat.beq f5 12 then BitVec.and a b
+  else if Nat.beq f5 16 then (if BitVec.slt a b then a else b)
+  else if Nat.beq f5 20 then (if BitVec.slt a b then b else a)
+  else if Nat.beq f5 24 then (if BitVec.ult a b then a else b)
+  else if Nat.beq f5 28 then (if BitVec.ult a b then b else a)
+  else a
+
 -- a branch condition (funct3 2 and 3 are not branches)
 def Rv.cond (f3 : Nat) (a b : BitVec 32) : Bool :=
   if Nat.beq f3 0 then BitVec.beq a b
@@ -199,6 +239,11 @@ def Rv.okOpImm (f3 f7 : Nat) : Bool :=
 -- OP: funct7 = 0, or 0100000 for SUB and SRA
 def Rv.okOp (f3 f7 : Nat) : Bool :=
   Bool.or (Nat.beq f7 0) (Bool.and (Nat.beq f7 32) (Bool.or (Nat.beq f3 0) (Nat.beq f3 5)))
+-- A: funct3 is the width (2 = .W; RV32 has no .D), funct5 the operation
+def Rv.amoOp (f5 : Nat) : Bool :=
+  Bool.or (Nat.beq f5 4) (Bool.or (Nat.beq f5 8) (Bool.or (Nat.beq f5 12)
+    (Bool.or (Nat.beq f5 16) (Bool.or (Nat.beq f5 20) (Bool.or (Nat.beq f5 24) (Nat.beq f5 28))))))
+def Rv.okF5 (f5 : Nat) : Bool := Bool.or (Nat.lt f5 4) (Rv.amoOp f5)
 
 -- the access size of a load or store (funct3), and its alignment
 def Rv.size (f3 : Nat) : Nat := Rv.pow2 (Nat.mod f3 4)
@@ -249,8 +294,29 @@ def Rv.exec (c : Cfg) (s : Arch) (w : Nat) : Arch :=
     (if Bool.and (Rv.okStore f3) (Rv.ok2 c r1 r2)
      then (let ω ad := BitVec.add a (Ins.immS w);
            if Bool.not (Rv.aligned f3 ad) then Rv.stop s Trap.store
-           else if Rv.bit ad.toNat 31 then Arch.mk (Rv.next s) s.regs s.mem s.trap (.cons (Rv.bits b.toNat 0 8) s.out) s.inp
-           else Arch.mk (Rv.next s) s.regs (Rv.store (Rv.size f3) c s.mem ad b.toNat) s.trap s.out s.inp)
+           else if Rv.bit ad.toNat 31 then Arch.mk (Rv.next s) s.regs s.mem s.trap (.cons (Rv.bits b.toNat 0 8) s.out) s.inp s.res
+           else Arch.mk (Rv.next s) s.regs (Rv.store (Rv.size f3) c s.mem ad b.toNat) s.trap s.out s.inp (Rv.resAfterStore c s ad))
+     else Rv.illegal s)
+  else if Nat.beq op Op.amo then
+    (let ω f5 := Nat.div f7 4;
+     let ω lr := Nat.beq f5 2;
+     let ω sc := Nat.beq f5 3;
+     let ω regsOk := if lr then Bool.and (Nat.beq r2 0) (Rv.ok2 c rd r1) else Rv.ok3 c rd r1 r2;
+     if Bool.and c.a (Bool.and (Nat.beq f3 2) (Bool.and (Rv.okF5 f5) regsOk)) then
+       (if Bool.not (Rv.aligned 2 a) then Rv.stop s (if lr then Trap.load else Trap.store)
+        else if Bool.not (Bool.and (Bool.not (Rv.bit a.toNat 31))
+                 (Bool.or (Bool.not (Rv.bit a.toNat 30)) (Rv.isUncached a))) then Rv.illegal s
+        else if lr then Rv.write (Rv.reserve s a) rd (Rv.w32 (Rv.load 4 c s a)) (Rv.next s)
+        else if sc then
+          (let ω hit := Rv.resHit c s a;
+           let ω s1 := Rv.clearRes s;
+           let ω s2 := if hit then Arch.mk s1.pc s1.regs (Rv.store 4 c s1.mem a b.toNat) s1.trap s1.out s1.inp s1.res else s1;
+           Rv.write s2 rd (if hit then Rv.w32 0 else Rv.w32 1) (Rv.next s))
+        else
+          (let ω s1 := Rv.clearRes s;
+           let ω old := Rv.load 4 c s a;
+           let ω s2 := Arch.mk s1.pc s1.regs (Rv.store 4 c s1.mem a (Rv.amo f5 (Rv.w32 old) b).toNat) s1.trap s1.out s1.inp s1.res;
+           Rv.write s2 rd (Rv.w32 old) (Rv.next s)))
      else Rv.illegal s)
   else if Nat.beq op Op.opimm then
     (if Bool.and (Rv.okOpImm f3 f7) (Rv.ok2 c rd r1)
@@ -285,4 +351,4 @@ def Rv.wordAt : List Nat → Nat → Nat
 def Rv.image (prog : List Nat) (a : BitVec 32) : BitVec 8 :=
   BitVec.ofNat 8 (Rv.bits (Rv.wordAt prog (Nat.div a.toNat 4)) (8 * Nat.mod a.toNat 4) 8)
 def Arch.start (c : Cfg) (prog : List Nat) : Arch :=
-  Arch.mk (Rv.w32 0) (fun (j : BitVec 5) => Rv.w32 0) (fun (a : BitVec 32) => Rv.image prog (Rv.maddr c a)) 0 .nil .nil
+  Arch.mk (Rv.w32 0) (fun (j : BitVec 5) => Rv.w32 0) (fun (a : BitVec 32) => Rv.image prog (Rv.maddr c a)) 0 .nil .nil .none

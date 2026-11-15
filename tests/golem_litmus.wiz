@@ -250,14 +250,66 @@ def rowsSpin : List String := strs4
   (row "spin coh " CM.coh spinProgs extLast SPINcoh)
 
 def LRok : List (List Nat) := S2 (L2 0 1) (L2 1 0)
-def LRlocal : List (List Nat) := S3 (L2 0 0) (L2 0 1) (L2 1 0)
 
-def rowsAtom : List String := strs4
-  "== LR/SC (0 success, 1 failure: one winner) =="
+-- The shared-point atomic model (`CM.mOutcomes`): the litmus programs below. `lr`
+-- stores the value it read in the hart's temporary, so `scz` is "SC.W if the lock
+-- looked free" (the usual LR/SC lock); `amo` is one step and `amor`/`amow` are the
+-- rejected split implementation.
+def AX.lock0 : List MOp := .cons (.lr 4) (.cons (.scz 4 1) .nil)
+def AX.lock1 : List MOp := .cons (.lr 4) (.cons (.scz 4 1) .nil)
+def AX.amoOne : List MOp := .cons (.amo 0 4 1) .nil
+def AX.amoTwo : List MOp := .cons (.amo 0 4 1) (.cons (.amo 0 4 1) .nil)
+def AX.amoSplit : List MOp := .cons (.amor 0 4 1) (.cons (.amow 0 4 1) .nil)
+-- h0 reads x, then tells h1 it has done so; h1 stores x=7 and releases h0; only then
+-- does h0 attempt its SC. The only possible order puts h1's store between LR and SC.
+def AX.store0 : List MOp := .cons (.lr 4) (.cons (.st 20 1) (.cons (.guard 24 1) (.cons (.scz 4 1) .nil)))
+def AX.store1 : List MOp := .cons (.guard 20 1) (.cons (.st 4 7) (.cons (.st 24 1) .nil))
+
+def AX.second : List Nat → Nat
+  | .cons _ (.cons b _) => b
+  | .cons a _ => a
+  | .nil => 0
+def AX.scPair (s : MSt) : List Nat := L2 (AX.second (CM.mRegH 0 s)) (AX.second (CM.mRegH 1 s))
+def AX.storeOut (s : MSt) : List Nat :=
+  match CM.mRegH 0 s with
+  | .cons _ (.cons r _) => .cons r (CM.mMem4 s)
+  | _ => CM.mMem4 s
+def AX.allEq4 : List Nat → Bool
+  | .nil => .true
+  | .cons a as => Bool.and (Nat.beq a 4) (AX.allEq4 as)
+
+def strs11 (a b c d e f g h i j k : String) : List String :=
+  .cons a (.cons b (.cons c (.cons d (.cons e (.cons f (.cons g (.cons h (.cons i (.cons j (.cons k .nil))))))))))
+
+def rowsAtom : List String := strs11
+  "== LR/SC (0 success, 1 failure: exactly one winner) =="
   (let g := CM.lrsc .true;
-   "LR/SC global: " ++ CM.showSet g ++ (if CM.sameSet g LRok then " PASS" else " FAIL (want " ++ CM.showSet LRok ++ ")"))
+   "LR/SC shared (CM.lrsc): " ++ CM.showSet g
+     ++ (if CM.sameSet g LRok then " PASS" else " FAIL (want " ++ CM.showSet LRok ++ ")"))
+  (let g := CM.mOutcomes (.cons AX.lock0 (.cons AX.lock1 .nil)) AX.scPair;
+   "LR/SC shared (multi-hart): " ++ CM.showSet g
+     ++ (if CM.sameSet g LRok then " PASS" else " FAIL (want " ++ CM.showSet LRok ++ ")"))
   (let l := CM.lrsc .false;
-   "LR/SC local : " ++ CM.showSet l ++ (if CM.sameSet l LRlocal then " PASS" else " FAIL (want " ++ CM.showSet LRlocal ++ ")"))
+   "LR/SC local (rejected): " ++ CM.showSet l
+     ++ (if CM.anyNats (L2 0 0) l then " — both can win (the bug)" else " — no bug"))
+  "== store-to-line invalidation (SC must fail, x stays 7) =="
+  (let o := CM.mOutcomes (.cons AX.store0 (.cons AX.store1 .nil)) AX.storeOut;
+   let want := S1 (L2 1 7);
+   "store invalidates: " ++ CM.showSet o
+     ++ (if CM.sameSet o want then " PASS" else " FAIL (want " ++ CM.showSet want ++ ")"))
+  "== AMO increment (old value returned, memory = the sum) =="
+  (let o := CM.mOutcomes (.cons AX.amoOne (.cons AX.amoOne (.cons AX.amoOne (.cons AX.amoOne .nil)))) CM.mMem4;
+   let want := S1 (L1 4);
+   "AMO 4 harts: " ++ CM.showSet o
+     ++ (if CM.sameSet o want then " PASS" else " FAIL (want " ++ CM.showSet want ++ ")"))
+  (let o := CM.mOutcomes (.cons AX.amoTwo (.cons AX.amoTwo .nil)) CM.mMem4;
+   let want := S1 (L1 4);
+   "AMO 2 harts: " ++ CM.showSet o
+     ++ (if CM.sameSet o want then " PASS" else " FAIL (want " ++ CM.showSet want ++ ")"))
+  (let o := CM.mOutcomes (.cons AX.amoSplit (.cons AX.amoSplit .nil)) CM.mMem4;
+   let ok := Bool.not (AX.allEq4 (List.map (fun (x : List Nat) => match x with | .cons a _ => a | .nil => 0) o));
+   "AMO split (rejected): " ++ CM.showSet o
+     ++ (if ok then " PASS (lost updates are possible)" else " FAIL (a split AMO cannot be atomic)"))
   "== end =="
 
 def report : String := lines (rowsSB ++ rowsMP ++ rowsLB ++ rowsIR ++ rowsW ++ rowsRing

@@ -76,10 +76,10 @@ def Golem.step (t : Timing) (h : Circuit DIn.code DOut.code) {r : HwTy → Type}
   let quiet := DIn.pack (DIn.mk rx (Hw.lit 4 0) lo lo (Hw.lit 32 0) (Hw.lit 2 0) (Hw.lit 32 0) (Hw.lit 32 0));
   let ω o0 := DOut.unpack (Hw.snd (Circuit.inst h s.sys quiet));
   -- the decode and the adapter: a zero answer gives the request, the real one the state
-  let r0 := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb (GBus.noResp (r := r));
+  let r0 := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb o0.aop o0.af5 (GBus.noResp (r := r));
   let ω q := CacheReq.unpack (Hw.fst (Hw.snd r0));
   -- the arbiter's second master: absent on the board
-  let host := CacheReq.mk lo (Hw.lit 28 0) lo (Hw.lit 32 0) (Hw.lit 4 0);
+  let host := CacheReq.mk lo (Hw.lit 28 0) lo (Hw.lit 32 0) (Hw.lit 4 0) (Hw.lit 2 0) (Hw.lit 5 0);
   let ar0 := GBus.arb s.arb q host (GBus.noResp (r := r));
   let ω sel := CacheReq.unpack (Hw.fst (Hw.snd ar0));
   -- the controller's answer to the cache comes from its state and its PHY input
@@ -92,7 +92,7 @@ def Golem.step (t : Timing) (h : Circuit DIn.code DOut.code) {r : HwTy → Type}
   let ω coreResp := CacheResp.unpack (Hw.fst (Hw.snd (Hw.snd ar)));
   let co := Ctrl.step t cs (PortIn.unpack (Hw.snd (Hw.snd cr))) (PhyIn.unpack phyIn);
   let ω po := PortOut.unpack (Hw.fst (Hw.snd co));
-  let br := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb coreResp;
+  let br := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb o0.aop o0.af5 coreResp;
   let ω toCore := GBus.Resp.unpack (Hw.snd (Hw.snd br));
   -- the core waits in reset for the calibration
   let rst := GBoard.coreReset btn po.calDone po.calFail;

@@ -349,7 +349,35 @@ gains one, `mhartid` moves to the CSR and the MMIO word can stay as a debug alia
   flag pass a pending DDR store, which is the `ring pipe` anomaly in
   `tests/golem_litmus.wiz`; that is why this target uses the multi-cycle core. A real
   drain fence on `Rv.Pipe` (wait for `bu.sbv == 0` and the bus idle) is a separate
-  change, and `agent/golem-atomics` must rebase on it.
+  change.
+* **Atomics are at the single point, not in the hart.** LR.W, SC.W and the AMOs are
+  decoded (`src/Rv/Core.wiz`) and accepted **only on the uncached aperture**
+  (`0x4F00_0000 … 0x4FFF_FFFF`). On-chip RAM is per hart, so an atomic there is done
+  locally and is trivially single-hart. An atomic to a *private-cached* DDR line, or to
+  MMIO, traps `illegal`; it cannot be made correct while the L1 is incoherent, because
+  another hart's store can leave the hart's private copy stale. The shared aperture's
+  operations are executed by `GBus.Atom` (`src/Rv/Golem/Bus.wiz`): the engine holds the
+  bus owner for the whole operation (`GBus.arbNH`'s `hold`), performs the AMO's read-
+  modify-write itself, and keeps the per-hart reservations where it sees every hart's
+  store. A reservation is on the 16-byte line; any store, successful SC or AMO to that
+  line from any hart clears it. Cost at the cache's one-request rate: LR one read; SC
+  one write if the reservation is live (one read then failure if not); AMO one read
+  plus one write, and other masters wait while the engine holds the line. The write-
+  back of the shared cache to DDR is behind this point, so it is not an invalidation
+  event; the private L1 is not in the atomic path at all.
+* **Two-hart runs.** The atomics engine (`GBus.Atom`/`GBus.arbNH`) is parameterised
+  by the master count and keeps four reservation slots; the model tests it with two
+  harts as well as four. The SoC has one four-hart top: a two-hart image parks harts
+  2/3 on their doorbells, which is the same hardware with two harts active. There is no
+  separate two-hart bitstream at this base (the older `agent/golem-2hart` prototype is
+  a different, simulation-only machine).
+* **The coherence caveat remains.** Atomics make counters and locks correct at the
+  shared point, but they do **not** make the private L1 coherent. Shared data protected
+  by a lock must still live in the uncached aperture (or be accessed only after a
+  software handoff that guarantees a fresh fill); normal loads/stores to a cached DDR
+  line can return stale words. The litmus tests in `tests/golem_litmus.wiz` state this:
+  the LR/SC result has exactly one winner, a store by another hart invalidates a
+  reservation, and a four-hart AMO sum is exact.
 * **One MMIO port per cycle.** The four harts share one UART/Intc/framebuffer decode.
   If two harts write in the same cycle the lowest hart id wins (and the other write is
   dropped); if a read and a write coincide, the write's register is used for the
@@ -390,7 +418,8 @@ scripts/golem-board.sh gen   --variant four_nol1   # the no-L1 cut
 ```
 src/Rv/Golem/Map.wiz    the memory map: constants, decode predicates, MMIO offsets
 src/Rv/Golem/Bus.wiz    GBus.route (decode), GBus.arb (two masters), GBus.arbN (N masters,
-                        round-robin/QoS/burst cap), GBus.ramStep (sim DDR)
+                        round-robin/QoS/burst cap), GBus.arbNH (atomic hold),
+                        GBus.Atom (shared-point LR/SC/AMO), GBus.ramStep (sim DDR)
 src/Rv/Golem/Intc.wiz   the CLINT-like timer, the PLIC-style controller, the inter-hart
                         mailbox, `mip`/`mie` and the boot ABI's registers
 src/Rv/Golem/Prog.wiz   the boot ROM: banner, DDR/host/timer checks, three pixels, a DDR call
@@ -415,6 +444,7 @@ tests/golem_four.wiz    the four-hart interconnect: no loss, and fairness under 
 tests/golem_four_litmus.wiz the 4-hart mailbox ring in the coherence model (SC only)
 tests/golem_four_ring.wiz the four-hart mailbox ring with the real Intc (MMIO, round-robin)
 tests/golem_four_litmus.wiz the same ring in the coherence model
+tests/golem_litmus.wiz  the bus litmus: SC shapes, warm caches, LR/SC, AMO sum
 tests/golem_board.wiz   the `golem board` config/constraints check
 sw/golem.h              the memory map and MMIO for software
 sw/golem.c              a tiny C hello (banner, cycle counter, three rows)
