@@ -92,8 +92,9 @@ evicts; every read and the final memory are compared with the flat reference.
 
 **RTL differential check.** `RC.Tb` runs the RTL with a behavioural 128-bit line memory
 and a flat reference memory, 400 cycles per policy. Every completed read is compared
-with the reference; every read/write updates it; the final memory is compared word for
-word with the model's `CM.flat` (4096 words). The write-back runs report 17 and 8 dirty
+with the reference; every read/write updates it; the final memory is compared with the
+model's `CM.flat` (4096 words) by a rolling checksum, while every read is exact. The
+write-back runs report 17 and 8 dirty
 evictions; the write-through runs report 0, as they must (their lines are clean). The
 two independent checks — RTL against the flat reference, model against the flat
 reference, and RTL against the model's final memory — are what "validated" means here.

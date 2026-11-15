@@ -14,9 +14,10 @@ import Text
 --   * `CM.random`: 3000 generated accesses (the LFSR the RTL uses) for the same four
 --     policies, against the flat memory.
 --   * `RC.check`: the RTL (`Rv.CacheRtl`) with its behavioural line memory against the
---     model and a flat reference memory, for 400 cycles each policy; the final memory is
---     compared word for word with the model's `CM.flat`, and every read with the
---     reference. Write-back runs report the dirty evictions they saw.
+--     model and a flat reference memory, for 400 cycles each policy; every read is
+--     compared exactly with the reference, and the final memory with the model's
+--     `CM.flat` by a rolling checksum of its 4096 words. Write-back runs report the
+--     dirty evictions they saw.
 
 structure Cache.R where
   ops : Nat
