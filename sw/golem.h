@@ -29,6 +29,9 @@
                                                bit 1: a received byte is waiting */
 #define HART_ID         IO(0x08)            /* this hart's mhartid (0 … 3): the core has
                                                no CSR file, so mhartid is an MMIO word */
+#define MIP             IO(0x90)            /* read: this hart's mip (MSIP|MTIP|MEIP);
+                                               the software form of the interrupt input
+                                               until the core has CSRs */
 #define CYCLES_LO      IO(0x10)             /* the cycle counter (GOLEM_CLOCK_HZ) */
 #define CYCLES_HI      IO(0x14)
 #define DDR_STATUS     IO(0x40)             /* bit 0: calibration done, bit 1: failed */
@@ -52,22 +55,25 @@
 #define PERF_OLED      IO(0x80)             /* pins 11..7: PMODEN VCCEN RES DC CS; pc */
 
 /* 0x80001000: the inter-hart mailbox and the boot ABI (four words a hart).
-   A message is one 32-bit word: writing IPI_DATA(h) posts it to hart h and raises PLIC
-   source 2 + h; reading it takes the word and clears its valid bit. The boot ABI:
-   hart 0 writes the entry address to BOOT_ENTRY(h), then writes 1 to MSIP(h) (the
-   CLINT doorbell); a parked hart polls MSIP(h), reads BOOT_ENTRY(h) and jumps. */
+   A message is one 32-bit word: writing IPI_DATA(h) posts it to hart h and raises that
+   hart's PLIC source (PLIC_IPI0..3: 2/3 for harts 0/1, 5/6 for harts 2/3); reading it
+   takes the word and clears its valid bit. The boot ABI: hart 0 writes the entry
+   address to BOOT_ENTRY(h) and the go message, then writes 1 to MSIP(h) (the CLINT
+   doorbell); a parked hart polls MSIP(h), reads BOOT_ENTRY(h), then waits for its
+   PLIC source, claims it, reads the message and completes it before jumping. */
 #define IPI_DATA(h)     IO(0x1000u + 8u * (h))
 #define IPI_STATUS(h)   IO(0x1004u + 8u * (h))   /* bit 0: a message is waiting */
 #define BOOT_ENTRY(h)   IO(0x1020u + 4u * (h))
 #define BOOT_HART0      0u
-/* Hart ids are 0 … 3 (four harts on golem_four). Harts 2/3's mailbox data is MSIP-only
-   in the PLIC (sources 2/3 are harts 0/1); every hart has its own msip and mtimecmp. */
+/* Hart ids are 0 … 3 (four harts on golem_four). Every hart's mailbox raises a source
+   in its own PLIC context; every hart also has its own msip and mtimecmp. */
 
 /* 0x80002000: the PLIC-style external controller. Sources: 1 UART received byte,
-   2 hart 0's mailbox, 3 hart 1's mailbox, 4 the spare external input. Contexts:
-   0 … 3 the M-mode context of each hart. A source is taken when it is pending, enabled for
-   the context and its priority is above the context's threshold; a read of the claim
-   register returns the source (0: none) and marks it in service, a write completes it. */
+   2 hart 0's mailbox, 3 hart 1's mailbox, 4 the spare external input, 5 hart 2's
+   mailbox, 6 hart 3's mailbox. Contexts: 0 … 3 the M-mode context of each hart. A
+   source is taken when it is pending, enabled for the context and its priority is
+   above the context's threshold; a read of the claim register returns the source
+   (0: none) and marks it in service, a write completes it. */
 #define PLIC_PRIO(s)    IO(0x2000u + 4u * (s))       /* 3 bits, 0: masked */
 #define PLIC_PENDING    IO(0x2020)                   /* read: the pending bitmap */
 #define PLIC_ENABLE(c)  IO(0x2040u + 4u * (c))
@@ -77,6 +83,13 @@
 #define PLIC_IPI0       2u
 #define PLIC_IPI1       3u
 #define PLIC_EXT        4u
+#define PLIC_IPI2       5u
+#define PLIC_IPI3       6u
+
+/* the PLIC source a message to hart h raises */
+static inline unsigned golem_plic_ipi(unsigned hart) {
+  return hart < 2u ? 2u + hart : 5u + (hart - 2u);
+}
 
 /* 0x80004000: the CLINT-like timer, at the standard CLINT offsets rebased into the I/O
    window. mtime counts the core's cycles (100 MHz on `golem`; half that on `golemMc`,
@@ -137,7 +150,7 @@ static inline void golem_arm_timer(unsigned hart, uint32_t cycles) {
   golem_set_mtimecmp(hart, golem_mtime() + cycles);
 }
 
-/* post a message to hart h (and raise its PLIC source); a received message is taken
+/* post a message to hart h (and raise golem_plic_ipi(h)); a received message is taken
    with golem_ipi_recv, which also clears the valid bit */
 static inline void golem_ipi_send(unsigned hart, uint32_t msg) { IPI_DATA(hart) = msg; }
 static inline int golem_ipi_pending(unsigned hart) { return (int)(IPI_STATUS(hart) & 1u); }
@@ -148,7 +161,8 @@ static inline void golem_plic_priority(unsigned source, uint32_t prio) { PLIC_PR
 static inline uint32_t golem_plic_claim(unsigned ctx) { return PLIC_CLAIM(ctx); }
 static inline void golem_plic_complete(unsigned ctx, uint32_t source) { PLIC_CLAIM(ctx) = source; }
 
-/* the boot ABI: hart 0 sets `entry` for hart h and releases it from its park loop */
+/* the boot ABI: hart 0 sets `entry` for hart h and releases it from its park loop; the
+   park loop then claims/completes the PLIC source before entering the entry point */
 static inline void golem_release(unsigned hart, uint32_t entry) {
   BOOT_ENTRY(hart) = entry;
   MSIP(hart) = 1u;

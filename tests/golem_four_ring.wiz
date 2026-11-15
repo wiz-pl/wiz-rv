@@ -38,7 +38,7 @@ def R.init : R.S :=
   R.S.mk Intc.init 0 1 1 1 4 4 4 4 0 0 0 0 0 0 0
 
 def R.src : Intc.Src HwTy.El := Intc.Src.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
-def R.srcB : HwTy.El (HwTy.bits 5) := Intc.srcBits R.src
+def R.srcB : HwTy.El (HwTy.bits 7) := Intc.srcBits R.src
 
 def R.ph (s : R.S) (h : Nat) : Nat :=
   if Nat.beq h 0 then s.p0 else if Nat.beq h 1 then s.p1 else if Nat.beq h 2 then s.p2 else s.p3

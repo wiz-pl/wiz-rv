@@ -73,13 +73,15 @@ def Mini.step (cfg : RgbCfg) (n : Nat) {r : HwTy → Type} [Hw r] (s : MSt cfg.f
   -- the interrupt/timer block: the core's 16-bit register offset, and the live sources
   -- (the UART's received byte; the spare input is tied low)
   let ioff : r B16 := Hw.mux fbA (Hw.lit 16 0) off;
-  let isrc : r B5 := Intc.srcBits (Intc.Src.mk s.full (Hw.lit 1 0));
+  let isrc : r B7 := Intc.srcBits (Intc.Src.mk s.full (Hw.lit 1 0));
   let status : r B32 := Hw.cat (Hw.lit 30 0) (Hw.cat s.full (Hw.and (txIdle s.tx) (Hw.not s.txGo)));
   let ioIn : r B32 := Hw.mux uartA (Hw.mux s.full (Hw.cat (Hw.lit 24 0) s.byte) (Hw.lit 32 4294967295))
     (Hw.mux (isK off 4) status
     (Hw.mux (isK off 16) (Hw.slice 0 32 s.cyc)
     (Hw.mux (isK off 20) (Hw.slice 32 32 s.cyc)
-    (Hw.mux (isK off 64) (Hw.cat (Hw.lit 30 0) x.ddr) (Intc.read s.intc isrc ioff)))));
+    (Hw.mux (isK off 64) (Hw.cat (Hw.lit 30 0) x.ddr)
+    (Hw.mux (isK off GMap.mip) (Intc.mip s.intc isrc 0)
+      (Intc.read s.intc isrc ioff))))));
   let cr := coreStep 5 12 .true s.cpu (In.mk (Hw.and (txIdle s.tx) (Hw.not s.txGo)) ioIn x.ready x.rvalid x.rdata);
   let ω o := Out.unpack (Hw.snd cr);
   let ω c := CoreSt.unpack 5 12 (Hw.fst cr);

@@ -1,0 +1,175 @@
+-- test: check
+import Rv.Golem.Intc
+import Text
+-- The four-hart PLIC wake at values, with the real `Intc`: hart 0 configures each
+-- park hart's own context, posts a message to its mailbox and rings its doorbell; the
+-- park hart leaves the doorbell wait and is then woken by the PLIC source for its
+-- context (source 3 for hart 1, 5 for hart 2, 6 for hart 3), claims it, takes the
+-- message and completes it. Harts 2 and 3 therefore wake through the PLIC, not through
+-- their mailbox status; the mailbox data is only read after the claim.
+--
+-- This is the entry sequence of `FProg.start` (src/Rv/Golem/FourProg.wiz), one hart
+-- state machine per hart behind one shared MMIO port. The full ring that follows is
+-- `tests/golem_four_ring.wiz`; the single-context claim/complete/re-arm values are in
+-- `tests/golem_intc.wiz`.
+
+structure P.S where
+  intc : Intc.Ctl HwTy.El
+  ps : List Nat                 -- phase of each hart
+  ss : List Nat                 -- the PLIC source each hart claimed
+  ms : List Nat                 -- the message each hart took
+  turn : Nat
+  cycles : Nat
+
+def P.src : Intc.Src HwTy.El := Intc.Src.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
+def P.srcB : HwTy.El (HwTy.bits 7) := Intc.srcBits P.src
+
+def P.bus (rd wr off d : Nat) : Intc.Bus HwTy.El :=
+  Intc.Bus.mk (BitVec.ofNat 1 rd) (BitVec.ofNat 1 wr) (BitVec.ofNat 16 off) (BitVec.ofNat 32 d)
+
+def P.bit (v k : Nat) : Nat := Nat.mod (Nat.div v (Nat.pow 2 k)) 2
+
+def P.mipOf (s : P.S) (h : Nat) : Nat := (Intc.mip s.intc P.srcB h).toNat
+
+def P.nth : List Nat → Nat → Nat
+  | .nil, _ => 0
+  | .cons x _, .zero => x
+  | .cons _ xs, .succ n => P.nth xs n
+
+def P.set : List Nat → Nat → Nat → List Nat
+  | .nil, _, _ => .nil
+  | .cons _ xs, .zero, v => .cons v xs
+  | .cons x xs, .succ n, v => .cons x (P.set xs n v)
+
+def P.showL (xs : List Nat) : String :=
+  "[" ++ Hdl.concat (List.map (fun (k : Nat) => Nat.repr k ++ " ") xs) ++ "]"
+
+def P.init : P.S :=
+  P.S.mk Intc.init (.cons 0 (.cons 0 (.cons 0 (.cons 0 .nil))))
+    (.cons 0 (.cons 0 (.cons 0 (.cons 0 .nil))))
+    (.cons 0 (.cons 0 (.cons 0 (.cons 0 .nil)))) 0 0
+
+def P.ph (s : P.S) (h : Nat) : Nat := P.nth s.ps h
+def P.sn (s : P.S) (h : Nat) : Nat := P.nth s.ss h
+def P.mn (s : P.S) (h : Nat) : Nat := P.nth s.ms h
+
+def P.next (h : Nat) : Nat := Nat.mod (Nat.add h 1) 4
+
+-- one cycle for hart h: keep its lists, advance the round-robin turn and the clock
+def P.with (s : P.S) (h : Nat) (i : Intc.Ctl HwTy.El) : P.S :=
+  P.S.mk i s.ps s.ss s.ms (P.next h) (Nat.succ s.cycles)
+
+def P.setP (s : P.S) (h p : Nat) : P.S :=
+  P.S.mk s.intc (P.set s.ps h p) s.ss s.ms s.turn s.cycles
+def P.setS (s : P.S) (h v : Nat) : P.S :=
+  P.S.mk s.intc s.ps (P.set s.ss h v) s.ms s.turn s.cycles
+def P.setM (s : P.S) (h v : Nat) : P.S :=
+  P.S.mk s.intc s.ps s.ss (P.set s.ms h v) s.turn s.cycles
+
+def P.idle (s : P.S) (h : Nat) : P.S := P.with s h s.intc
+
+-- hart 0's setup, one MMIO write per phase: source priorities, each park hart's
+-- context enable, the go messages (which raise sources 3/5/6), then the doorbells
+def P.bootOff : Nat → Nat
+  | 0 => Intc.plicPrio + 12
+  | 1 => Intc.plicPrio + 20
+  | 2 => Intc.plicPrio + 24
+  | 3 => Intc.plicEnable + 4
+  | 4 => Intc.plicEnable + 8
+  | 5 => Intc.plicEnable + 12
+  | 6 => Intc.mboxData + 8
+  | 7 => Intc.mboxData + 16
+  | 8 => Intc.mboxData + 24
+  | 9 => Intc.clintMsip + 4
+  | 10 => Intc.clintMsip + 8
+  | _ => Intc.clintMsip + 12
+
+def P.bootData : Nat → Nat
+  | 3 => 8
+  | 4 => 32
+  | 5 => 64
+  | 6 => 101
+  | 7 => 202
+  | 8 => 303
+  | _ => 1
+
+def P.busy (s : P.S) (h : Nat) : Bool :=
+  if Nat.beq h 0 then Nat.lt (P.ph s h) 13 else Nat.lt (P.ph s h) 5
+
+-- the next hart with work, in round-robin order (4: all done)
+def P.pick (s : P.S) : Nat :=
+  let a := Nat.mod s.turn 4;
+  let b := Nat.mod (Nat.add s.turn 1) 4;
+  let c := Nat.mod (Nat.add s.turn 2) 4;
+  let d := Nat.mod (Nat.add s.turn 3) 4;
+  if P.busy s a then a else if P.busy s b then b
+  else if P.busy s c then c else if P.busy s d then d else 4
+
+def P.boot (s : P.S) (h p : Nat) : P.S :=
+  P.setP (P.with s h (Intc.Ctl.unpack (Intc.step s.intc (BitVec.ofNat 1 0) P.srcB
+    (P.bus 0 1 (P.bootOff p) (P.bootData p))))) h (Nat.succ p)
+
+-- park on the doorbell; clear it and move on when hart 0 rings it
+def P.park (s : P.S) (h : Nat) : P.S :=
+  if Nat.beq (Intc.read s.intc P.srcB (BitVec.ofNat 16 (Intc.clintMsip + 4 * h))).toNat 0
+  then P.idle s h
+  else P.setP (P.with s h (Intc.Ctl.unpack (Intc.step s.intc (BitVec.ofNat 1 0) P.srcB
+    (P.bus 0 1 (Intc.clintMsip + 4 * h) 0)))) h 1
+
+-- the external interrupt (mip.MEIP) for this hart's own context
+def P.wait (s : P.S) (h : Nat) : P.S :=
+  if Nat.beq (P.bit (P.mipOf s h) Intc.meipBit) 0 then P.idle s h
+  else P.setP (P.idle s h) h 2
+
+-- claim: the source must be this context's own mailbox source
+def P.claim (s : P.S) (h : Nat) : P.S :=
+  P.setS (P.setP (P.with s h (Intc.Ctl.unpack (Intc.step s.intc (BitVec.ofNat 1 0) P.srcB
+    (P.bus 1 0 (Intc.plicClaim + 4 * h) 0)))) h 3) h
+    (Intc.read s.intc P.srcB (BitVec.ofNat 16 (Intc.plicClaim + 4 * h))).toNat
+
+-- take the message (clears its valid bit), then complete the source
+def P.take (s : P.S) (h : Nat) : P.S :=
+  P.setM (P.setP (P.with s h (Intc.Ctl.unpack (Intc.step s.intc (BitVec.ofNat 1 0) P.srcB
+    (P.bus 1 0 (Intc.mboxData + 8 * h) 0)))) h 4) h
+    (Intc.read s.intc P.srcB (BitVec.ofNat 16 (Intc.mboxData + 8 * h))).toNat
+
+def P.complete (s : P.S) (h : Nat) : P.S :=
+  P.setP (P.with s h (Intc.Ctl.unpack (Intc.step s.intc (BitVec.ofNat 1 0) P.srcB
+    (P.bus 0 1 (Intc.plicClaim + 4 * h) (P.sn s h))))) h 5
+
+def P.step (s : P.S) : P.S :=
+  let h := P.pick s;
+  if Nat.beq h 4 then s
+  else
+    let p := P.ph s h;
+    if Nat.beq h 0 then
+      if Nat.lt p 12 then P.boot s h p else P.setP (P.idle s h) h 13
+    else if Nat.beq p 0 then P.park s h
+    else if Nat.beq p 1 then P.wait s h
+    else if Nat.beq p 2 then P.claim s h
+    else if Nat.beq p 3 then P.take s h
+    else if Nat.beq p 4 then P.complete s h
+    else s
+
+def P.run : Nat → P.S → P.S
+  | .zero, s => s
+  | .succ k, s => P.run k (P.step s)
+
+-- before hart 0 posts anything, harts 2 and 3 have no external interrupt
+def P.before : List Nat :=
+  .cons (P.bit (P.mipOf P.init 2) Intc.meipBit)
+    (.cons (P.bit (P.mipOf P.init 3) Intc.meipBit) .nil)
+
+def P.report (cycles : Nat) : String :=
+  let s := P.run cycles P.init;
+  let ps : List Nat := s.ps;
+  let ss : List Nat := s.ss;
+  let ms : List Nat := s.ms;
+  let ok := Bool.and (Hdl.natsEq ps (.cons 13 (.cons 5 (.cons 5 (.cons 5 .nil)))))
+    (Bool.and (Hdl.natsEq ss (.cons 0 (.cons 3 (.cons 5 (.cons 6 .nil)))))
+      (Hdl.natsEq ms (.cons 0 (.cons 101 (.cons 202 (.cons 303 .nil))))));
+  "golem four plic: phases " ++ P.showL ps ++ ", sources " ++ P.showL ss
+    ++ ", messages " ++ P.showL ms ++ ", before " ++ P.showL P.before
+    ++ (if ok then " — PASS" else " — FAIL")
+
+#eval P.report 400

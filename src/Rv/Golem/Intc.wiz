@@ -13,11 +13,12 @@ import Rv.Core
 --   0x1000  the mailbox: a 32-bit message and a valid bit for each hart (8 bytes a
 --           hart: 0x1000 … 0x101f), and the boot ABI's entry address for each hart
 --           (0x1020 + 4 * hart)
---   0x2000  the PLIC-style external controller: four sources (1 UART, 2 hart 0's
---           mailbox, 3 hart 1's mailbox, 4 a spare external input), four contexts (0
---           … 3: the M-mode context of each hart). Harts 2/3's mailboxes are MSIP-only
---           (their mailbox status is at 0x1014/0x101c); a source is claimed by a
---           context, so any hart can take the UART/spare through its own context.
+--   0x2000  the PLIC-style external controller: six sources (1 UART, 2 hart 0's
+--           mailbox, 3 hart 1's mailbox, 4 a spare external input, 5 hart 2's mailbox,
+--           6 hart 3's mailbox), four contexts (0 … 3: the M-mode context of each
+--           hart). Every hart has a mailbox source in its own context; a source is
+--           claimed by a context, so any hart can also take the UART/spare through its
+--           own context.
 --   0x4000  the CLINT-like timer: `msip` at 0x4000 + 4 * hart, `mtimecmp` at
 --           0x8000 + 8 * hart, `mtime` at 0xfff8: the standard CLINT layout, rebased
 --           from 0x02000000 so that it stays inside the I/O window
@@ -32,7 +33,7 @@ import Rv.Core
 def Intc.mboxData : Nat := 4096       -- + 8 * hart: the message
 def Intc.mboxStatus : Nat := 4100     -- + 8 * hart: bit 0 a message is waiting
 def Intc.mboxBoot : Nat := 4128       -- + 4 * hart: the entry address hart 0 sets
-def Intc.plicPrio : Nat := 8192       -- + 4 * source: priority (3 bits)
+def Intc.plicPrio : Nat := 8192       -- + 4 * source: priority (3 bits), sources 1 … 6
 def Intc.plicPending : Nat := 8224    -- read: the pending bits
 def Intc.plicEnable : Nat := 8256     -- + 4 * context: the enabled sources
 def Intc.plicThreshold : Nat := 8288  -- + 4 * context: the priority threshold
@@ -49,6 +50,16 @@ def Intc.meipBit : Nat := 11
 def Intc.msiCause : Nat := 3
 def Intc.mtiCause : Nat := 7
 def Intc.meiCause : Nat := 11
+
+-- the PLIC source numbers (bit 0 of the bitmaps is unused)
+def Intc.uartSrc : Nat := 1
+def Intc.extSrc : Nat := 4
+
+-- the source a message to `hart` raises. Harts 0/1 keep sources 2/3; harts 2/3's
+-- mailboxes are sources 5/6, so every hart has a mailbox source in its own context.
+def Intc.mboxSrc (hart : Nat) : Nat :=
+  if Nat.beq hart 0 then 2 else if Nat.beq hart 1 then 3
+  else if Nat.beq hart 2 then 5 else 6
 
 -- a block's registers start at `base` and take 256 bytes
 def Intc.inBlock {r : HwTy → Type} [Hw r] (base : Nat) (off : r (HwTy.bits 16)) : r W1 :=
@@ -134,27 +145,27 @@ def Intc.mboxOf {r : HwTy → Type} [Hw r] (s : Intc.Clint r) (hart : Nat) : r B
 -- lowest numbered source on a tie; a claim with no candidate reads 0.
 
 structure Intc.Plic (r : HwTy → Type) where
-  pr : r (HwTy.mem 3 3)         -- the priority of source 1 … 4 (index 0 unused)
-  pend : r B5
-  en0 : r B5                    -- context 0 (hart 0), then contexts 1 … 3
-  en1 : r B5
-  en2 : r B5
-  en3 : r B5
+  pr : r (HwTy.mem 3 3)         -- the priority of source 1 … 6 (index 0 unused)
+  pend : r B7
+  en0 : r B7                    -- context 0 (hart 0), then contexts 1 … 3
+  en1 : r B7
+  en2 : r B7
+  en3 : r B7
   thr0 : r B3
   thr1 : r B3
   thr2 : r B3
   thr3 : r B3
-  serv0 : r B5                  -- in service, per context
-  serv1 : r B5
-  serv2 : r B5
-  serv3 : r B5
+  serv0 : r B7                  -- in service, per context
+  serv1 : r B7
+  serv2 : r B7
+  serv3 : r B7
   deriving Bundle
 
 def Intc.Plic.init : Intc.Plic HwTy.El :=
-  Intc.Plic.mk (fun (a : BitVec 3) => BitVec.ofNat 3 0) (BitVec.ofNat 5 0)
-    (BitVec.ofNat 5 0) (BitVec.ofNat 5 0) (BitVec.ofNat 5 0) (BitVec.ofNat 5 0)
+  Intc.Plic.mk (fun (a : BitVec 3) => BitVec.ofNat 3 0) (BitVec.ofNat 7 0)
+    (BitVec.ofNat 7 0) (BitVec.ofNat 7 0) (BitVec.ofNat 7 0) (BitVec.ofNat 7 0)
     (BitVec.ofNat 3 0) (BitVec.ofNat 3 0) (BitVec.ofNat 3 0) (BitVec.ofNat 3 0)
-    (BitVec.ofNat 5 0) (BitVec.ofNat 5 0) (BitVec.ofNat 5 0) (BitVec.ofNat 5 0)
+    (BitVec.ofNat 7 0) (BitVec.ofNat 7 0) (BitVec.ofNat 7 0) (BitVec.ofNat 7 0)
 
 -- the live external source levels: bit 1 the UART, bit 4 the spare input
 structure Intc.Src (r : HwTy → Type) where
@@ -162,27 +173,31 @@ structure Intc.Src (r : HwTy → Type) where
   ext : r W1
   deriving Bundle
 
-def Intc.srcBits {r : HwTy → Type} [Hw r] (s : Intc.Src r) : r B5 :=
-  Hw.cat s.ext (Hw.cat (Hw.lit 2 0) (Hw.cat s.uart (Hw.lit 1 0)))
+def Intc.srcBits {r : HwTy → Type} [Hw r] (s : Intc.Src r) : r B7 :=
+  Hw.cat (Hw.lit 2 0) (Hw.cat s.ext (Hw.cat (Hw.lit 2 0) (Hw.cat s.uart (Hw.lit 1 0))))
 
--- one bit in a 5-bit bitmap for a source number
-def Intc.onehot {r : HwTy → Type} [Hw r] (b : r B4) : r B5 :=
-  Hw.mux (isK b 1) (Hw.lit 5 2) (Hw.mux (isK b 2) (Hw.lit 5 4)
-    (Hw.mux (isK b 3) (Hw.lit 5 8) (Hw.mux (isK b 4) (Hw.lit 5 16) (Hw.lit 5 0))))
+-- one bit in a 7-bit bitmap for a source number 1 … 6
+def Intc.onehot {r : HwTy → Type} [Hw r] (b : r B4) : r B7 :=
+  Hw.mux (isK b 1) (Hw.lit 7 2) (Hw.mux (isK b 2) (Hw.lit 7 4)
+    (Hw.mux (isK b 3) (Hw.lit 7 8)
+      (Hw.mux (isK b 4) (Hw.lit 7 16)
+        (Hw.mux (isK b 5) (Hw.lit 7 32)
+          (Hw.mux (isK b 6) (Hw.lit 7 64) (Hw.lit 7 0))))))
 
-def Intc.enOf {r : HwTy → Type} [Hw r] (s : Intc.Plic r) (ctx : Nat) : r B5 :=
+def Intc.enOf {r : HwTy → Type} [Hw r] (s : Intc.Plic r) (ctx : Nat) : r B7 :=
   if Nat.beq ctx 0 then s.en0 else if Nat.beq ctx 1 then s.en1
   else if Nat.beq ctx 2 then s.en2 else s.en3
 def Intc.thrOf {r : HwTy → Type} [Hw r] (s : Intc.Plic r) (ctx : Nat) : r B3 :=
   if Nat.beq ctx 0 then s.thr0 else if Nat.beq ctx 1 then s.thr1
   else if Nat.beq ctx 2 then s.thr2 else s.thr3
-def Intc.servOf {r : HwTy → Type} [Hw r] (s : Intc.Plic r) (ctx : Nat) : r B5 :=
+def Intc.servOf {r : HwTy → Type} [Hw r] (s : Intc.Plic r) (ctx : Nat) : r B7 :=
   if Nat.beq ctx 0 then s.serv0 else if Nat.beq ctx 1 then s.serv1
   else if Nat.beq ctx 2 then s.serv2 else s.serv3
 
 -- the highest-priority source this context may take (0: none): pending, enabled, above
--- the threshold, and not already in service for this context
-def Intc.best {r : HwTy → Type} [Hw r] (s : Intc.Plic r) (src : r B5) (ctx : Nat) : r B4 :=
+-- the threshold, and not already in service for this context; the lowest-numbered
+-- source wins a tie
+def Intc.best {r : HwTy → Type} [Hw r] (s : Intc.Plic r) (src : r B7) (ctx : Nat) : r B4 :=
   let pend := Hw.or s.pend src;
   let en := Intc.enOf s ctx;
   let thr := Intc.thrOf s ctx;
@@ -191,14 +206,30 @@ def Intc.best {r : HwTy → Type} [Hw r] (s : Intc.Plic r) (src : r B5) (ctx : N
   let ok := fun (i : Nat) => Hw.and (bitOf i pend)
     (Hw.and (bitOf i en) (Hw.and (Hw.not (bitOf i serv)) (Hw.ult thr (pr i))));
   let ge := fun (a b : r B3) => Hw.not (Hw.ult a b);
-  Hw.mux (Hw.and (ok 1) (Hw.and (ge (pr 1) (pr 2)) (Hw.and (ge (pr 1) (pr 3)) (ge (pr 1) (pr 4)))))
+  Hw.mux (Hw.and (ok 1)
+      (Hw.and (ge (pr 1) (pr 2))
+        (Hw.and (ge (pr 1) (pr 3))
+          (Hw.and (ge (pr 1) (pr 4))
+            (Hw.and (ge (pr 1) (pr 5)) (ge (pr 1) (pr 6)))))))
     (Hw.lit 4 1)
-    (Hw.mux (Hw.and (ok 2) (Hw.and (ge (pr 2) (pr 3)) (ge (pr 2) (pr 4)))) (Hw.lit 4 2)
-      (Hw.mux (Hw.and (ok 3) (ge (pr 3) (pr 4))) (Hw.lit 4 3)
-        (Hw.mux (ok 4) (Hw.lit 4 4) (Hw.lit 4 0))))
+    (Hw.mux (Hw.and (ok 2)
+        (Hw.and (ge (pr 2) (pr 3))
+          (Hw.and (ge (pr 2) (pr 4))
+            (Hw.and (ge (pr 2) (pr 5)) (ge (pr 2) (pr 6))))))
+      (Hw.lit 4 2)
+      (Hw.mux (Hw.and (ok 3)
+          (Hw.and (ge (pr 3) (pr 4))
+            (Hw.and (ge (pr 3) (pr 5)) (ge (pr 3) (pr 6)))))
+        (Hw.lit 4 3)
+        (Hw.mux (Hw.and (ok 4)
+            (Hw.and (ge (pr 4) (pr 5)) (ge (pr 4) (pr 6))))
+          (Hw.lit 4 4)
+          (Hw.mux (Hw.and (ok 5) (ge (pr 5) (pr 6)))
+            (Hw.lit 4 5)
+            (Hw.mux (ok 6) (Hw.lit 4 6) (Hw.lit 4 0))))))
 
 -- a context's external interrupt: it has a source to take
-def Intc.meip {r : HwTy → Type} [Hw r] (s : Intc.Plic r) (src : r B5) (ctx : Nat) : r W1 :=
+def Intc.meip {r : HwTy → Type} [Hw r] (s : Intc.Plic r) (src : r B7) (ctx : Nat) : r W1 :=
   Hw.not (isK (Intc.best s src ctx) 0)
 
 ------------------------------------------------------------------------------------
@@ -236,7 +267,7 @@ def Intc.readMbox {r : HwTy → Type} [Hw r] (s : Intc.Clint r) (off : r (HwTy.b
                       (mux (Intc.mboxBoot + 8) s.boot2
                         (mux (Intc.mboxBoot + 12) s.boot3 Intc.zero)))))))))))
 
-def Intc.readPlic {r : HwTy → Type} [Hw r] (s : Intc.Plic r) (src : r B5) (off : r (HwTy.bits 16)) : r B32 :=
+def Intc.readPlic {r : HwTy → Type} [Hw r] (s : Intc.Plic r) (src : r B7) (off : r (HwTy.bits 16)) : r B32 :=
   let at := fun (k : Nat) => isK off k;
   let mux := fun (k : Nat) (v : r B32) (next : r B32) => Hw.mux (at k) v next;
   -- the priority of any source address (the register file's index is bits 2 … 4)
@@ -275,14 +306,14 @@ def Intc.readClint {r : HwTy → Type} [Hw r] (s : Intc.Clint r) (off : r (HwTy.
                           (mux Intc.clintMtime (Hw.slice 0 32 s.mtime)
                             (mux (Intc.clintMtime + 4) (Hw.slice 32 32 s.mtime) Intc.zero)))))))))))))
 
-def Intc.read {r : HwTy → Type} [Hw r] (s : Intc.Ctl r) (src : r B5) (off : r (HwTy.bits 16)) : r B32 :=
+def Intc.read {r : HwTy → Type} [Hw r] (s : Intc.Ctl r) (src : r B7) (off : r (HwTy.bits 16)) : r B32 :=
   Hw.mux (Intc.inMbox off) (Intc.readMbox s.clint off)
     (Hw.mux (Intc.inPlic off) (Intc.readPlic s.plic src off)
       (Hw.mux (Intc.inClint off) (Intc.readClint s.clint off) Intc.zero))
 
 -- one clock: `mtime` counts when `tick`, the core's writes and reads are taken, and the
 -- live sources are folded into the pending bits
-def Intc.step {r : HwTy → Type} [Hw r] (s : Intc.Ctl r) (tick : r W1) (src : r B5) (b : Intc.Bus r) :
+def Intc.step {r : HwTy → Type} [Hw r] (s : Intc.Ctl r) (tick : r W1) (src : r B7) (b : Intc.Bus r) :
     r Intc.Ctl.code :=
   let ω cl := s.clint;
   let ω pl := s.plic;
@@ -318,23 +349,29 @@ def Intc.step {r : HwTy → Type} [Hw r] (s : Intc.Ctl r) (tick : r W1) (src : r
   let cmp1 := cmp 1 cl.cmp1;
   let cmp2 := cmp 2 cl.cmp2;
   let cmp3 := cmp 3 cl.cmp3;
-  -- the PLIC: a message raises its source (sources 2 and 3 are harts 0/1's mailbox),
-  -- a claim takes one, a read of the message and a claim both clear its pending bit
+  -- the PLIC: a message to hart h raises source `mboxSrc h` (2/3 for harts 0/1, 5/6
+  -- for harts 2/3), its valid bit is a live level, a claim takes one, a read of the
+  -- message and a claim both clear its pending bit, and a completion lets a message
+  -- that is still waiting re-arm the source
   let pr := Hw.memWrite pl.pr (Hw.and b.wr (Hw.and (Hw.not (Hw.ult b.off (Hw.lit 16 Intc.plicPrio)))
       (Hw.ult b.off (Hw.lit 16 (Intc.plicPrio + 32)))))
     (Hw.slice 2 3 b.off) (Hw.slice 0 3 b.wdata);
   let best := fun (k : Nat) => Intc.best pl src k;
   let claim := fun (k : Nat) => rd (Intc.plicClaim + 4 * k);
-  let clr := Hw.or (Hw.mux (claim 0) (Intc.onehot (best 0)) (Hw.lit 5 0))
-    (Hw.or (Hw.mux (claim 1) (Intc.onehot (best 1)) (Hw.lit 5 0))
-    (Hw.or (Hw.mux (claim 2) (Intc.onehot (best 2)) (Hw.lit 5 0))
-    (Hw.or (Hw.mux (claim 3) (Intc.onehot (best 3)) (Hw.lit 5 0))
-      (Hw.or (Hw.mux (rd Intc.mboxData) (Hw.lit 5 4) (Hw.lit 5 0))
-        (Hw.mux (rd (Intc.mboxData + 8)) (Hw.lit 5 8) (Hw.lit 5 0))))));
+  let mboxBit := fun (k : Nat) => Intc.onehot (Hw.lit 4 (Intc.mboxSrc k));
+  let mboxNew := fun (k : Nat) => Hw.mux (wr (Intc.mboxData + 8 * k)) (mboxBit k) (Hw.lit 7 0);
+  let mboxRead := fun (k : Nat) => Hw.mux (rd (Intc.mboxData + 8 * k)) (mboxBit k) (Hw.lit 7 0);
+  let mboxLive := fun (k : Nat) => Hw.mux (Intc.mboxValid cl k) (mboxBit k) (Hw.lit 7 0);
+  let clr := Hw.or (Hw.mux (claim 0) (Intc.onehot (best 0)) (Hw.lit 7 0))
+    (Hw.or (Hw.mux (claim 1) (Intc.onehot (best 1)) (Hw.lit 7 0))
+    (Hw.or (Hw.mux (claim 2) (Intc.onehot (best 2)) (Hw.lit 7 0))
+    (Hw.or (Hw.mux (claim 3) (Intc.onehot (best 3)) (Hw.lit 7 0))
+      (Hw.or (mboxRead 0) (Hw.or (mboxRead 1) (Hw.or (mboxRead 2) (mboxRead 3)))))));
   let pend := Hw.and (Hw.or (Hw.or pl.pend src)
-      (Hw.or (Hw.mux (wr Intc.mboxData) (Hw.lit 5 4) (Hw.lit 5 0))
-        (Hw.mux (wr (Intc.mboxData + 8)) (Hw.lit 5 8) (Hw.lit 5 0)))) (Hw.not clr);
-  let serv := fun (k : Nat) (old : r B5) =>
+      (Hw.or (Hw.or (Hw.or (mboxNew 0) (mboxNew 1)) (Hw.or (mboxNew 2) (mboxNew 3)))
+        (Hw.or (Hw.or (mboxLive 0) (mboxLive 1)) (Hw.or (mboxLive 2) (mboxLive 3)))))
+    (Hw.not clr);
+  let serv := fun (k : Nat) (old : r B7) =>
     Hw.mux (claim k) (Hw.or old (Intc.onehot (best k)))
       (Hw.mux (wr (Intc.plicClaim + 4 * k))
         (Hw.and old (Hw.not (Intc.onehot (Hw.slice 0 4 b.wdata)))) old);
@@ -342,7 +379,7 @@ def Intc.step {r : HwTy → Type} [Hw r] (s : Intc.Ctl r) (tick : r W1) (src : r
   let serv1 := serv 1 pl.serv1;
   let serv2 := serv 2 pl.serv2;
   let serv3 := serv 3 pl.serv3;
-  let en := fun (k : Nat) (old : r B5) => Hw.mux (wr (Intc.plicEnable + 4 * k)) (Hw.slice 0 5 b.wdata) old;
+  let en := fun (k : Nat) (old : r B7) => Hw.mux (wr (Intc.plicEnable + 4 * k)) (Hw.slice 0 7 b.wdata) old;
   let thr := fun (k : Nat) (old : r B3) => Hw.mux (wr (Intc.plicThreshold + 4 * k)) (Hw.slice 0 3 b.wdata) old;
   Intc.Ctl.pack (Intc.Ctl.mk
     (Intc.Clint.mk mtime cmp0 cmp1 cmp2 cmp3 (Hw.cat (msip 3) (Hw.cat (msip 2) (Hw.cat (msip 1) (msip 0))))
@@ -358,7 +395,7 @@ def Intc.step {r : HwTy → Type} [Hw r] (s : Intc.Ctl r) (tick : r W1) (src : r
 
 -- a hart's `mip`: MSIP from the mailbox doorbell, MTIP from the timer, MEIP from the
 -- PLIC (the other bits read 0)
-def Intc.mip {r : HwTy → Type} [Hw r] (s : Intc.Ctl r) (src : r B5) (hart : Nat) : r B32 :=
+def Intc.mip {r : HwTy → Type} [Hw r] (s : Intc.Ctl r) (src : r B7) (hart : Nat) : r B32 :=
   let msip := Intc.released s.clint hart;
   let mtip := Intc.mtip s.clint hart;
   let meip := Intc.meip s.plic src hart;
