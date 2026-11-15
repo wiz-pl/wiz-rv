@@ -29,6 +29,21 @@ def GBoard.Variant.circuit (v : GBoard.Variant) (boot : GBoard.Boot) :
   | .four => Golem.four Timing.arty G4.allL1 (Asm.assemble FProg.four)
   | .fourNocache => Golem.four Timing.arty G4.noL1 (Asm.assemble FProg.four)
 
+def GBoard.Variant.xdc (v : GBoard.Variant) : String :=
+  match v with
+  | .four => GBoard.xdc20
+  | .fourNocache => GBoard.xdc20
+  | .full => GBoard.xdc
+  | .mc => GBoard.xdc
+
+-- the timing report's expected line: 50 MHz for the enabled-every-other-cycle harts
+def GBoard.Variant.target (v : GBoard.Variant) : String :=
+  match v with
+  | .four => "PASS at 50.00 MHz"
+  | .fourNocache => "PASS at 50.00 MHz"
+  | .full => "PASS at 100.00 MHz"
+  | .mc => "PASS at 100.00 MHz"
+
 def GBoard.Variant.netlist (v : GBoard.Variant) (boot : GBoard.Boot) : Netlist :=
   Circuit.netlist (GBoard.Variant.name v) (GBoard.Variant.circuit v boot)
 

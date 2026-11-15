@@ -128,7 +128,7 @@ def genOne (boot : GBoard.Boot) (v : GBoard.Variant) : EIO Unit := do
     | .nil => say "  ok: every board port has its pin and width"
     | es => EIO.fail ("constraints: " <+> Hdl.sepBy "; " es));
   FS.writeFile (build (name <+> ".v")) (Verilog.emitTop n GBoard.clocking);
-  FS.writeFile (build (name <+> ".xdc")) GBoard.xdc;
+  FS.writeFile (build (name <+> ".xdc")) (GBoard.Variant.xdc v);
   say ("  wrote " <+> build (name <+> ".v") <+> " and " <+> build (name <+> ".xdc"))
 
 def gen (vars : List GBoard.Variant) (boot : GBoard.Boot) : EIO Unit := do
@@ -192,11 +192,19 @@ def sysTiming (log : String) : Option String :=
   | .nil => .none
   | .cons l _ => .some l
 
-def timingOk (log : String) : Bool := match sysTiming log with
-  | .some l => String.contains l "PASS at 100.00 MHz"
+def timingOk (target log : String) : Bool := match sysTiming log with
+  | .some l => String.contains l target
   | .none => .false
 
-def timingReport (name : String) : EIO Unit := do
+def timingTargetText (v : GBoard.Variant) : String :=
+  match v with
+  | .four => "50 MHz (20 ns; harts enabled every other cycle)"
+  | .fourNocache => "50 MHz (20 ns; harts enabled every other cycle)"
+  | .full => "100 MHz (10 ns)"
+  | .mc => "100 MHz (10 ns)"
+
+def timingReport (v : GBoard.Variant) : EIO Unit := do
+  let name := GBoard.Variant.name v;
   p ← EIO.lift (FS.isFile (dev (name <+> ".nextpnr.log")));
   match p with
   | .false => EIO.fail ("no " <+> dev (name <+> ".nextpnr.log") <+> ": run `golem bit` first")
@@ -205,17 +213,19 @@ def timingReport (name : String) : EIO Unit := do
     let tl := keep timingLine (lines lg);
     say (name <+> " on the Arty A7-35T: timing (nextpnr)");
     sayAll tl;
-    let ok := timingOk lg;
+    let ok := timingOk (GBoard.Variant.target v) lg;
     FS.writeFile (dev (name <+> ".timing"))
       (Hdl.concat (Hdl.map (fun (l : String) => "  " <+> String.trim l <+> "\n") tl)
-       <+> "target 100 MHz: " <+> (if ok then "PASS" else "FAIL") <+> "\n");
-    say ("  wrote " <+> dev (name <+> ".timing") <+> ": target 100 MHz "
-      <+> (if ok then "PASS" else "FAIL"));
+       <+> "target " <+> timingTargetText v <+> ": " <+> (if ok then "PASS" else "FAIL") <+> "\n");
+    say ("  wrote " <+> dev (name <+> ".timing") <+> ": target " <+> timingTargetText v
+      <+> " " <+> (if ok then "PASS" else "FAIL"));
     match ok with
     | .true => EIO.pure ()
-    | .false => EIO.fail ("timing: the 100 MHz clock did not pass (" <+> dev (name <+> ".nextpnr.log") <+> ")")
+    | .false => EIO.fail ("timing: the " <+> timingTargetText v <+> " target did not pass ("
+        <+> dev (name <+> ".nextpnr.log") <+> ")")
 
-def pnrOne (d : Dirs) (name : String) : EIO Unit := do
+def pnrOne (d : Dirs) (v : GBoard.Variant) : EIO Unit := do
+  let name := GBoard.Variant.name v;
   ensureDir (build device);
   nx ← envOf "GOLEM_NEXTPNR" "nextpnr-xilinx";
   f2 ← envOf "GOLEM_FASM2FRAMES" "fasm2frames";
@@ -230,12 +240,12 @@ def pnrOne (d : Dirs) (name : String) : EIO Unit := do
   tool xb (.cons "--part_file" (.cons (d.db <+> "/artix7/" <+> Arty.Device.xrayPart .a35t <+> "/part.yaml")
     (.cons "--part_name" (.cons (Arty.Device.xrayPart .a35t) (.cons "--frm_file" (.cons (dev (name <+> ".frames"))
     (.cons "--output_file" (.cons (dev (name <+> ".bit")) .nil))))))));
-  timingReport name
+  timingReport v
 
 def bitOne (d : Dirs) (boot : GBoard.Boot) (v : GBoard.Variant) : EIO Unit := do
   let name := GBoard.Variant.name v;
   synth name;
-  pnrOne d name;
+  pnrOne d v;
   FS.writeFile (dev (name <+> ".report"))
     ("golem board report\n"
      <+> "variant: " <+> name <+> "\n"
@@ -289,7 +299,7 @@ def run (o : Opt) : EIO Unit := match o.words with
   | .cons "synth" _ => EIO.bind (gen (variants o) o.boot) (fun u =>
       EIO.forEach (fun (v : GBoard.Variant) => synth (GBoard.Variant.name v)) (variants o))
   | .cons "bit" _ => EIO.bind (gen (variants o) o.boot) (fun u => bit (variants o) o.boot)
-  | .cons "timing" _ => EIO.forEach (fun (v : GBoard.Variant) => timingReport (GBoard.Variant.name v)) (variants o)
+  | .cons "timing" _ => EIO.forEach (fun (v : GBoard.Variant) => timingReport v) (variants o)
   | .cons "dry" _ => EIO.bind boardCheck (fun u => EIO.bind (gen (variants o) o.boot) (fun u => do
       say "dry run: no synthesis or place-and-route (the Verilog and XDC are written)";
       say ("hardware step: openFPGALoader -b arty_a7_35t " <+> dev "golem.bit")))

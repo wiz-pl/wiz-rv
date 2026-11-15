@@ -193,10 +193,10 @@ and MMIO `0x8000_0040` reports the same.
 grail build
 scripts/golem-board.sh board      # the pin/clock/reset check (also `golem board`)
 scripts/golem-board.sh gen        # build/golem.v and build/golem.xdc
-scripts/golem-board.sh gen --variant four  # build/golem_four.v (four harts)
+scripts/golem-board.sh gen --variant four  # build/golem_four.v (four harts, 20 ns XDC)
 scripts/golem-board.sh synth      # yosys only (dry-run path if it is missing)
 scripts/golem-board.sh bit        # nextpnr-xilinx + fasm2frames + xc7frames2bit
-scripts/golem-board.sh timing     # the 100 MHz report; `bit` fails below 100 MHz
+scripts/golem-board.sh timing     # 100 MHz for golem/golemMc, 50 MHz for the four-hart builds
 ```
 
 `bit` writes `build/a35t/golem.bit` (and `golem.timing`, `golem.report`). The hardware

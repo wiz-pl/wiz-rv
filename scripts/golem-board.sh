@@ -17,7 +17,9 @@
 # golem|mc|four|four_nol1|both (default golem; mc is golemMc at 50 MHz effective;
 # four is four multi-cycle harts with per-hart L1s, four_nol1 the same without them).
 # `four` is the A7-35T multicore target: 4 harts, shared UART/OLED/timer/mailbox and
-# DDR; see DESIGN.md, "Four harts".
+# DDR. Its harts are enabled every other cycle, so its XDC uses a 20 ns (50 MHz) target
+# and `timing` checks 50 MHz for it; the bus/DDR stay at 100 MHz. See DESIGN.md,
+# "Four harts" and "Timing: the harts are a 50 MHz (20 ns) target".
 #
 # Build the driver first: `grail build` (or `heavy grail build`).
 set -eu

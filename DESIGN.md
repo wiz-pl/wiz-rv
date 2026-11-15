@@ -257,8 +257,8 @@ nextpnr-xilinx 1.0.0 on the Arty chip database:
 | variant | LUT | FF | RAMB36 | RAMB18 | DSP48 | nextpnr |
 |---|---:|---:|---:|---:|---:|---|
 | `golem` (1 pipelined hart) | 5,063 | 3,815 | 23 | 4 | 4 | 107.30 MHz |
-| `golem_four` (4 multi-cycle harts, L1 on) | 11,980 | 4,706 | 38 | 5 | 40 | 46.63 MHz |
-| `golem_four_nol1` (L1 off) | 10,519 | 4,286 | 22 | 1 | 40 | 47.63 MHz |
+| `golem_four` (4 multi-cycle harts, L1 on) | 11,980 | 4,706 | 38 | 5 | 40 | 46.63 MHz (10 ns) / **50.74** (20 ns) |
+| `golem_four_nol1` (L1 off) | 10,519 | 4,286 | 22 | 1 | 40 | 47.63 MHz (10 ns) / **52.93** (20 ns) |
 
 `LUT` is the sum of yosys `LUT1 … LUT6` cells (the area study's convention; nextpnr's
 `SLICE_LUTX` is 15,398 for `golem_four` and 13,851 for `golem_four_nol1`, because it
@@ -268,16 +268,52 @@ counts LUT6 pairs). Against the real 35T capacity: `golem_four` is 58 % LUT, 11 
 the area study's 39-RAMB36 model; the no-L1 cut is within 1 of its 23. The 38 vs 39 is
 one shared memory landing in RAMB18 instead of RAMB36.
 
-**The timing number is the multi-cycle limit, not a 100 MHz pass.** nextpnr reports
-46.63 MHz for `golem_four` (47.63 for `nol1`) at the 100 MHz clock constraint, and the
-critical path is inside a hart (`core.*`), not the arbiter or the DDR path. The harts
-are enabled every other cycle, so the path has two clock periods; the effective hart
-ceiling is therefore ~46.6 MHz (just under the 50 MHz target), while the 100 MHz bus
-and DDR paths are not the limit. The current XDC constrains the whole design at
-100 MHz; a real 50 MHz hart domain (a second PLL output and the existing registered
-adapter as the CDC) or a multicycle constraint is the open item. The openXC7 database maps `xc7a35t*` to an A7-50T fabric, so the Fmax is A7-50T timing for
-a 35T bitstream (and optimistic for the real part); the fit verdicts above are the
-yosys counts against the 35T capacities.
+### Timing: the harts are a 50 MHz (20 ns) target, not 100 MHz
+
+The harts are enabled every other cycle, so the *hart/sys* requirement is a 20 ns
+period, not the 10 ns of the single-hart pipelined build. Running nextpnr with a 10 ns
+XDC on this design asks it to place and route for a period the harts do not need, and
+pessimises the result: it reported 46.63 MHz (`golem_four`) and 47.63 MHz (`nol1`).
+With the same netlists and chip database but a **20 ns XDC** (`GBoard.xdc20`), best of
+three seeds:
+
+| variant | seed | Fmax (post-route) | at 50 MHz |
+|---|---:|:---:|:---:|
+| `golem_four` | 1 | 49.36 MHz | FAIL (−0.26 ns) |
+| `golem_four` | 3 | 50.62 MHz | PASS (+0.25 ns) |
+| `golem_four` | 5 | **50.74 MHz** | **PASS (+0.29 ns)** |
+| `golem_four_nol1` | 1 | 48.78 MHz | FAIL (−0.49 ns) |
+| `golem_four_nol1` | 2 | 50.99 MHz | PASS (+0.39 ns) |
+| `golem_four_nol1` | 3 | **52.93 MHz** | **PASS (+1.11 ns)** |
+
+Both variants close 50 MHz in the best of three: **50.74 MHz (+1.5 %)** for
+`golem_four` and **52.93 MHz (+5.9 %)** for `golem_four_nol1`. The close is
+seed-sensitive — seed 1 misses by 1.3 % on the full variant — because the router trades
+congestion against timing differently per seed; a production build should keep the seed
+in the flow (or add margin), not assume any seed closes. The critical path is inside a
+hart, not the arbiter or the DDR path; on seed 1 it is 20.26 ns (4.01 ns logic,
+16.25 ns routing) and ends at a clock-enable pin of the core.
+
+**Decision: keep one 100 MHz clock domain and the every-other-cycle enable.** The
+harts run at 50 MHz effective; the bus, the DDR cache/controller and the shared
+peripherals stay at 100 MHz. Any constraint file for a four-hart variant must use the
+**20 ns** target, not 10 ns: `GBoard.xdc20` rewrites the board clock constraint and
+`GBoard.Variant.target` makes `golem timing` check `PASS at 50.00 MHz` for `four` /
+`four_nol1` (the single-hart variants keep 10 ns / 100 MHz). A separate 50 MHz hart
+clock is not needed for this target; it remains an option if a future build needs more
+margin or must prove the 100 MHz bus and the 50 MHz harts in one constraint file.
+
+**Caveat on the constraint.** The openXC7 report times one clock, `ck_CLKOUT0_g` (the
+PLL's system output), so the 20 ns file proves the hart/sys path target. The 100 MHz
+bus, DDR cache/controller and shared peripherals are *not* re-proven by this run: the
+earlier 10 ns placement is the check for those paths (its only failing path was the
+core), and a rigorous single-file sign-off would keep 10 ns for them and use a
+multicycle/2-cycle constraint on the hart registers, or a separate 50 MHz hart clock.
+The DDR3 PHY's 400 MHz domain is a separate sign-off: it is not derived from this
+constraint, and the 7-series chip database in this tree maps `xc7a35t*` to an A7-50T
+fabric, so the Fmax is A7-50T timing for a 35T bitstream and optimistic for the real
+part. The fit verdicts in this section are the yosys counts against the 35T
+capacities.
 
 ### Boot, park and the doorbell
 
