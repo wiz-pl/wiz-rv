@@ -101,6 +101,14 @@ def Tr.line (k pc trap : Nat) (regs mem : List String) : String :=
     (.cons (Nat.repr k) (.cons (Ox.hex 8 pc)
       (.cons (Ox.hex 8 trap) (List.append regs mem)))))
 
+-- The trap-state line: cause, tval, epc after the instruction of state `k` (the ISA's
+-- `trap`/`tval`/`epc`, the core's latched trap state). Optional: a backend that has no
+-- trap state (Sail, Spike) emits none, and the comparison skips it.
+def Tr.trapLine (k cause tval epc : Nat) : String :=
+  String.intercalate " " (.cons "T"
+    (.cons (Nat.repr k) (.cons (Ox.hex 8 cause)
+      (.cons (Ox.hex 8 tval) (.cons (Ox.hex 8 epc) .nil)))))
+
 def Tr.header (fx : Fx) (mode : String) : List String :=
   .cons "# rv-oracle-trace v1"
     (.cons ("# fixture " ++ fx.name)
@@ -121,10 +129,13 @@ def Tr.isaLine (c : Cfg) (fx : Fx) (k : Nat) (s : Arch) : String :=
     (Tr.regsGo 32 0 (fun i => (Rv.reg s i).toNat))
     (Tr.memGo fx.mcount fx.mbase (fun a => Rv.byte c s (Rv.w32 a)))
 
+def Tr.isaTrap (k : Nat) (s : Arch) : String :=
+  Tr.trapLine k s.trap s.tval.toNat s.epc.toNat
+
 def Tr.isaGo (c : Cfg) (fx : Fx) : Nat → Nat → Arch → List String
-  | .zero, k, s => .cons (Tr.isaLine c fx k s) .nil
+  | .zero, k, s => .cons (Tr.isaLine c fx k s) (.cons (Tr.isaTrap k s) .nil)
   | .succ f, k, s =>
-    List.append (.cons (Tr.isaLine c fx k s) .nil)
+    List.append (List.append (.cons (Tr.isaLine c fx k s) .nil) (.cons (Tr.isaTrap k s) .nil))
       (Tr.isaGo c fx f (Nat.succ k) (Rv.step c s))
 
 def Tr.isaMain (path : String) : IO Unit :=

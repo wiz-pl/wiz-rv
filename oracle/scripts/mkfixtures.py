@@ -275,12 +275,50 @@ def mixed_program():
     ]
 
 
+def trap_ecall():
+    """ECALL: the machine stops, cause 1, tval 0, epc the ECALL's address."""
+    return [addi(x1, x0, 7), 0x00000073, 0x00100073, SPIN]
+
+
+def trap_ebreak():
+    """EBREAK: cause 2, tval 0."""
+    return [addi(x1, x0, 9), 0x00100073, SPIN]
+
+
+def trap_illegal():
+    """An all-ones word is not an RV32I instruction: cause 3, tval the word."""
+    return [addi(x1, x0, 1), 0xFFFFFFFF, SPIN]
+
+
+def trap_load():
+    """LW at 2 (x1 = 2): cause 5, tval the effective address 2."""
+    return [addi(x1, x0, 2), lw(x2, x1, 0), SPIN]
+
+
+def trap_store():
+    """SW at 2: cause 6, tval the effective address 2."""
+    return [addi(x1, x0, 2), sw(x2, x1, 0), SPIN]
+
+
+def trap_jump():
+    """JALR to 2: cause 4, tval the target 2."""
+    return [addi(x1, x0, 2), jalr(x0, x1, 0), SPIN]
+
+
 FIXTURES = {
     "alu": ("rv32i", 14, 32, DATA, 256, alu()),
     "branch": ("rv32i", 14, 40, DATA, 256, branch()),
     "mem": ("rv32i", 14, 32, DATA, 256, mem()),
     "shift": ("rv32i", 14, 32, DATA, 256, shift()),
     "mixed": ("rv32i", 14, 40, DATA, 256, mixed_program()),
+    # traps: the Wiz machine stops (cause/tval/epc); the trace pads with stutters to
+    # `steps + 1` states. Sail/Spike are skipped for these (they enter a handler).
+    "trap_ecall": ("rv32i", 14, 6, DATA, 256, trap_ecall()),
+    "trap_ebreak": ("rv32i", 14, 6, DATA, 256, trap_ebreak()),
+    "trap_illegal": ("rv32i", 14, 6, DATA, 256, trap_illegal()),
+    "trap_load": ("rv32i", 14, 6, DATA, 256, trap_load()),
+    "trap_store": ("rv32i", 14, 6, DATA, 256, trap_store()),
+    "trap_jump": ("rv32i", 14, 6, DATA, 256, trap_jump()),
 }
 
 

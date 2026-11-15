@@ -42,13 +42,13 @@ def Qp.at (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres
       (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1)
       (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 4) (Qp.b 1))
     (PpM.mk (Qp.b 1) (Qp.b 1) (Qp.b 32) (Qp.b 5) (Qp.b 1) (Qp.b 1) mres (Qp.b 32) (Qp.b 32) (Qp.b 3)
-      (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 3) (Qp.b 1) (Qp.b 32) (Qp.b 32) (Qp.b 32) (Qp.b 32) (Qp.b 32)
+      (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 3) (Qp.b 32) (Qp.b 1) (Qp.b 32) (Qp.b 32) (Qp.b 32) (Qp.b 32) (Qp.b 32)
       (Qp.b 1) (Qp.b 32) (Qp.b 5) (Qp.b 1) (Qp.b 1))
-    (PpR.mk (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 32) (Qp.b 5) (Qp.b 1) rval (Qp.b 3) (Qp.b 32) (Qp.b 1))
+    (PpR.mk (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 1) (Qp.b 32) (Qp.b 5) (Qp.b 1) rval (Qp.b 3) (Qp.b 32) (Qp.b 32) (Qp.b 1))
     (PpDiv.mk (Qp.b 1) (Qp.b 5) (Qp.b 32) (Qp.b 32) (Qp.b 32) (Qp.b 1))
     (PpBus.mk (Qp.b 1) (Qp.b 32) (Qp.b 32) (Qp.b 4) (Qp.b 1) (Qp.b 1) (Qp.b 32) (Qp.b 32) (Qp.b 4) (Qp.b 1) (Qp.b 2)
       (Qp.b 2) (Qp.b 128) (Qp.b 1) (Qp.b 1) (Qp.b 32))
-    (Qp.b 3)
+    (Qp.b 3) (Qp.b 32) (Qp.b 32)
 
 def Qp.un (v : HwTy.El (PpSt.code 4 9)) : PpSt 4 9 HwTy.El := Bundle.ofEl (PpSt.bundle 4 9) v
 def Qp.step (s : PpSt 4 9 HwTy.El) : PpSt 4 9 HwTy.El := Qp.un (pipeStep (r := HwTy.El) 4 9 .false s In.idle).1

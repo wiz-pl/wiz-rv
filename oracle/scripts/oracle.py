@@ -58,14 +58,17 @@ import rv32_ref  # noqa: E402
 
 
 class State:
-    __slots__ = ("step", "pc", "trap", "regs", "mem")
+    __slots__ = ("step", "pc", "trap", "regs", "mem", "tval", "epc", "has_trap")
 
-    def __init__(self, step, pc, trap, regs, mem):
+    def __init__(self, step, pc, trap, regs, mem, tval=None, epc=None):
         self.step = step
         self.pc = pc
         self.trap = trap
         self.regs = regs
         self.mem = mem
+        self.tval = tval
+        self.epc = epc
+        self.has_trap = tval is not None
 
 
 class Trace:
@@ -88,6 +91,17 @@ def parse_trace_text(text, name="<trace>"):
                     meta[key] = body[len(key) + 1:]
             if body.startswith("cfg "):
                 meta["cfg"] = body[4:]
+            continue
+        if line.startswith("T "):
+            # trap state: T <step> <cause> <tval> <epc>
+            f = line.split()
+            if len(f) != 5 or not states:
+                raise SystemExit(f"{name}:{lineno}: bad trap line: {line[:40]!r}")
+            st = states[-1]
+            st.trap = int(f[2], 16)
+            st.tval = int(f[3], 16)
+            st.epc = int(f[4], 16)
+            st.has_trap = True
             continue
         if not line.startswith("S "):
             raise SystemExit(f"{name}:{lineno}: not a state line: {line[:40]!r}")
@@ -126,6 +140,11 @@ def compare_traces(a, b, label, limit=20, max_steps=10):
             fields.append(("pc", f"{sa.pc:08x}", f"{sb.pc:08x}"))
         if sa.trap != sb.trap:
             fields.append(("trap", f"{sa.trap}", f"{sb.trap}"))
+        if sa.has_trap and sb.has_trap:
+            if sa.tval != sb.tval:
+                fields.append(("tval", f"{sa.tval:08x}", f"{sb.tval:08x}"))
+            if sa.epc != sb.epc:
+                fields.append(("epc", f"{sa.epc:08x}", f"{sb.epc:08x}"))
         for r, (x, y) in enumerate(zip(sa.regs, sb.regs)):
             if x != y:
                 fields.append((f"x{r}", f"{x:08x}", f"{y:08x}"))
@@ -523,8 +542,12 @@ def cmd_run(args):
             traces["core"] = run_wiz_trace(wiz_bin("core_trace", args.core_bin),
                                            os.path.join(FIXDIR, name + ".hex"),
                                            os.path.join(TRACEDIR, f"{name}.core.trace"))
+        trapfixture = name.startswith("trap")
         if "sail" in backends:
-            if not sail:
+            if trapfixture:
+                rep.skip(f"{name} sail: the Wiz machine stops on a trap; Sail enters a "
+                         f"trap handler (no handler is installed)")
+            elif not sail:
                 rep.skip(f"{name} sail: sail_riscv_sim not on PATH "
                          f"(nix shell nixpkgs#sail-riscv -c oracle/scripts/run-oracle.sh run --backends sail)")
             else:
@@ -532,7 +555,10 @@ def cmd_run(args):
                 traces["sail"] = tr
                 print(f"# sail: {cmd}")
         if "spike" in backends:
-            if not spike:
+            if trapfixture:
+                rep.skip(f"{name} spike: the Wiz machine stops on a trap; Spike enters a "
+                         f"trap handler (no handler is installed)")
+            elif not spike:
                 rep.skip(f"{name} spike: spike not on PATH "
                          f"(nix shell nixpkgs#spike -c oracle/scripts/run-oracle.sh run --backends spike)")
             elif any((w & 0x7F) == 0x17 for w in fx.words):
