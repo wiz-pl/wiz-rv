@@ -87,6 +87,15 @@ def Prog.sort : List Asm :=
 
 -- traps: a misaligned load, a misaligned store, a misaligned jump, an illegal
 -- instruction (all zeros), ECALL; and x16 (illegal on RV32E only)
+-- the machine CSRs: write, read back, set and clear bits, the immediate forms
+def Prog.csr : List Asm :=
+  A.li 5 1 :: A.csrrw 6 Csr.aMscratch 5 :: A.csrrs 7 Csr.aMscratch 0 ::
+  A.li 8 8 :: A.csrrw 0 Csr.aMstatus 8 :: A.csrrs 9 Csr.aMstatus 0 ::
+  A.li 10 128 :: A.csrrw 0 Csr.aMie 10 :: A.csrrs 11 Csr.aMie 0 ::
+  A.li 12 16 :: A.csrrs 0 Csr.aMscratch 12 :: A.csrrs 13 Csr.aMscratch 0 ::
+  A.li 14 8 :: A.csrrc 0 Csr.aMstatus 14 :: A.csrrs 15 Csr.aMstatus 0 ::
+  A.ebreak :: .nil
+
 def Prog.trapLoad : List Asm := A.li 1 2 :: A.lw 2 0 1 :: A.ebreak :: .nil
 def Prog.trapStore : List Asm := A.li 1 1 :: A.sh 2 0 1 :: A.ebreak :: .nil
 def Prog.trapJump : List Asm := A.li 1 6 :: A.jalr 0 1 0 :: A.ebreak :: .nil

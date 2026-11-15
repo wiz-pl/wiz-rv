@@ -403,6 +403,11 @@ def Intc.mip {r : HwTy → Type} [Hw r] (s : Intc.Ctl r) (src : r B7) (hart : Na
     (Hw.cat meip (Hw.cat (Hw.lit 3 0)
       (Hw.cat mtip (Hw.cat (Hw.lit 3 0) (Hw.cat msip (Hw.lit 3 0))))))
 
+-- the three pending bits as separate lines (the core's `In.irqM/T/E`)
+def Intc.irqM {r : HwTy → Type} [Hw r] (mip : r B32) : r W1 := Hw.slice Intc.msipBit 1 mip
+def Intc.irqT {r : HwTy → Type} [Hw r] (mip : r B32) : r W1 := Hw.slice Intc.mtipBit 1 mip
+def Intc.irqE {r : HwTy → Type} [Hw r] (mip : r B32) : r W1 := Hw.slice Intc.meipBit 1 mip
+
 -- an interrupt is taken when `mstatus.MIE` is set and `mip & mie` is not zero
 def Intc.take {r : HwTy → Type} [Hw r] (mip mie : r B32) (mstatusMie : r W1) : r W1 :=
   Hw.and mstatusMie (Hw.not (isK (Hw.and mip mie) 0))

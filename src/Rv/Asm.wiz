@@ -217,6 +217,16 @@ def A.nop : Asm := Asm.opi 0 0 0 0 0
 def A.li (rd : Nat) (v : Int) : Asm := Asm.li rd v
 def A.ecall : Asm := Asm.word 115
 def A.ebreak : Asm := Asm.word 1048691
+-- Zicsr: CSRRW/CSRRS/CSRRC and their immediate forms (`rs1` is the 5-bit zimm)
+def A.csr (f3 rd csr rs1 : Nat) : Asm := Asm.word (115 + rd * 128 + f3 * 4096 + rs1 * 32768 + csr * 1048576)
+def A.csrrw (rd csr rs1 : Nat) : Asm := A.csr 1 rd csr rs1
+def A.csrrs (rd csr rs1 : Nat) : Asm := A.csr 2 rd csr rs1
+def A.csrrc (rd csr rs1 : Nat) : Asm := A.csr 3 rd csr rs1
+def A.csrrwi (rd csr z : Nat) : Asm := A.csr 5 rd csr z
+def A.csrrsi (rd csr z : Nat) : Asm := A.csr 6 rd csr z
+def A.csrrci (rd csr z : Nat) : Asm := A.csr 7 rd csr z
+def A.mret : Asm := Asm.word 807403635
+def A.wfi : Asm := Asm.word 273678451
 def A.fence : Asm := Asm.word 267386895   -- fence iorw, iorw
 def A.fenceI : Asm := Asm.word 4111       -- fence.i
 def A.label (l : String) : Asm := Asm.label l

@@ -23,10 +23,19 @@ def PLs.regDiff (ab wb : Nat) (s : PpSt ab wb HwTy.El) (a : Arch) : Nat → List
       else .cons ("x" ++ Nat.repr i ++ ": core " ++ Nat.repr hwA ++ "/" ++ Nat.repr hwB ++ ", spec " ++ Nat.repr sp) .nil;
     List.append (PLs.regDiff ab wb s a k) here
 
+def PLs.csrDiff {ab wb : Nat} (s : PpSt ab wb HwTy.El) (a : Arch) : List String :=
+  List.append (Ls.one "mstatus" s.csr.mstatus.toNat a.csr.mstatus.toNat)
+    (List.append (Ls.one "mie" s.csr.mie.toNat a.csr.mie.toNat)
+      (List.append (Ls.one "mtvec" s.csr.mtvec.toNat a.csr.mtvec.toNat)
+        (List.append (Ls.one "mscratch" s.csr.mscratch.toNat a.csr.mscratch.toNat)
+          (List.append (Ls.one "mepc" s.csr.mepc.toNat a.epc.toNat)
+            (List.append (Ls.one "mcause" s.csr.mcause.toNat a.csr.mcause.toNat)
+              (Ls.one "mtval" s.tval.toNat a.tval.toNat))))))
+
 def PLs.compare (ab wb : Nat) (s : PpSt ab wb HwTy.El) (a : Arch) : List String :=
   List.append (if Nat.beq s.rr.pc.toNat a.pc.toNat then .nil
       else .cons ("pc: core " ++ Nat.repr s.rr.pc.toNat ++ ", spec " ++ Nat.repr a.pc.toNat) .nil)
-    (PLs.regDiff ab wb s a (Rv.pow2 ab - 1))
+    (List.append (PLs.csrDiff s a) (PLs.regDiff ab wb s a (Rv.pow2 ab - 1)))
 
 -- the core's byte at address `x`: the data copy, the fetch copy
 def PLs.byteD (ab wb : Nat) (s : PpSt ab wb HwTy.El) (x : Nat) : Nat :=
@@ -84,7 +93,8 @@ def PLs.go (ab wb : Nat) (mx : Bool) :
           | .cons c cs => BitVec.ofNat 32 c
           | .nil => BitVec.ofNat 32 4294967295);
         let ω port : In HwTy.El := In.mk (BitVec.ofNat 1 1) ioIn
-          (Bool.toBits ans) (Bool.toBits (Bool.and ans (Bool.not (BitVec.isTrue q.we)))) (Ls.ddrWord ddr q.addr);
+          (Bool.toBits ans) (Bool.toBits (Bool.and ans (Bool.not (BitVec.isTrue q.we)))) (Ls.ddrWord ddr q.addr)
+          (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0);
         let ω r := pipeStep (r := HwTy.El) ab wb mx s port;
         let ω o := Bundle.ofEl Out.bundle r.2;
         -- (the byte is forced now: left as a thunk it would be a chain over cycles)

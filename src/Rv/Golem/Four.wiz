@@ -119,7 +119,9 @@ def G4.withHart {wb fl : Nat} {r : HwTy → Type} (s : G4.St wb fl r) (i : Nat) 
   else if Nat.beq i 2 then G4.St.mk s.sh s.h0 s.h1 h s.h3 s.arb s.atom s.beat
   else G4.St.mk s.sh s.h0 s.h1 s.h2 h s.arb s.atom s.beat
 
-def G4.quietIn {r : HwTy → Type} [Hw r] : In r := In.mk (Hw.lit 1 1) (Hw.lit 32 4294967295) (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 32 0)
+def G4.quietIn {r : HwTy → Type} [Hw r] : In r :=
+  In.mk (Hw.lit 1 1) (Hw.lit 32 4294967295) (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 32 0)
+    (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 1 0)
 
 def G4.src {fl : Nat} {r : HwTy → Type} [Hw r] (sh : G4.Sh fl r) : r B7 :=
   Intc.srcBits (Intc.Src.mk sh.full (Hw.lit 1 0))
@@ -223,7 +225,9 @@ def G4.step (cfg : G4.Cfg) (wb : Nat) {r : HwTy → Type} [Hw r] (s : G4.St wb G
   let t2 := GBus.Resp.unpack (Hw.snd (Hw.snd b2));
   let t3 := GBus.Resp.unpack (Hw.snd (Hw.snd b3));
   let inp := fun (i : Nat) (q : Out r) (t : GBus.Resp r) =>
-    In.mk (Hw.and (txIdle sh.tx) (Hw.not sh.txGo)) (G4.read sh ddr i q.ioa) t.ready t.rvalid t.rdata;
+    let mip := Intc.mip sh.intc (G4.src sh) i;
+    In.mk (Hw.and (txIdle sh.tx) (Hw.not sh.txGo)) (G4.read sh ddr i q.ioa) t.ready t.rvalid t.rdata
+      (Intc.irqM mip) (Intc.irqT mip) (Intc.irqE mip);
   let n0 := coreStepC G4.ab wb .true (G4.cacheOf cfg 0) k0 (inp 0 q0 t0);
   let n1 := coreStepC G4.ab wb .true (G4.cacheOf cfg 1) k1 (inp 1 q1 t1);
   let n2 := coreStepC G4.ab wb .true (G4.cacheOf cfg 2) k2 (inp 2 q2 t2);

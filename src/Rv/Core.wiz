@@ -74,6 +74,30 @@ def Core.isUncached {r : HwTy → Type} [Hw r] (a : r B32) : r W1 :=
   Hw.and (Hw.not (Hw.ult a (Hw.lit 32 Core.uncBase)))
     (Hw.ult a (Hw.lit 32 (Core.uncBase + Core.uncBytes)))
 
+-- The machine-mode CSRs (the subset the SoC needs). `mtval` is `CoreSt.tval`; `mip`
+-- is the `In.irq*` input, read-only.
+structure CsrFile (r : HwTy → Type) where
+  mstatus : r B32
+  mie : r B32
+  mtvec : r B32
+  mscratch : r B32
+  mepc : r B32
+  mcause : r B32
+  deriving Bundle
+
+def CsrFile.init : CsrFile HwTy.El :=
+  CsrFile.mk (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0)
+    (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0)
+
+def CsrFile.zero {r : HwTy → Type} [Hw r] : CsrFile r :=
+  CsrFile.mk (Hw.lit 32 0) (Hw.lit 32 0) (Hw.lit 32 0) (Hw.lit 32 0) (Hw.lit 32 0) (Hw.lit 32 0)
+
+-- the reset: every CSR zero
+def CsrFile.reset {r : HwTy → Type} [Hw r] (rst : r W1) (c : CsrFile r) : CsrFile r :=
+  CsrFile.mk (Hw.mux rst (Hw.lit 32 0) c.mstatus) (Hw.mux rst (Hw.lit 32 0) c.mie)
+    (Hw.mux rst (Hw.lit 32 0) c.mtvec) (Hw.mux rst (Hw.lit 32 0) c.mscratch)
+    (Hw.mux rst (Hw.lit 32 0) c.mepc) (Hw.mux rst (Hw.lit 32 0) c.mcause)
+
 structure CoreSt (ab wb : Nat) (r : HwTy → Type) where
   ph : r B4
   pc : r B32
@@ -130,6 +154,7 @@ structure CoreSt (ab wb : Nat) (r : HwTy → Type) where
                   -- 3: a shared atomic on the uncached aperture (P then M)
   baop : r B2     -- the shared atomic request: 1 LR, 2 SC, 3 AMO
   baf5 : r B5
+  csr : CsrFile r -- the machine CSRs
   deriving Bundle
 
 -- what the core shows: the trap code (0 while running), and a byte written to the
@@ -164,7 +189,15 @@ structure In (r : HwTy → Type) where
   ready : r W1
   rvalid : r W1
   rdata : r B32
+  irqM : r W1    -- the pending machine interrupt inputs: MSIP, MTIP, MEIP
+  irqT : r W1
+  irqE : r W1
   deriving Bundle
+
+-- `mip` from the three inputs: bits 3 (MSIP), 7 (MTIP) and 11 (MEIP)
+def In.mip {r : HwTy → Type} [Hw r] (x : In r) : r B32 :=
+  Hw.cat (Hw.lit 20 0) (Hw.cat x.irqE (Hw.cat (Hw.lit 3 0)
+    (Hw.cat x.irqT (Hw.cat (Hw.lit 3 0) (Hw.cat x.irqM (Hw.lit 3 0))))))
 
 ------------------------------------------------------------------------------------
 -- Helpers
@@ -194,6 +227,23 @@ def bitOf {r : HwTy → Type} [Hw r] {ω n : Nat} (i : Nat) (w : r (HwTy.bits n)
 def rep {r : HwTy → Type} [Hw r] (ω n : Nat) (b : r W1) : r (HwTy.bits n) :=
   Hw.mux b (Hw.lit n (Nat.pow 2 n - 1)) (Hw.lit n 0)
 def isK {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) (k : Nat) : r W1 := Hw.eq x (Hw.lit n k)
+
+-- the CSR numbers (the machine-mode subset; the ISA's `Csr.a*` has the same values)
+def coreCsrExists {r : HwTy → Type} [Hw r] (a : r B12) : r W1 :=
+  Hw.or (isK a Csr.aMstatus) (Hw.or (isK a Csr.aMie) (Hw.or (isK a Csr.aMtvec)
+    (Hw.or (isK a Csr.aMscratch) (Hw.or (isK a Csr.aMepc) (Hw.or (isK a Csr.aMcause)
+      (Hw.or (isK a Csr.aMtval) (isK a Csr.aMip)))))))
+def coreCsrWritable {r : HwTy → Type} [Hw r] (a : r B12) : r W1 := Hw.not (isK a Csr.aMip)
+
+def coreCsrRead {r : HwTy → Type} [Hw r] (c : CsrFile r) (tval mip : r B32) (a : r B12) : r B32 :=
+  Hw.mux (isK a Csr.aMstatus) c.mstatus
+    (Hw.mux (isK a Csr.aMie) c.mie
+    (Hw.mux (isK a Csr.aMtvec) c.mtvec
+    (Hw.mux (isK a Csr.aMscratch) c.mscratch
+    (Hw.mux (isK a Csr.aMepc) c.mepc
+    (Hw.mux (isK a Csr.aMcause) c.mcause
+    (Hw.mux (isK a Csr.aMtval) tval
+    (Hw.mux (isK a Csr.aMip) mip (Hw.lit 32 0))))))))
 -- `c and x` for a control signal `c` (one that the instruction alone determines) and a
 -- data-dependent `x`, as a multiplexer: at values with `c` known it reduces whatever `x`
 -- is, which the single-instruction proofs need (`Hw.and 0 x` is stuck for a symbolic
@@ -257,6 +307,11 @@ structure Dec (r : HwTy → Type) where
   sc : r W1
   amo : r W1      -- an AMO (not LR.W or SC.W)
   f5 : r B5       -- A: the operation
+  csr : r W1      -- a CSR instruction (CSRRW/CSRRS/CSRRC and their immediates)
+  csrAddr : r B12
+  csrWrite : r W1 -- it writes the CSR (CSRRW, or rs1/zimm not zero)
+  mret : r W1
+  wfi : r W1
 
 def decode {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (w : r B32) : Dec r :=
   let opc : r B7 := Hw.slice 0 7 w;
@@ -298,6 +353,16 @@ def decode {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (w : r B32) : Dec r
   -- LR.W has no rs2 (it must be x0); SC.W and the AMOs read it
   let aLeg := Hw.and opA (Hw.and (isK f3 2) (Hw.and f5ok
     (Hw.and okd (Hw.and ok1 (Hw.mux (isK f5 2) (isK r2 0) ok2)))));
+  -- CSR and the two privileged instructions (mtvec is checked for existence below)
+  let sysOp := isK opc Op.system;
+  let csrAddr : r B12 := Hw.slice 20 12 w;
+  let csrKind := Hw.and sysOp (Hw.or (Hw.or (isK f3 1) (isK f3 2)) (Hw.or (isK f3 3)
+    (Hw.or (isK f3 5) (Hw.or (isK f3 6) (isK f3 7)))));
+  let csrWrite := Hw.or (isK f3 1) (Hw.not (isK r1 0));
+  let csrLegal := Hw.and csrKind (Hw.and (coreCsrExists csrAddr)
+    (Hw.or (Hw.not csrWrite) (coreCsrWritable csrAddr)));
+  let mret := isK w 807403635;
+  let wfi := isK w 273678451;
   let legal := Hw.or (Hw.or (Hw.and (Hw.or (Hw.or lui auipc) jal) okd)
       (Hw.or (Hw.and jalr (Hw.and (isK f3 0) (Hw.and okd ok1)))
         (Hw.and branch (Hw.and (Hw.not (isK (Hw.slice 1 2 f3 : r B2) 1)) (Hw.and ok1 ok2)))))
@@ -306,7 +371,8 @@ def decode {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (w : r B32) : Dec r
       (Hw.or (Hw.or (Hw.and opimm (Hw.and okd (Hw.and ok1
             (Hw.mux (isK f3 1) f7z (Hw.mux (isK f3 5) (Hw.or f7z f7a) (Hw.lit 1 1))))))
           (Hw.and op (Hw.and (Hw.and okd (Hw.and ok1 ok2)) (Hw.or f7z (Hw.and f7a f30)))))
-        (Hw.or (Hw.or fence (Hw.or ecall (Hw.or ebreak aLeg))) (Hw.and md (Hw.and okd (Hw.and ok1 ok2))))));
+        (Hw.or (Hw.or fence (Hw.or ecall (Hw.or ebreak (Hw.or aLeg (Hw.or csrLegal (Hw.or mret wfi))))))
+          (Hw.and md (Hw.and okd (Hw.and ok1 ok2))))));
   let immI : r B32 := Hw.cat (rep 20 sgn) (Hw.slice 20 12 w : r B12);
   let immS : r B32 := Hw.cat (rep 20 sgn) (Hw.cat (Hw.slice 25 7 w : r B7) (Hw.slice 7 5 w : r B5));
   let immB : r B32 := Hw.cat (rep 20 sgn) (Hw.cat (bitOf 7 w) (Hw.cat (Hw.slice 25 6 w : r (HwTy.bits 6))
@@ -315,7 +381,7 @@ def decode {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (w : r B32) : Dec r
   let immJ : r B32 := Hw.cat (rep 12 sgn) (Hw.cat (Hw.slice 12 8 w : r W8) (Hw.cat (bitOf 20 w)
       (Hw.cat (Hw.slice 21 10 w : r (HwTy.bits 10)) (Hw.lit 1 0))));
   Dec.mk rd f3 r1 r2 (bitOf 30 w) lui auipc jal jalr branch load store opimm op md ecall ebreak fence legal
-    immI immS immB immU immJ opA lrA scA amoA f5
+    immI immS immB immU immJ opA lrA scA amoA f5 csrLegal csrAddr csrWrite mret wfi
 
 ------------------------------------------------------------------------------------
 -- One cycle
@@ -392,6 +458,14 @@ def coreStepC {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx cache : Bool) (s : Co
   let jump := Hw.mux (Hw.or d.jal d.jalr) (Hw.lit 1 1) (gate d.branch taken);
   let target := Hw.mux d.jalr jalrT pcImm;
   let npc := Hw.mux jump target pcInc;
+  -- CSRs: read the addressed register, and the new value a CSR instruction writes
+  let mip := In.mip x;
+  let csrOld := coreCsrRead s.csr s.tval mip d.csrAddr;
+  let csrSrc := Hw.mux (Hw.or (isK d.f3 1) (Hw.or (isK d.f3 2) (isK d.f3 3)))
+    a (Hw.cat (Hw.lit 27 0) d.r1);
+  let csrNew := Hw.mux (Hw.or (isK d.f3 1) (isK d.f3 5)) csrSrc
+    (Hw.mux (Hw.or (isK d.f3 2) (isK d.f3 6)) (Hw.or csrOld csrSrc)
+      (Hw.and csrOld (Hw.not csrSrc)));
   -- traps
   let lo2 : r B2 := Hw.slice 0 2 sum;
   let mis := Hw.mux (isK (Hw.slice 0 2 f3 : r B2) 2) (Hw.not (isK lo2 0))
@@ -413,10 +487,50 @@ def coreStepC {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx cache : Bool) (s : Co
     (Hw.mux misJ target (Hw.mux (Hw.or misL (Hw.and misA d.lr)) sum
     (Hw.mux (Hw.or misS (Hw.and misA (Hw.not d.lr))) sum (Hw.lit 32 0))))));
   let trapE := Hw.and inE (Hw.not (isK code 0));
+  -- an interrupt is taken between instructions: MIE, a pending enabled bit, and a
+  -- handler (a zero mtvec is "no handler", as for an exception)
+  let handled := Hw.not (isK s.csr.mtvec 0);
+  let irqOn := Hw.and mip s.csr.mie;
+  let irqCode : r B4 := Hw.mux (bitOf Csr.meipBit irqOn) (Hw.lit 4 Csr.meiCause)
+    (Hw.mux (bitOf Csr.msipBit irqOn) (Hw.lit 4 Csr.msiCause) (Hw.lit 4 Csr.mtiCause));
+  let intr := Hw.and inE (Hw.and handled
+    (Hw.and (bitOf Csr.mieBit s.csr.mstatus) (Hw.not (isK irqOn 0))));
+  let takeTrap := Hw.or trapE intr;
+  let enterTrap := Hw.and takeTrap handled;
+  let stopTrap := Hw.and trapE (Hw.not handled);
   -- a store to the output port waits in E while the output is busy
   let io := bitOf 31 sum;
   let wait := gate (gate d.store io) (Hw.not x.txReady);
-  let goE := gate inE (gate (isK code 0) (Hw.not wait));
+  let goE := gate inE (gate (isK code 0) (Hw.and (Hw.not wait) (Hw.not intr)));
+  let retireM := Hw.and d.mret goE;
+  let csrWe := Hw.and d.csr (Hw.and goE d.csrWrite);
+  -- `mcause`: an interrupt has bit 31 set
+  let excCause : r B32 := Hw.cat (Hw.lit 29 0) code;
+  let intCause : r B32 := Hw.or (Hw.lit 32 Csr.intrBit) (Hw.cat (Hw.lit 28 0) irqCode);
+  let trapCauseV := Hw.mux intr intCause excCause;
+  -- trap entry and mret update mstatus (MIE, MPIE, MPP = M)
+  let ms := s.csr.mstatus;
+  let oldMie := bitOf Csr.mieBit ms;
+  let msNoMie := Hw.and ms (Hw.lit 32 4294967287);
+  let msPie := Hw.mux oldMie (Hw.or msNoMie (Hw.lit 32 128))
+    (Hw.and msNoMie (Hw.lit 32 4294967167));
+  let trapMs := Hw.or msPie (Hw.lit 32 6144);
+  let mpie := bitOf Csr.mpieBit ms;
+  let retMs0 := Hw.mux mpie (Hw.or ms (Hw.lit 32 8)) (Hw.and ms (Hw.lit 32 4294967287));
+  let retMs := Hw.or (Hw.or retMs0 (Hw.lit 32 128)) (Hw.lit 32 6144);
+  let msN := Hw.mux takeTrap trapMs (Hw.mux retireM retMs
+    (Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMstatus)) csrNew s.csr.mstatus));
+  let mieN := Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMie)) csrNew s.csr.mie;
+  let mtvecN := Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMtvec)) csrNew s.csr.mtvec;
+  let mscratchN := Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMscratch)) csrNew s.csr.mscratch;
+  let mepcN := Hw.mux takeTrap s.pc
+    (Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMepc)) csrNew s.csr.mepc);
+  let mcauseN := Hw.mux takeTrap trapCauseV
+    (Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMcause)) csrNew s.csr.mcause);
+  let tvalN := Hw.mux intr (Hw.lit 32 0)
+    (Hw.mux trapE tvalE (Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMtval)) csrNew s.tval));
+  let mtvecJ := Hw.and s.csr.mtvec (Hw.lit 32 4294967292);
+  let pcN := Hw.mux enterTrap mtvecJ (Hw.mux retireM s.csr.mepc (Hw.mux goE npc s.pc));
   -- a private-memory SC.W succeeds iff the reservation is for this word; its store
   -- happens in E. A shared SC.W is decided by the bus, and its success bit comes back
   -- as the load value.
@@ -432,8 +546,9 @@ def coreStepC {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx cache : Bool) (s : Co
   -- old word), S (shifts)
   let rdNZ := Hw.not (isK d.rd 0);
   let wE := gate goE (gate rdNZ (Hw.or (Hw.or (Hw.or d.lui d.auipc) (Hw.or d.jal d.jalr))
-    (Hw.or (Hw.and arith (Hw.not shift)) scLocal)));
-  let resE := Hw.mux d.lui d.immU (Hw.mux d.auipc pcImm (Hw.mux (Hw.or d.jal d.jalr) pcInc (Hw.mux scLocal scVal aluRes)));
+    (Hw.or (Hw.or (Hw.and arith (Hw.not shift)) scLocal) (Hw.or d.csr d.mret))));
+  let resE := Hw.mux d.lui d.immU (Hw.mux d.auipc pcImm (Hw.mux (Hw.or d.jal d.jalr) pcInc
+    (Hw.mux scLocal scVal (Hw.mux d.csr csrOld aluRes))));
   -- the loaded value
   let slo := s.slo;
   let byte := Hw.mux (bitOf 1 slo) (Hw.mux (bitOf 0 slo) wq3 wq2) (Hw.mux (bitOf 0 slo) wq1 wq0);
@@ -497,11 +612,13 @@ def coreStepC {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx cache : Bool) (s : Co
   -- in A the memory and the L1 are addressed by the private atomic's address
   let laddr : r B32 := Hw.mux inA s.amoA raddr;
   let rix : r (HwTy.bits wb) := Hw.slice 2 wb laddr;
+  let eNext : r B4 := Hw.mux enterTrap (Hw.lit 4 Ph.f) (Hw.mux stopTrap (Hw.lit 4 Ph.h)
+    (Hw.mux d.mret (Hw.lit 4 Ph.f) (Hw.mux wait (Hw.lit 4 Ph.e) (Hw.mux d.fence (Hw.lit 4 Ph.w)
+    (Hw.mux d.atm (Hw.mux d.sc (Hw.lit 4 Ph.f) (Hw.lit 4 Ph.m))
+    (Hw.mux d.md (Hw.mux (bitOf 2 f3) (Hw.lit 4 Ph.v) (Hw.lit 4 Ph.x)) (Hw.mux d.load (Hw.lit 4 Ph.m) (Hw.mux shift (Hw.lit 4 Ph.s)
+    (Hw.mux d.store (Hw.lit 4 Ph.f) (Hw.lit 4 Ph.d))))))))));
   let nphB : r B4 := Hw.mux inF (Hw.lit 4 Ph.d) (Hw.mux inD (Hw.lit 4 Ph.e)
-    (Hw.mux inE (Hw.mux trapE (Hw.lit 4 Ph.h) (Hw.mux wait (Hw.lit 4 Ph.e) (Hw.mux d.fence (Hw.lit 4 Ph.w)
-      (Hw.mux d.atm (Hw.mux d.sc (Hw.lit 4 Ph.f) (Hw.lit 4 Ph.m))
-      (Hw.mux d.md (Hw.mux (bitOf 2 f3) (Hw.lit 4 Ph.v) (Hw.lit 4 Ph.x)) (Hw.mux d.load (Hw.lit 4 Ph.m) (Hw.mux shift (Hw.lit 4 Ph.s)
-      (Hw.mux d.store (Hw.lit 4 Ph.f) (Hw.lit 4 Ph.d)))))))))
+    (Hw.mux inE eNext
     (Hw.mux inM (Hw.mux (isK s.ak 2) (Hw.lit 4 Ph.a) (Hw.lit 4 Ph.d))
     (Hw.mux inS (Hw.mux sDone (Hw.lit 4 Ph.d) (Hw.lit 4 Ph.s))
     (Hw.mux inX (Hw.lit 4 Ph.d) (Hw.mux inV (Hw.mux sDone (Hw.lit 4 Ph.d) (Hw.lit 4 Ph.v))
@@ -557,7 +674,7 @@ def coreStepC {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx cache : Bool) (s : Co
   let storeWord : r B32 := Hw.cat d3 (Hw.cat d2 (Hw.cat d1 d0));
   Hw.pair
     (CoreSt.pack ab wb (CoreSt.mk nph
-      (Hw.mux goE npc s.pc)
+      pcN
       (Hw.memRead s.m0 rix) (Hw.memRead s.m1 rix) (Hw.memRead s.m2 rix) (Hw.memRead s.m3 rix)
       (Hw.memWrite s.m0 (wLane 0) rix (wByte 0)) (Hw.memWrite s.m1 (wLane 1) rix (wByte 1))
       (Hw.memWrite s.m2 (wLane 2) rix (wByte 2)) (Hw.memWrite s.m3 (wLane 3) rix (wByte 3))
@@ -571,8 +688,8 @@ def coreStepC {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx cache : Bool) (s : Co
       (Hw.mux inE (Hw.mux d.atm (Hw.lit 3 2) f3) s.sf3)
       (Hw.mux inE (Hw.mux d.atm (Hw.lit 2 0) (Hw.mux d.md (Hw.cat negA negQ) (Hw.mux d.load lo2 (Hw.cat (Hw.lit 1 0) d.alt)))) s.slo)
       (Hw.mux inE (gate d.load io) s.sio)
-      (Hw.mux trapE code s.trap)
-      (Hw.mux trapE tvalE s.tval)
+      (Hw.mux stopTrap code s.trap)
+      tvalN
       (Hw.mux (gate inP x.rvalid) x.rdata s.busq)
       (Hw.mux (gate inP (gate (Hw.not s.bwe) x.rvalid)) (Hw.lit 1 1)
         (Hw.mux (Hw.and (Hw.not inP) (gate readNext (Hw.not ddrR))) (Hw.lit 1 0) s.fromBus))
@@ -596,7 +713,8 @@ def coreStepC {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx cache : Bool) (s : Co
       (Hw.mux (gate enterP miss) s.ra s.rline)
       busWr resvN resOkN
       (Hw.mux inE sum s.amoA) (Hw.mux inE rs2v s.amoD) (Hw.mux inM w s.amoO)
-      (Hw.mux inE d.f5 s.sf5) akN baopN baf5N))
+      (Hw.mux inE d.f5 s.sf5) akN baopN baf5N
+      (CsrFile.mk msN mieN mtvecN mscratchN mepcN mcauseN)))
     (Out.pack (Out.mk s.trap (gate goE (gate d.store io)) (Hw.slice 0 8 rs2v) (gate goE (gate d.load io)) sum rs2v
       (gate inP (Hw.and (Hw.not s.bsent) (Hw.not s.rgap)))
       (Hw.mux s.rmode (Hw.cat (Hw.slice 4 28 s.rline : r (HwTy.bits 28)) (Hw.cat s.rk (Hw.lit 2 0))) s.badr)
@@ -618,12 +736,12 @@ def CoreSt.held {r : HwTy → Type} [Hw r] (ab wb : Nat) (rst en : r W1)
   let z := CoreSt.pack ab wb (CoreSt.mk
     (Hw.mux rst (Hw.lit 4 Ph.f) c.ph) (Hw.mux rst (Hw.lit 32 0) c.pc)
     c.q0 c.q1 c.q2 c.q3 c.m0 c.m1 c.m2 c.m3 c.rfa c.rfb c.x1 c.x2 c.acc c.dv c.rm c.cnt c.srd c.sf3
-    c.slo c.sio (Hw.mux rst (Hw.lit 3 0) c.trap)
+    c.slo c.sio (Hw.mux rst (Hw.lit 3 0) c.trap) (Hw.mux rst (Hw.lit 32 0) c.tval)
     c.busq c.fromBus c.badr c.bwe c.bwd c.bst c.bret c.bsent c.ra c.l1q c.l1t c.l1d c.l1tag c.fromL1
     c.rmode c.rk c.rgap c.rbuf c.rline c.bnew (Hw.mux rst (Hw.lit 32 0) c.resv)
     (Hw.mux rst (Hw.lit 1 0) c.resOk)
     c.amoA c.amoD c.amoO c.sf5 (Hw.mux rst (Hw.lit 2 0) c.ak)
-    c.baop c.baf5);
+    c.baop c.baf5 (CsrFile.reset rst c.csr));
   Hw.hold en z cur
 
 -- the single-hart configurations (the Arty board, the Doom machine, the proofs) keep
@@ -650,7 +768,7 @@ def CoreSt.init (ab wb : Nat) (prog : List Nat) : CoreSt ab wb HwTy.El :=
     (fun (a : BitVec (L1.bits wb)) => BitVec.ofNat 128 0) (fun (a : BitVec (L1.bits wb)) => BitVec.ofNat (L1.tagW wb) 0)
     (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 2 0) (BitVec.ofNat 1 0) (BitVec.ofNat 128 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0)
     (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0)
-    (BitVec.ofNat 5 0) (BitVec.ofNat 2 0) (BitVec.ofNat 2 0) (BitVec.ofNat 5 0)
+    (BitVec.ofNat 5 0) (BitVec.ofNat 2 0) (BitVec.ofNat 2 0) (BitVec.ofNat 5 0) CsrFile.init
 
 def core (ab wb : Nat) (mx : Bool) (prog : List Nat) : Circuit In.code Out.code :=
   Circuit.mk (CoreSt.code ab wb) (Bundle.toEl (CoreSt.bundle ab wb) (CoreSt.init ab wb prog))
@@ -659,6 +777,9 @@ def core (ab wb : Nat) (mx : Bool) (prog : List Nat) : Circuit In.code Out.code 
 -- the ports with nothing attached: stores may go, loads read -1, no bus
 def In.quiet {r : HwTy → Type} [Hw r] : In r :=
   In.mk (Hw.lit 1 1) (Hw.lit 32 4294967295) (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 32 0)
+    (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 1 0)
 
--- the ports at values: always ready, nothing to read
-def In.idle : In HwTy.El := In.mk (BitVec.ofNat 1 1) (BitVec.ofNat 32 4294967295) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0)
+-- the ports at values: always ready, nothing to read, no interrupt pending
+def In.idle : In HwTy.El :=
+  In.mk (BitVec.ofNat 1 1) (BitVec.ofNat 32 4294967295) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
+    (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)

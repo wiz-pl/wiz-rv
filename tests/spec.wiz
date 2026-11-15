@@ -23,6 +23,7 @@ def reportTrap (name : String) (p : List Asm) (steps : Nat) : IO Unit :=
 
 def main : IO Unit := do
   report "sum" Prog.sum 100;
+  report "csr" Prog.csr 100;
   reportCfg "atomics" cfgA Prog.atomics 200;
   reportCfg "atomics ddr" cfgA Prog.atomicsDdr 100;
   reportCfg "atomics resv" cfgA Prog.atomicsResv 30;
