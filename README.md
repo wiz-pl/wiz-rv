@@ -138,10 +138,11 @@ value of the core's other registers. FINDINGS.md, H2, says why not the others.
 
 ## Toolchain
 
-The HDL memories are Wiz PR #166 and the fast netlist simulator PR #199, both unmerged
-when this was written: the toolchain here is wiz master 50cd3e7 with both branches
-merged locally (`wiz-toolchain` names it). `flake.nix` gives yosys, nextpnr-ice40,
-icestorm and Icarus Verilog.
+The HDL memories (PR #166) and the fast netlist simulator (PR #199) were unmerged when
+this was written, so the original toolchain was wiz master 50cd3e7 with both branches
+merged locally. They are in master now: `wiz-toolchain` pins `master@071a033a…`, the
+first snapshot release that has both, instead of a local-merge description. `flake.nix`
+gives yosys, nextpnr-ice40, icestorm and Icarus Verilog.
 
 ```sh
 grail build          # check the library, compile the driver
