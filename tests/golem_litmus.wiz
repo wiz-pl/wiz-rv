@@ -1,0 +1,266 @@
+-- test: check
+import Prelude
+import Rv.Golem.CohModel
+import Text
+-- Executable litmus tests over the abstract golem bus model (src/Rv/Golem/CohModel.wiz).
+-- Each line is `test mode outcomes PASS/FAIL`; the expected sets are the ones the
+-- design note argues for, and the model enumerates every interleaving (including every
+-- arbitration order) to check them. `99` is a deadlock: a wait that can never succeed.
+--
+-- The outcomes are the loaded registers in hart order (and, for 2+2W, the final x,y).
+-- The modes:
+--   sc     no cache, no store buffer: the sequential-consistency reference
+--   core   the multi-cycle core: no store buffer, incoherent write-through L1
+--   pipe   the pipelined core: one-entry store buffer, no load bypass, FENCE a no-op
+--   pipeF  the pipelined core with a real drain fence
+--   coh    a coherent L1 with a drain fence (the target, not the hardware today)
+--   tso    unbounded store buffer with load bypass, no cache: the TSO reference
+
+def L1 (a : Nat) : List Nat := .cons a .nil
+def L2 (a b : Nat) : List Nat := .cons a (.cons b .nil)
+def L4 (a b c d : Nat) : List Nat := .cons a (.cons b (.cons c (.cons d .nil)))
+
+def S1 (a : List Nat) : List (List Nat) := .cons a .nil
+def S2 (a b : List Nat) : List (List Nat) := .cons a (.cons b .nil)
+def S3 (a b c : List Nat) : List (List Nat) := .cons a (.cons b (.cons c .nil))
+def S4 (a b c d : List Nat) : List (List Nat) := .cons a (.cons b (.cons c (.cons d .nil)))
+
+def P.sb0 : List Op := .cons (.st 4 1) (.cons (.ld 8) .nil)
+def P.sb1 : List Op := .cons (.st 8 1) (.cons (.ld 4) .nil)
+def P.mp0 : List Op := .cons (.st 4 1) (.cons (.st 8 1) .nil)
+def P.mp1 : List Op := .cons (.ld 8) (.cons (.ld 4) .nil)
+def P.lb0 : List Op := .cons (.ld 4) (.cons (.st 8 1) .nil)
+def P.lb1 : List Op := .cons (.ld 8) (.cons (.st 4 1) .nil)
+def P.ir0 : List Op := .cons (.st 4 1) .nil
+def P.ir1 : List Op := .cons (.st 8 1) .nil
+def P.ir2 : List Op := .cons (.ld 4) (.cons (.ld 8) .nil)
+def P.ir3 : List Op := .cons (.ld 8) (.cons (.ld 4) .nil)
+def P.w0 : List Op := .cons (.st 4 1) (.cons (.st 8 1) .nil)
+def P.w1 : List Op := .cons (.st 8 2) (.cons (.st 4 2) .nil)
+
+-- a two-node message-passing ring: data 3,4 and flags 10,11 (MMIO). Hart 0 sends d0
+-- then f0; hart 1 waits for f0, reads d0, sends d1 then f1; hart 0 waits for f1 and
+-- reads d1. Outcome is [hart 0 read, hart 1 read]; the correct ring is [2,1].
+def P.r0 : List Op := .cons (.st 4 1) (.cons (.stu 10 1) (.cons (.guardU 11 1) (.cons (.ld 8) .nil)))
+def P.r1 : List Op := .cons (.guardU 10 1) (.cons (.ld 4) (.cons (.st 8 2) (.cons (.stu 11 1) .nil)))
+-- the same ring with the flags in DDR instead of MMIO: both stores are FIFO, so
+-- the order data -> flag is preserved by the one-entry store buffer.
+def P.rd0 : List Op := .cons (.st 4 1) (.cons (.st 10 1) (.cons (.guard 11 1) (.cons (.ld 8) .nil)))
+def P.rd1 : List Op := .cons (.guard 10 1) (.cons (.ld 4) (.cons (.st 8 2) (.cons (.st 11 1) .nil)))
+
+def P.rf0 : List Op := .cons (.st 4 1) (.cons (.fence) (.cons (.stu 10 1) (.cons (.guardU 11 1) (.cons (.ld 8) .nil))))
+def P.rf1 : List Op := .cons (.guardU 10 1) (.cons (.ld 4) (.cons (.st 8 2) (.cons (.fence) (.cons (.stu 11 1) .nil))))
+
+-- warm SB: each hart primes its own cache with the other's flag, then does the
+-- classic SB shape. Cold SB is SC in the hardware; a warm L1 makes 0,0 possible
+-- (the second loads hit stale lines), and a store buffer makes it possible even
+-- with a coherent cache unless a fence drains the store.
+def P.wsb0 : List Op := .cons (.ld 8) (.cons (.st 4 1) (.cons (.ld 8) .nil))
+def P.wsb1 : List Op := .cons (.ld 4) (.cons (.st 8 1) (.cons (.ld 4) .nil))
+def P.wsb0f : List Op := .cons (.ld 8) (.cons (.st 4 1) (.cons (.fence) (.cons (.ld 8) .nil)))
+def P.wsb1f : List Op := .cons (.ld 4) (.cons (.st 8 1) (.cons (.fence) (.cons (.ld 4) .nil)))
+
+-- false sharing: x=1 and y=2 are in the same 16-byte line. Hart 1 reads y (which
+-- fills the line with x=0), waits for the sync, then reads x: a real line fill makes
+-- the second read stale even though it never read x before.
+def P.fs0 : List Op := .cons (.st 1 1) (.cons (.stu 12 1) .nil)
+def P.fs1 : List Op := .cons (.ld 2) (.cons (.guardU 12 1) (.cons (.ld 1) .nil))
+
+-- stale: hart 0 reads x (caching it), waits for the MMIO sync, reads x again; hart 1
+-- writes x=7 and then the sync. The second read is a L1 hit in the hardware, so it can
+-- still be 0; a coherent cache gives 7.
+def P.st0 : List Op := .cons (.ld 4) (.cons (.guardU 12 1) (.cons (.ld 4) .nil))
+def P.st1 : List Op := .cons (.st 4 7) (.cons (.stu 12 1) .nil)
+def P.st1f : List Op := .cons (.st 4 7) (.cons (.fence) (.cons (.stu 12 1) .nil))
+
+-- spin: hart 0 caches a DDR flag as 0 and spins on it; hart 1 writes x=5 and the flag.
+-- With a non-coherent L1 the spin never observes the flag (deadlock, 99).
+def P.sp0 : List Op := .cons (.ld 13) (.cons (.guard 13 1) (.cons (.ld 4) .nil))
+def P.sp1 : List Op := .cons (.st 4 5) (.cons (.st 13 1) .nil)
+
+def CM.sameSet (a b : List (List Nat)) : Bool :=
+  CM.natsEq (List.map CM.keyOf a) (List.map CM.keyOf b)
+
+def CM.showVals : List Nat → String
+  | .nil => ""
+  | .cons x .nil => Nat.repr x
+  | .cons x xs => Nat.repr x ++ "," ++ CM.showVals xs
+
+def CM.showTail : List (List Nat) → String
+  | .nil => "}"
+  | .cons x xs => " | " ++ CM.showVals x ++ CM.showTail xs
+
+def CM.showSet : List (List Nat) → String
+  | .nil => "{}"
+  | .cons x xs => "{" ++ CM.showVals x ++ CM.showTail xs
+
+def row (name : String) (m : Mode) (progs : List (List Op)) (ext : St → List Nat) (want : List (List Nat)) : String :=
+  let got := CM.outcomes m progs ext;
+  let ok := CM.sameSet got want;
+  name ++ ": " ++ CM.showSet got ++ (if ok then " PASS" else " FAIL (want " ++ CM.showSet want ++ ")")
+
+def lines (l : List String) : String := match l with
+  | .nil => ""
+  | .cons x .nil => x
+  | .cons x xs => x ++ "\n" ++ lines xs
+
+def SBsc : List (List Nat) := S3 (L2 0 1) (L2 1 0) (L2 1 1)
+def MPsc : List (List Nat) := S3 (L2 0 0) (L2 0 1) (L2 1 1)
+def LBsc : List (List Nat) := S3 (L2 0 0) (L2 0 1) (L2 1 0)
+def IRsc : List (List Nat) := [[0,0,0,0], [0,0,0,1], [0,0,1,0], [0,0,1,1],
+  [0,1,0,0], [0,1,0,1], [0,1,1,0], [0,1,1,1], [1,0,0,0], [1,0,0,1], [1,0,1,1],
+  [1,1,0,0], [1,1,0,1], [1,1,1,0], [1,1,1,1]]
+
+def Wsc : List (List Nat) := S3 (L2 1 1) (L2 2 1) (L2 2 2)
+
+def SBtso : List (List Nat) := S4 (L2 0 0) (L2 0 1) (L2 1 0) (L2 1 1)
+def MPtso : List (List Nat) := MPsc
+
+def RINGok : List (List Nat) := S1 (L2 2 1)
+def RINGweak : List (List Nat) := S4 (L2 0 0) (L2 0 1) (L2 2 0) (L2 2 1)
+
+def WARMsc : List (List Nat) := S3 (L2 0 1) (L2 1 0) (L2 1 1)
+def WARMincoh : List (List Nat) := S3 (L2 0 0) (L2 0 1) (L2 1 0)
+def WARMcohF : List (List Nat) := WARMsc
+def WARMcoh : List (List Nat) := S4 (L2 0 0) (L2 0 1) (L2 1 0) (L2 1 1)
+
+def STALEincoh : List (List Nat) := S2 (L2 0 0) (L2 7 7)
+def STALEcoh : List (List Nat) := S2 (L2 0 7) (L2 7 7)
+def SPINincoh : List (List Nat) := S2 (L1 5) (L1 99)
+def SPINcoh : List (List Nat) := S1 (L1 5)
+
+def ext2 (s : St) : List Nat := CM.regOut s
+def extLast (s : St) : List Nat := match s.harts with
+  | .nil => .nil
+  | .cons h hs => match h.regs with
+    | .nil => .nil
+    | .cons x xs => .cons x .nil
+def extXY (s : St) : List Nat := CM.memOut (.cons 4 (.cons 8 .nil)) s
+def headOr0 : List Nat → Nat
+  | .nil => 0
+  | .cons x xs => x
+def extHeadsH : List Hart → List Nat
+  | .nil => .nil
+  | .cons h hs => .cons (headOr0 h.regs) (extHeadsH hs)
+def extHeads (s : St) : List Nat := extHeadsH s.harts
+def extH1 (s : St) : List Nat := match s.harts with
+  | .nil => .nil
+  | .cons h hs => match hs with
+    | .nil => .nil
+    | .cons h1 rest => .cons (headOr0 h1.regs) .nil
+
+def strs3 (a b c : String) : List String := .cons a (.cons b (.cons c .nil))
+def strs4 (a b c d : String) : List String := .cons a (.cons b (.cons c (.cons d .nil)))
+def strs5 (a b c d e : String) : List String := .cons a (.cons b (.cons c (.cons d (.cons e .nil))))
+def strs6 (a b c d e f : String) : List String := .cons a (.cons b (.cons c (.cons d (.cons e (.cons f .nil)))))
+
+def rowsSB : List String := strs5
+  "== SB (store buffering: forbidden 0,0) =="
+  (row "SB  sc  " CM.sc (.cons P.sb0 (.cons P.sb1 .nil)) ext2 SBsc)
+  (row "SB  core" CM.core (.cons P.sb0 (.cons P.sb1 .nil)) ext2 SBsc)
+  (row "SB  pipe" CM.pipe (.cons P.sb0 (.cons P.sb1 .nil)) ext2 SBsc)
+  (row "SB  tso " CM.tso (.cons P.sb0 (.cons P.sb1 .nil)) ext2 SBtso)
+
+def rowsMP : List String := strs5
+  "== MP (message passing: forbidden 1,0) =="
+  (row "MP  sc  " CM.sc (.cons P.mp0 (.cons P.mp1 .nil)) ext2 MPsc)
+  (row "MP  core" CM.core (.cons P.mp0 (.cons P.mp1 .nil)) ext2 MPsc)
+  (row "MP  pipe" CM.pipe (.cons P.mp0 (.cons P.mp1 .nil)) ext2 MPsc)
+  (row "MP  tso " CM.tso (.cons P.mp0 (.cons P.mp1 .nil)) ext2 MPtso)
+
+def rowsLB : List String := strs5
+  "== LB (load buffering: forbidden 1,1) =="
+  (row "LB  sc  " CM.sc (.cons P.lb0 (.cons P.lb1 .nil)) ext2 LBsc)
+  (row "LB  core" CM.core (.cons P.lb0 (.cons P.lb1 .nil)) ext2 LBsc)
+  (row "LB  pipe" CM.pipe (.cons P.lb0 (.cons P.lb1 .nil)) ext2 LBsc)
+  (row "LB  tso " CM.tso (.cons P.lb0 (.cons P.lb1 .nil)) ext2 LBsc)
+
+def iriwProgs : List (List Op) := .cons P.ir0 (.cons P.ir1 (.cons P.ir2 (.cons P.ir3 .nil)))
+
+def rowsIR : List String := strs5
+  "== IRIW (readers must not disagree) =="
+  (row "IRIW sc  " CM.sc iriwProgs ext2 IRsc)
+  (row "IRIW core" CM.core iriwProgs ext2 IRsc)
+  (row "IRIW pipe" CM.pipe iriwProgs ext2 IRsc)
+  (row "IRIW tso " CM.tso iriwProgs ext2 IRsc)
+
+def wProgs : List (List Op) := .cons P.w0 (.cons P.w1 .nil)
+
+def rowsW : List String := strs5
+  "== 2+2W (final x,y: forbidden 1,2) =="
+  (row "2+2W sc  " CM.sc wProgs extXY Wsc)
+  (row "2+2W core" CM.core wProgs extXY Wsc)
+  (row "2+2W pipe" CM.pipe wProgs extXY Wsc)
+  (row "2+2W tso " CM.tso wProgs extXY Wsc)
+
+def ringProgs : List (List Op) := .cons P.r0 (.cons P.r1 .nil)
+def ringFProgs : List (List Op) := .cons P.rf0 (.cons P.rf1 .nil)
+
+def ringDDRProgs : List (List Op) := .cons P.rd0 (.cons P.rd1 .nil)
+
+def rowsRingDDR : List String := strs3
+  "== ring with DDR flags (correct [2,1]) =="
+  (row "ringDDR core " CM.core ringDDRProgs ext2 RINGok)
+  (row "ringDDR pipe " CM.pipe ringDDRProgs ext2 RINGok)
+
+def rowsRing : List String := strs6
+  "== ring (DDR data, MMIO flags: correct [2,1]) =="
+  (row "ring core " CM.core ringProgs ext2 RINGok)
+  (row "ring pipe " CM.pipe ringProgs ext2 RINGweak)
+  (row "ring pipeF" CM.pipeF ringFProgs ext2 RINGok)
+  (row "ring coh  " CM.coh ringProgs ext2 RINGweak)
+  (row "ring cohF " CM.coh ringFProgs ext2 RINGok)
+
+def wsbProgs : List (List Op) := .cons P.wsb0 (.cons P.wsb1 .nil)
+def wsbFProgs : List (List Op) := .cons P.wsb0f (.cons P.wsb1f .nil)
+
+def rowsWarm : List String := strs6
+  "== warm SB (primed L1: 0,0 is incoherence) =="
+  (row "warmSB sc  " CM.sc wsbProgs extHeads WARMsc)
+  (row "warmSB core" CM.core wsbProgs extHeads WARMincoh)
+  (row "warmSB pipe" CM.pipe wsbProgs extHeads WARMincoh)
+  (row "warmSB coh " CM.coh wsbProgs extHeads WARMcoh)
+  (row "warmSB cohF" CM.coh wsbFProgs extHeads WARMcohF)
+
+def fsProgs : List (List Op) := .cons P.fs0 (.cons P.fs1 .nil)
+def FSok : List (List Nat) := S1 (L1 1)
+def FSstale : List (List Nat) := S2 (L1 0) (L1 1)
+
+def rowsFS : List String := strs4
+  "== false sharing (x=1, y=2 in one 16-byte line) =="
+  (row "falseShare sc   " CM.sc fsProgs extH1 FSok)
+  (row "falseShare core " CM.core fsProgs extH1 FSok)
+  (row "falseShare coreL" CM.coreL fsProgs extH1 FSstale)
+
+def staleProgs : List (List Op) := .cons P.st0 (.cons P.st1 .nil)
+def staleFProgs : List (List Op) := .cons P.st0 (.cons P.st1f .nil)
+
+def rowsStale : List String := strs4
+  "== stale L1 (second read of x) =="
+  (row "stale sc  " CM.sc staleProgs ext2 STALEcoh)
+  (row "stale core" CM.core staleProgs ext2 STALEincoh)
+  (row "stale coh " CM.coh staleFProgs ext2 STALEcoh)
+
+def spinProgs : List (List Op) := .cons P.sp0 (.cons P.sp1 .nil)
+
+def rowsSpin : List String := strs4
+  "== spin on a DDR flag =="
+  (row "spin sc  " CM.sc spinProgs extLast SPINcoh)
+  (row "spin core" CM.core spinProgs extLast SPINincoh)
+  (row "spin coh " CM.coh spinProgs extLast SPINcoh)
+
+def LRok : List (List Nat) := S2 (L2 0 1) (L2 1 0)
+def LRlocal : List (List Nat) := S3 (L2 0 0) (L2 0 1) (L2 1 0)
+
+def rowsAtom : List String := strs4
+  "== LR/SC (0 success, 1 failure: one winner) =="
+  (let g := CM.lrsc .true;
+   "LR/SC global: " ++ CM.showSet g ++ (if CM.sameSet g LRok then " PASS" else " FAIL (want " ++ CM.showSet LRok ++ ")"))
+  (let l := CM.lrsc .false;
+   "LR/SC local : " ++ CM.showSet l ++ (if CM.sameSet l LRlocal then " PASS" else " FAIL (want " ++ CM.showSet LRlocal ++ ")"))
+  "== end =="
+
+def report : String := lines (rowsSB ++ rowsMP ++ rowsLB ++ rowsIR ++ rowsW ++ rowsRing
+  ++ rowsRingDDR ++ rowsWarm ++ rowsFS ++ rowsStale ++ rowsSpin ++ rowsAtom)
+
+#eval report
