@@ -99,6 +99,13 @@ evictions; the write-through runs report 0, as they must (their lines are clean)
 two independent checks — RTL against the flat reference, model against the flat
 reference, and RTL against the model's final memory — are what "validated" means here.
 
+**What is not claimed.** The kernel proof is about the **model** (`CM`), in Wiz's value
+semantics. The RTL is *validated*, not proved: every read and the final memory are
+checked by random differential testing against the model and a flat reference, and the
+Verilog is not proved equal to the RTL (the prior-art note's "verified RTL" caveat,
+`wiz-notes/prior-art/hardware-hdl.md` §3.11, applies). A full refinement proof of the
+cache — the piece the note lists as missing from the Doom machine — remains (§6).
+
 **Golem integration.** `Golem.golemCacheSim` is `GolemSim`'s slim machine, bus and
 arbiter with the cache and its line memory in place of `GBus.ramStep`. The program stores
 `0x12345678` at DDR[0], reads it back, stores `0x0abcdef1` at DDR word 2048 (line 512,
@@ -208,7 +215,10 @@ Fixtures:
   prefetch, write combining, a store buffer.
 * **A formal refinement of the RTL against the model**: the random differential check is
   not a proof; a per-state simulation relation, or a BFS over the reachable RTL states
-  for a small geometry, is the next step.
+  for a small geometry, is the next step. The prior-art note (`hardware-hdl.md` §3.11
+  item 7) estimates this at months and puts it after the memory laws; the model's
+  three-access kernel proof and four-access exhaustive check are the bounded step
+  before it.
 * **Cache-only P&R** with a pin-constrained wrapper, and a board image that uses this
   RTL instead of `Ddr3.Cache` (the interface is the same; the board flow's `Golem.step`
   calls `C.step` directly).
