@@ -1,0 +1,41 @@
+-- test: check
+import Rv.Golem.CacheSim
+import Rv.Asm
+import Rv.Oled
+import Text
+-- golem's simulation through the L1 data cache (`Golem.golemCacheSim`): a program
+-- stores a word in DDR, reads it back, stores a second word in the line that maps to
+-- the same index (evicting the first, writing it back in write-back mode), reads the
+-- first line again, and copies both reads to the on-chip RAM. The check reads the
+-- on-chip RAM words, the trap and the cache's counters.
+
+def GC.prog : List Nat := Asm.assemble (
+  A.lui 11 262144 ::          -- x11 = 0x40000000, the DDR
+  A.lui 12 262146 ::          -- x12 = 0x40002000 (DDR word 2048: line 512)
+  A.li 5 305419896 ::         -- 0x12345678
+  A.sw 5 0 11 ::              -- DDR[0] = 0x12345678
+  A.lw 6 0 11 ::              -- read it back
+  A.sw 6 256 0 ::             -- on-chip RAM word 64 = the first read
+  A.li 7 180150001 ::         -- 0x0abcdef1
+  A.sw 7 0 12 ::              -- line 512, index 0 — evicts line 0
+  A.lw 8 0 11 ::              -- read line 0 again (a refill after the eviction)
+  A.sw 8 260 0 ::             -- on-chip RAM word 65 = the second read
+  A.ebreak :: .nil)
+
+def GC.cfg : RgbCfg := RgbCfg.fast 0 1
+
+def GC.inputs : Nat → List (HwTy.El GSimIn.code)
+  | .zero => .nil
+  | .succ k => .cons (HwTy.unpack GSimIn.code 0) (GC.inputs k)
+
+def GC.report (cycles : Nat) : String :=
+  let ω c := Golem.golemCacheSimDbg GC.prog GC.cfg 1 .false .nil;
+  let out := CSimOut.unpack (RC.lastOut (HwTy.unpack CSimOut.code 0) (Circuit.run c (GC.inputs cycles)));
+  let ok := Bool.and (Nat.beq out.trap.toNat 2)
+    (Bool.and (Nat.beq out.ram64.toNat 305419896) (Nat.beq out.ram65.toNat 305419896));
+  "golem cache: trap " ++ Nat.repr out.trap.toNat ++ ", ram64 " ++ Nat.repr out.ram64.toNat
+    ++ ", ram65 " ++ Nat.repr out.ram65.toNat ++ ", hits " ++ Nat.repr out.hits.toNat
+    ++ ", misses " ++ Nat.repr out.misses.toNat ++ ", evictions " ++ Nat.repr out.evictions.toNat
+    ++ (if ok then " — PASS" else " — FAIL")
+
+#eval GC.report 200

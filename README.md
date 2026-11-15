@@ -19,6 +19,11 @@ src/Rv/DPipe.wiz     the pipelined core in the Doom machine, and its simple-DDR 
 src/Rv/Golem.wiz     golem, the SoC top: the core, DDR3, UART and OLED on one bus
 src/Rv/GolemSim.wiz  golem with a behavioural DDR, for the simulation test
 src/Rv/Golem/*.wiz   its memory map, bus/arbiter and boot ROM
+src/Rv/Cache.wiz     the L1 data-cache model: valid/dirty/tag lines, write-back/write-through
+src/Rv/CacheCheck.wiz its exhaustive and random checks
+src/Rv/CacheRtl.wiz  the cache RTL, its line memory and random differential check
+src/Rv/Golem/CacheSim.wiz golem's simulation with the cache in the bus
+CACHE.md             the cache: model, checks, assumptions, area/timing, what remains
 app/rv.wiz           the flow driver: Verilog, yosys, nextpnr
 tests/*.wiz          grail tests
 ```
@@ -200,6 +205,31 @@ step, not run here, is `openFPGALoader -b arty_a7_35t build/a35t/golem.bit`, the
 UART at 1 Mbaud: the calibration line, then `rvload PORT prog.bin` (or
 `rvload PORT doom.bin doom1.wad`). [DESIGN.md](DESIGN.md) has the pin table and the
 full flow.
+
+## The L1 data cache
+
+`src/Rv/Cache.wiz` is a model of a direct-mapped L1 data cache: lines with valid, dirty
+and tag, 16-byte lines, the core's 32-bit request/answer, and both policies (write-back
+and write-through, with or without write allocate). `CACHE.md` has the semantics, the
+checks, the assumptions (no coherence yet) and what remains.
+
+`src/Rv/CacheRtl.wiz` is the RTL at the production geometry (512 lines, 8 KB); it is
+checked against the model and a flat reference memory, 400 cycles for each policy, with
+dirty evictions in the write-back runs. `src/Rv/Golem/CacheSim.wiz` puts it between the
+golem bus and a behavioural line memory; `tests/golem_cache.wiz` runs a store, a read,
+an eviction and a second read through the core.
+
+```sh
+grail test cache          # tests/cache.wiz and tests/golem_cache.wiz
+scripts/cache-proofs.sh   # a kernel-checked three-access exhaustive claim
+scripts/cache-area.sh all # cache Verilog, yosys area, golem P&R on a35t and a100t
+```
+
+The cache alone is 654 LUTs, 195 FFs and 2 RAMB36 + 1 RAMB18 (write-back); the full
+golem SoC with the cache closes at 107.3 MHz on the A7-35T and 108.3 MHz on the
+A7-100T. The cache is about 13 % of the SoC's LUTs; the 100T leaves room for a second
+hart. The board image still uses wiz-ddr3's write-back cache; this work is the model,
+the validated RTL and the numbers.
 
 ## Doom
 

@@ -1,0 +1,287 @@
+import Prelude
+import WordArray
+import Text
+import Deriving
+-- A model of a direct-mapped L1 data cache and its interaction with the core's bus:
+-- lines of `2^wb` words of `dw` bits, `2^ib` lines, addresses of `aw` bits (word
+-- addresses, so the model is independent of the byte lanes of the RTL).
+--
+-- A line is `valid`, `dirty`, `tag`, and its words. The model has the two policies the
+-- task asks for:
+--
+--   write back (`wbMode = true`)   a store writes the line and sets dirty; a miss to a
+--                                  dirty line writes the victim back first
+--   write through (`wbMode = false`) a store writes the line (clean) and the word to
+--                                  memory; a line is never dirty
+--
+-- and `alloc`: a store miss allocates a line (fill, then merge) or writes the word
+-- through without allocating. Reads always allocate.
+--
+-- `CM.access` is one complete access: it returns the new cache and memory, whether it
+-- was a hit, the word read (for a load), and the bus transactions it performed (a
+-- victim write-back, a line fill, a write-through word). The cache's memory is the
+-- backing store; `CM.flat` is that store with every dirty line written back, which is
+-- the architectural memory the core must see. `CM.run` applies a sequence of accesses,
+-- and `CM.runRef` the same sequence to a flat memory; the tests compare them.
+--
+-- Assumptions: one master, no coherence (another master's stores are not observed until
+-- this cache's line is evicted or invalidated), no atomics, no MMIO, no speculation, no
+-- write-combining, word-addressable memory. The RTL's byte strobes are `strb` (one bit
+-- per byte of a word). Cache.wiz's model is used by CacheCheck.wiz (the exhaustive and
+-- random checks) and CacheRtl.wiz (the RTL's model reference).
+
+structure CM.Cfg where
+  aw : Nat      -- word address bits (2^aw words of memory)
+  ib : Nat      -- index bits (2^ib lines)
+  wb : Nat      -- word offset bits (2^wb words a line)
+  dw : Nat      -- data bits a word
+  wbMode : Bool -- true: write back; false: write through
+  alloc : Bool  -- a store miss allocates (fills) a line
+  deriving Repr
+
+structure CM.Line where
+  valid : Bool
+  dirty : Bool
+  tag : Nat
+  words : List Nat
+  deriving Repr
+
+structure CM.St where
+  lines : List CM.Line
+  mem : List Nat
+  deriving Repr
+
+structure CM.Txn where
+  we : Bool        -- write (a victim line or a write-through word), else a fill read
+  addr : Nat       -- the line's base word address, or the word address of a word write
+  data : List Nat  -- the line's words (a victim), the word (a write-through), empty (a fill)
+  deriving Repr
+
+structure CM.Op where
+  we : Bool
+  addr : Nat
+  data : Nat
+  strb : Nat
+  deriving Repr
+
+structure CM.Res where
+  st : CM.St
+  hit : Bool
+  rdata : Nat
+  txns : List CM.Txn
+  evicted : Bool   -- a valid dirty victim was written back
+  deriving Repr
+
+------------------------------------------------------------------------------------
+-- Small helpers
+
+def CM.pow2 (n : Nat) : Nat := Nat.pow 2 n
+def CM.linesOf (c : CM.Cfg) : Nat := CM.pow2 c.ib
+def CM.wordsOf (c : CM.Cfg) : Nat := CM.pow2 c.wb
+def CM.memOf (c : CM.Cfg) : Nat := CM.pow2 c.aw
+def CM.bytesOf (c : CM.Cfg) : Nat :=
+  match Nat.lt c.dw 8 with
+  | .true => 1
+  | .false => Nat.div c.dw 8
+def CM.bitsOfByte (c : CM.Cfg) : Nat :=
+  match Nat.lt c.dw 8 with
+  | .true => c.dw
+  | .false => 8
+
+def CM.bitAt (x j : Nat) : Nat := Nat.mod (Nat.div x (CM.pow2 j)) 2
+def CM.byteAt (c : CM.Cfg) (x j : Nat) : Nat :=
+  Nat.mod (Nat.div x (CM.pow2 (Nat.mul (CM.bitsOfByte c) j))) (CM.pow2 (CM.bitsOfByte c))
+def CM.setByte (c : CM.Cfg) (x j v : Nat) : Nat :=
+  let sh := Nat.mul (CM.bitsOfByte c) j;
+  Nat.add (Nat.sub x (Nat.mul (CM.byteAt c x j) (CM.pow2 sh))) (Nat.mul v (CM.pow2 sh))
+
+def CM.zeros : Nat → List Nat
+  | .zero => .nil
+  | .succ k => .cons 0 (CM.zeros k)
+
+def CM.replicate {A : Type} : Nat → A → List A
+  | .zero, _ => .nil
+  | .succ k, x => .cons x (CM.replicate k x)
+
+def CM.natsEq : List Nat → List Nat → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => Bool.and (Nat.beq a b) (CM.natsEq as bs)
+  | _, _ => .false
+
+-- byte j of `data` replaces byte j of `old` where bit j of `strb` is set
+def CM.mergeGo (c : CM.Cfg) : Nat → Nat → Nat → Nat → Nat → Nat
+  | .zero, _, old, _, _ => old
+  | .succ k, j, old, data, strb =>
+      let old' := match Nat.beq (CM.bitAt strb j) 1 with
+        | .true => CM.setByte c old j (CM.byteAt c data j)
+        | .false => old;
+      CM.mergeGo c k (Nat.succ j) old' data strb
+def CM.merge (c : CM.Cfg) (old new strb : Nat) : Nat :=
+  CM.mergeGo c (CM.bytesOf c) 0 old new strb
+
+def CM.zline (c : CM.Cfg) : CM.Line := CM.Line.mk .false .false 0 (CM.zeros (CM.wordsOf c))
+
+------------------------------------------------------------------------------------
+-- Addresses
+
+def CM.idx (c : CM.Cfg) (a : Nat) : Nat :=
+  Nat.mod (Nat.div a (CM.wordsOf c)) (CM.linesOf c)
+def CM.tag (c : CM.Cfg) (a : Nat) : Nat :=
+  Nat.div (Nat.div a (CM.wordsOf c)) (CM.linesOf c)
+def CM.off (c : CM.Cfg) (a : Nat) : Nat := Nat.mod a (CM.wordsOf c)
+def CM.lineOf (c : CM.Cfg) (idx tag : Nat) : Nat :=
+  Nat.add (Nat.mul tag (CM.linesOf c)) idx
+def CM.base (c : CM.Cfg) (line : Nat) : Nat := Nat.mul line (CM.wordsOf c)
+
+def CM.readLineGo (mem : List Nat) : Nat → Nat → List Nat
+  | _, .zero => .nil
+  | i, .succ k => .cons (List.getD mem i 0) (CM.readLineGo mem (Nat.succ i) k)
+def CM.readLine (c : CM.Cfg) (mem : List Nat) (line : Nat) : List Nat :=
+  CM.readLineGo mem (CM.base c line) (CM.wordsOf c)
+
+def CM.writeLineGo (c : CM.Cfg) : Nat → List Nat → List Nat → List Nat
+  | _, mem, .nil => mem
+  | i, mem, .cons w ws => CM.writeLineGo c (Nat.succ i) (List.setAt mem i w) ws
+def CM.writeLine (c : CM.Cfg) (mem : List Nat) (line : Nat) (ws : List Nat) : List Nat :=
+  CM.writeLineGo c (CM.base c line) mem ws
+
+------------------------------------------------------------------------------------
+-- The initial state
+
+def CM.emptyMem (c : CM.Cfg) : List Nat := CM.zeros (CM.memOf c)
+def CM.empty (c : CM.Cfg) : CM.St :=
+  CM.St.mk (CM.replicate (CM.linesOf c) (CM.zline c)) (CM.emptyMem c)
+
+def CM.flushLines (c : CM.Cfg) : List Nat → Nat → List CM.Line → List Nat
+  | mem, _, .nil => mem
+  | mem, ix, .cons l ls =>
+      let line := CM.lineOf c ix l.tag;
+      let mem' : List Nat :=
+        match l.valid with
+        | .true => match l.dirty with
+          | .true => CM.writeLine c mem line l.words
+          | .false => mem
+        | .false => mem;
+      CM.flushLines c mem' (Nat.succ ix) ls
+def CM.flat (c : CM.Cfg) (s : CM.St) : List Nat :=
+  CM.flushLines c s.mem 0 s.lines
+
+def CM.allClean : List CM.Line → Bool
+  | .nil => .true
+  | .cons l ls => Bool.and (Bool.not l.dirty) (CM.allClean ls)
+
+------------------------------------------------------------------------------------
+-- One access
+
+def CM.wbVictim (c : CM.Cfg) (s : CM.St) (ix : Nat) (l : CM.Line) : List Nat × List CM.Txn :=
+  match l.valid, l.dirty with
+  | .true, .true =>
+      let line := CM.lineOf c ix l.tag;
+      (CM.writeLine c s.mem line l.words, .cons (CM.Txn.mk .true (CM.base c line) l.words) .nil)
+  | _, _ => (s.mem, .nil)
+
+def CM.access (c : CM.Cfg) (s : CM.St) (we : Bool) (a data strb : Nat) : CM.Res :=
+  let ix := CM.idx c a;
+  let tg := CM.tag c a;
+  let off := CM.off c a;
+  let l := List.getD s.lines ix (CM.zline c);
+  let hit := Bool.and l.valid (Nat.beq l.tag tg);
+  match hit with
+  | .true =>
+      let w := List.getD l.words off 0;
+      match we with
+      | .true =>
+          let nw := CM.merge c w data strb;
+          let dirty := match c.wbMode with | .true => .true | .false => l.dirty;
+          let l' := CM.Line.mk l.valid dirty l.tag (List.setAt l.words off nw);
+          let lines' := List.setAt s.lines ix l';
+          match c.wbMode with
+          | .true => CM.Res.mk (CM.St.mk lines' s.mem) .true nw .nil .false
+          | .false =>
+              let mem' := List.setAt s.mem a nw;
+              CM.Res.mk (CM.St.mk lines' mem') .true nw (.cons (CM.Txn.mk .true a (.cons nw .nil)) .nil) .false
+      | .false => CM.Res.mk s .true w .nil .false
+  | .false =>
+      match we with
+      | .true =>
+          match c.alloc with
+          | .false =>
+              -- no allocation: the word goes to memory; the resident line is not touched
+              let nw := CM.merge c (List.getD s.mem a 0) data strb;
+              let mem' := List.setAt s.mem a nw;
+              CM.Res.mk (CM.St.mk s.lines mem') .false 0
+                (.cons (CM.Txn.mk .true a (.cons nw .nil)) .nil) .false
+          | .true =>
+              let vb := CM.wbVictim c s ix l;
+              let line := CM.lineOf c ix tg;
+              let nl := CM.Line.mk .true .false tg (CM.readLine c vb.1 line);
+              let nw := CM.merge c (List.getD nl.words off 0) data strb;
+              let dirty : Bool := c.wbMode;
+              let nl' := CM.Line.mk .true dirty tg (List.setAt nl.words off nw);
+              let mem' := match c.wbMode with
+                | .true => vb.1
+                | .false => List.setAt vb.1 a nw;
+              let fillTxn := CM.Txn.mk .false (CM.base c line) .nil;
+              let wtTxn := CM.Txn.mk .true a (.cons nw .nil);
+              let txns := List.append vb.2 (.cons fillTxn (match c.wbMode with
+                | .true => .nil
+                | .false => .cons wtTxn .nil));
+              CM.Res.mk (CM.St.mk (List.setAt s.lines ix nl') mem') .false nw txns
+                (Bool.and l.valid l.dirty)
+      | .false =>
+          let vb := CM.wbVictim c s ix l;
+          let line := CM.lineOf c ix tg;
+          let nl := CM.Line.mk .true .false tg (CM.readLine c vb.1 line);
+          CM.Res.mk (CM.St.mk (List.setAt s.lines ix nl) vb.1) .false (List.getD nl.words off 0)
+            (List.append vb.2 (.cons (CM.Txn.mk .false (CM.base c line) .nil) .nil))
+            (Bool.and l.valid l.dirty)
+
+------------------------------------------------------------------------------------
+-- A sequence of accesses, against the same sequence on a flat memory
+
+structure CM.Run where
+  st : CM.St
+  ref : List Nat
+  reads : List Nat
+  ok : Bool
+  hits : Nat
+  misses : Nat
+  evictions : Nat
+  deriving Repr
+
+def CM.refAccess (c : CM.Cfg) (ref : List Nat) (op : CM.Op) : List Nat × Nat :=
+  match op.we with
+  | .true => (List.setAt ref op.addr (CM.merge c (List.getD ref op.addr 0) op.data op.strb), 0)
+  | .false => (ref, List.getD ref op.addr 0)
+
+def CM.runOps (c : CM.Cfg) : CM.Run → List CM.Op → CM.Run
+  | r, .nil => r
+  | r, .cons op ops =>
+      let a := CM.access c r.st op.we op.addr op.data op.strb;
+      let rf := CM.refAccess c r.ref op;
+      let sameMem := CM.natsEq (CM.flat c a.st) rf.1;
+      let sameRead : Bool := match op.we with
+        | .true => .true
+        | .false => Nat.beq a.rdata rf.2;
+      CM.runOps c
+        (CM.Run.mk a.st rf.1 (List.append r.reads (.cons a.rdata .nil))
+          (Bool.and r.ok (Bool.and sameMem sameRead))
+          (match a.hit with | .true => Nat.succ r.hits | .false => r.hits)
+          (match a.hit with | .true => r.misses | .false => Nat.succ r.misses)
+          (match a.evicted with | .true => Nat.succ r.evictions | .false => r.evictions))
+        ops
+
+def CM.run (c : CM.Cfg) (ops : List CM.Op) : CM.Run :=
+  CM.runOps c (CM.Run.mk (CM.empty c) (CM.emptyMem c) .nil .true 0 0 0) ops
+
+-- the same final memory, starting from a flat memory
+def CM.runRefGo (c : CM.Cfg) : List Nat → List CM.Op → List Nat
+  | mem, .nil => mem
+  | mem, .cons op ops =>
+      let m : List Nat := match op.we with
+        | .true => List.setAt mem op.addr (CM.merge c (List.getD mem op.addr 0) op.data op.strb)
+        | .false => mem;
+      CM.runRefGo c m ops
+
+def CM.runRef (c : CM.Cfg) (mem : List Nat) (ops : List CM.Op) : List Nat :=
+  CM.runRefGo c mem ops

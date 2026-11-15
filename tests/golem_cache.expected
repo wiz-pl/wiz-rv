@@ -1,0 +1,1 @@
+tests/golem_cache.wiz:41:1: info: "golem cache: trap 2, ram64 305419896, ram65 305419896, hits 6, misses 2, evictions 1 — PASS"

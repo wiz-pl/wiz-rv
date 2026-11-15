@@ -1,0 +1,44 @@
+import Rv.CacheRtl
+import Sys
+import Text
+-- The cache's area and timing flow: `cache gen` writes the Verilog for the write-back
+-- and write-through variants (and the no-allocate write-back one) and the clock
+-- constraint. `scripts/cache-area.sh` runs yosys and nextpnr-xilinx on them (the tools
+-- are in the Nix store on this machine, as for golem).
+--
+--   gen     build/cache_wb.v, build/cache_wt.v, build/cache_wb_na.v, build/cache.xdc
+--
+-- The designs are the cache alone (`RC.circuit`): the core's 32-bit request/answer and
+-- the controller's line port, with the clock from `Circuit.netlist`.
+
+def say (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+def ensureDir (p : String) : EIO Unit := do
+  d ← EIO.lift (FS.isDir p);
+  match d with
+  | .true => EIO.pure ()
+  | .false => FS.createDir p
+
+def genOne (name : String) (wb alloc : Bool) : EIO Unit := do
+  let n := Circuit.netlist name (RC.circuit wb alloc);
+  say (name ++ ": " ++ Nat.repr (Netlist.size n) ++ " netlist nodes, "
+    ++ Nat.repr (List.length n.regs) ++ " registers, " ++ Nat.repr (List.length n.mems) ++ " memories");
+  (match n.errors with
+    | .nil => EIO.pure ()
+    | es => EIO.fail ("netlist errors: " ++ Hdl.concat es));
+  FS.writeFile ("build/" ++ name ++ ".v") (Verilog.emit n)
+
+def xdc : String := "create_clock -period 10.000 -name clk [get_ports clk]\n"
+
+def run (args : List String) : EIO Unit :=
+  match args with
+  | .cons cmd _ => match Hdl.strEq cmd "gen" with
+    | .true => EIO.bind (ensureDir "build") (fun _ =>
+        EIO.bind (genOne "cache_wb" .true .true) (fun _ =>
+        EIO.bind (genOne "cache_wt" .false .true) (fun _ =>
+        EIO.bind (genOne "cache_wb_na" .true .false) (fun _ =>
+        FS.writeFile "build/cache.xdc" xdc))))
+    | .false => EIO.fail "usage: cache gen"
+  | .nil => EIO.fail "usage: cache gen"
+
+def main : IO Unit := EIO.toIO (EIO.bind (EIO.lift IO.args) run)

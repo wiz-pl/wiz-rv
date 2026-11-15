@@ -1,0 +1,99 @@
+import Rv.GolemSim
+import Rv.CacheRtl
+-- golem's simulation with the L1 data cache in it: the slim machine (`Mini.machine`),
+-- the bus and its arbiter (`GBus`), then `Rv.CacheRtl`'s cache and a behavioural line
+-- memory (`RC.Ram`) in place of the DDR cache, controller and PHY. It is `GolemSim`'s
+-- `golemSim` with `GBus.ramStep` replaced by the cache, so a test can run the core
+-- through the cache: a store goes to the cache (write-back or write-through), a load
+-- hits the line it just wrote, and a later line that maps to the same index evicts it
+-- (writing it back first in write-back mode). The cache's backside is the controller's
+-- native 128-bit line port.
+--
+-- The test `tests/golem_cache.wiz` runs a small program through this circuit and checks
+-- the words it wrote to the on-chip RAM: DDR[0] = 0x12345678 read back after a store
+-- that evicted its line, and DDR[16] = 0x0abcdef1 in the evicting line.
+
+structure CSimSt (fl : Nat) (r : HwTy → Type) where
+  bus : BusA r
+  arb : GBus.Arb r
+  cpu : MSt fl r
+  cache : RC.St r
+  ram : RC.Ram r
+  deriving Bundle
+
+structure CSimOut (r : HwTy → Type) where
+  uart_tx : r W1
+  led : r B4
+  ja : r W8
+  jb : r W8
+  ld_ready : r W1
+  ld_rvalid : r W1
+  ld_rdata : r B32
+  ram64 : r B32     -- the on-chip RAM's word 64 (the program's first DDR read)
+  ram65 : r B32     -- and word 65 (the read after the eviction)
+  trap : r B3
+  hits : r B32
+  misses : r B32
+  evictions : r B32
+  deriving Bundle
+
+def Golem.cacheStepOut (cfg : RgbCfg) (n : Nat) (wb alloc : Bool) {r : HwTy → Type} [Hw r]
+    (s : CSimSt cfg.frameLog r) (x : GSimIn r) :
+    r (HwTy.prod (CSimSt.code cfg.frameLog) CSimOut.code) :=
+  let ω i := x;
+  let ω bs := s.bus;
+  let m0 := Mini.step cfg n s.cpu (MIn.mk i.uart_rx lo lo (Hw.lit 32 0) (Hw.lit 2 1) (Hw.lit 4 0));
+  let ω o0 := MOut.unpack (Hw.snd m0);
+  let r0 := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb (GBus.noResp (r := r));
+  let ω q := CacheReq.unpack (Hw.fst (Hw.snd r0));
+  let host := CacheReq.mk i.ld_valid (Hw.slice 0 28 i.ld_addr) i.ld_we i.ld_wdata i.ld_wstrb;
+  let ar0 := GBus.arb s.arb q host (GBus.noResp (r := r));
+  let ω sel := CacheReq.unpack (Hw.fst (Hw.snd ar0));
+  let cq := CReq.mk sel.valid sel.addr sel.we sel.wdata sel.wstrb;
+  let po0 := RC.ramOut s.ram;
+  let cr := RC.step wb alloc s.cache cq po0;
+  let ω cresp := CResp.unpack (Hw.fst (Hw.snd cr));
+  let dr := RC.ramStep s.ram (PortIn.unpack (Hw.snd (Hw.snd cr)));
+  let ar := GBus.arb s.arb q host (CacheResp.mk cresp.ready cresp.rvalid cresp.rdata);
+  let ω coreResp := CacheResp.unpack (Hw.fst (Hw.snd (Hw.snd ar)));
+  let ω hostResp := CacheResp.unpack (Hw.snd (Hw.snd (Hw.snd ar)));
+  let br := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb coreResp;
+  let ω toCore := GBus.Resp.unpack (Hw.snd (Hw.snd br));
+  let m1 := Mini.step cfg n s.cpu (MIn.mk i.uart_rx toCore.ready toCore.rvalid toCore.rdata (Hw.lit 2 1) (Hw.lit 4 0));
+  let ω o := MOut.unpack (Hw.snd m1);
+  let ω ms := MSt.unpack cfg.frameLog (Hw.fst m1);
+  let ω cs := RC.St.unpack (Hw.fst cr);
+  let byteAt := fun (m : r (HwTy.mem 12 8)) (k : Nat) => Hw.memRead m (Hw.lit 12 k);
+  let wordAt := fun (k : Nat) =>
+    Hw.cat (byteAt ms.cpu.m3 k) (Hw.cat (byteAt ms.cpu.m2 k) (Hw.cat (byteAt ms.cpu.m1 k) (byteAt ms.cpu.m0 k)));
+  Hw.pair
+    (CSimSt.pack cfg.frameLog (CSimSt.mk (BusA.unpack (Hw.fst br)) (GBus.Arb.unpack (Hw.fst ar))
+      (MSt.unpack cfg.frameLog (Hw.fst m1)) (RC.St.unpack (Hw.fst cr)) (RC.Ram.unpack (Hw.fst dr))))
+    (CSimOut.pack (CSimOut.mk o.uart_tx o.led o.ja o.jb hostResp.ready hostResp.rvalid hostResp.rdata
+      (wordAt 64) (wordAt 65) ms.cpu.trap cs.hits cs.misses cs.evictions))
+
+def Golem.cacheStep (cfg : RgbCfg) (n : Nat) (wb alloc : Bool) {r : HwTy → Type} [Hw r]
+    (s : CSimSt cfg.frameLog r) (x : GSimIn r) :
+    r (HwTy.prod (CSimSt.code cfg.frameLog) GSimOut.code) :=
+  let r0 := Golem.cacheStepOut cfg n wb alloc s x;
+  let ω co := CSimOut.unpack (Hw.snd r0);
+  Hw.pair (Hw.fst r0)
+    (GSimOut.pack (GSimOut.mk co.uart_tx co.led co.ja co.jb co.ld_ready co.ld_rvalid co.ld_rdata))
+
+def Golem.cacheSimInit (prog : List Nat) (cfg : RgbCfg) (startPix : Bool) (pixels : List Nat) :
+    HwTy.El (CSimSt.code cfg.frameLog) :=
+  Bundle.toEl (CSimSt.bundle cfg.frameLog)
+    (CSimSt.mk BusA.init GBus.arbInit (MSt.initWith cfg prog startPix pixels)
+      (RC.St.unpack RC.init) (RC.Ram.unpack RC.ramInit))
+
+def Golem.golemCacheSim (prog : List Nat) (cfg : RgbCfg) (n : Nat) (startPix : Bool) (pixels : List Nat) :
+    Circuit GSimIn.code GSimOut.code :=
+  Circuit.mk (CSimSt.code cfg.frameLog)
+    (Golem.cacheSimInit prog cfg startPix pixels)
+    (fun s x => Golem.cacheStep cfg n .true .true (CSimSt.unpack cfg.frameLog s) (GSimIn.unpack x))
+
+def Golem.golemCacheSimDbg (prog : List Nat) (cfg : RgbCfg) (n : Nat) (startPix : Bool) (pixels : List Nat) :
+    Circuit GSimIn.code CSimOut.code :=
+  Circuit.mk (CSimSt.code cfg.frameLog)
+    (Golem.cacheSimInit prog cfg startPix pixels)
+    (fun s x => Golem.cacheStepOut cfg n .true .true (CSimSt.unpack cfg.frameLog s) (GSimIn.unpack x))

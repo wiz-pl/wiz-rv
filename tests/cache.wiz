@@ -1,0 +1,64 @@
+-- test: check
+import Rv.Cache
+import Rv.CacheCheck
+import Rv.CacheRtl
+import Text
+-- The cache model and its RTL, checked three ways:
+--
+--   * `CM.exhaustive`: every sequence of four accesses over the alphabet of
+--     CacheCheck.wiz (both tags of both indices, a write and a read of each, byte
+--     strobes), for write-back/write-through and allocate/no-allocate. Each read is
+--     compared with a flat memory and each final memory with the reference; a
+--     write-through line must be clean. (The kernel proof of a shorter exhaustive check
+--     is proofs/CacheProof.wiz.)
+--   * `CM.random`: 3000 generated accesses (the LFSR the RTL uses) for the same four
+--     policies, against the flat memory.
+--   * `RC.check`: the RTL (`Rv.CacheRtl`) with its behavioural line memory against the
+--     model and a flat reference memory, for 400 cycles each policy; the final memory is
+--     compared word for word with the model's `CM.flat`, and every read with the
+--     reference. Write-back runs report the dirty evictions they saw.
+
+structure Cache.R where
+  ops : Nat
+  bad : Nat
+  evictions : Nat
+  pass : Bool
+
+def Cache.wordOf (ref : HwTy.El (HwTy.mem 12 32)) (i : Nat) : Nat :=
+  (Hw.memRead (r := HwTy.El) ref (BitVec.ofNat 12 i)).toNat
+
+def Cache.sumR (ref : HwTy.El (HwTy.mem 12 32)) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc => Cache.sumR ref k (Nat.add (Nat.mul acc 33) (Cache.wordOf ref k))
+
+def Cache.sumM (flat : List Nat) : Nat → Nat → Nat
+  | .zero, acc => acc
+  | .succ k, acc => Cache.sumM flat k (Nat.add (Nat.mul acc 33) (List.getD flat k 0))
+
+def Cache.rtl (wb alloc : Bool) (seed : Nat) : Cache.R :=
+  let o := RC.TbOut.unpack (RC.Tb.run wb alloc seed 400);
+  let cfg : CM.Cfg := CM.Cfg.mk 12 9 2 32 wb alloc;
+  let m : CM.Run := CM.run cfg (CM.genOps cfg o.ops.toNat seed);
+  let flat : List Nat := CM.flat cfg m.st;
+  Cache.R.mk o.ops.toNat o.bad.toNat o.evictions.toNat
+    (Bool.and (Nat.beq o.bad.toNat 0)
+      (Bool.and m.ok (Nat.beq (Cache.sumR o.ref 4096 0) (Cache.sumM flat 4096 0))))
+
+def Cache.showR (name : String) (r : Cache.R) : String :=
+  name ++ ": " ++ Nat.repr r.ops ++ " ops, " ++ Nat.repr r.evictions ++ " evictions — "
+    ++ (if r.pass then "PASS" else "FAIL")
+
+def Cache.report : String :=
+  let ex := CM.exhaustive;
+  let rWB := Cache.rtl .true .true 1;
+  let rWBn := Cache.rtl .true .false 2;
+  let rWT := Cache.rtl .false .true 3;
+  let rWTn := Cache.rtl .false .false 4;
+  "cache model: exhaustive 4-access sequences — " ++ (if ex then "PASS" else "FAIL")
+    ++ "; random 1200 accesses — " ++ (if CM.randomAll then "PASS" else "FAIL")
+    ++ "; RTL " ++ Cache.showR "write-back, allocate" rWB
+    ++ "; RTL " ++ Cache.showR "write-back, no-allocate" rWBn
+    ++ "; RTL " ++ Cache.showR "write-through, allocate" rWT
+    ++ "; RTL " ++ Cache.showR "write-through, no-allocate" rWTn
+
+#eval Cache.report

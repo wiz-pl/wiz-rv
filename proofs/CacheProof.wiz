@@ -1,0 +1,40 @@
+import Rv.Cache
+import Rv.CacheCheck
+-- Kernel-checked cache properties: every sequence of three accesses over
+-- CacheCheck.wiz's alphabet, for all four policies (write-back/write-through,
+-- allocate/no-allocate). A sequence of three is enough for the interesting cases: a
+-- store, a store to the other tag of the same index (a dirty eviction and write-back),
+-- then a read of the first address (a miss and a fill, or a hit if the line survived);
+-- reads equal the flat memory at every step and the final memory is the reference's.
+-- `CM.seqOk` also requires a write-through line to be clean and hit + miss to count
+-- every access.
+--
+-- The four-access version is `CM.exhaustive` in CacheCheck.wiz, run by tests/cache.wiz
+-- (evaluation, not a kernel proof: about half a minute). The proof here is what
+-- `scripts/cache-proofs.sh` checks; the reduction is a few seconds.
+
+def CacheP.cfgWB : CM.Cfg := CM.Cfg.mk 4 1 2 32 .true .true
+def CacheP.cfgWBn : CM.Cfg := CM.Cfg.mk 4 1 2 32 .true .false
+def CacheP.cfgWT : CM.Cfg := CM.Cfg.mk 4 1 2 32 .false .true
+def CacheP.cfgWTn : CM.Cfg := CM.Cfg.mk 4 1 2 32 .false .false
+
+def CacheP.all3 : Bool :=
+  Bool.and (CM.allSeqs CacheP.cfgWB CM.alphabet 3)
+  (Bool.and (CM.allSeqs CacheP.cfgWBn CM.alphabet 3)
+  (Bool.and (CM.allSeqs CacheP.cfgWT CM.alphabet 3)
+    (CM.allSeqs CacheP.cfgWTn CM.alphabet 3)))
+
+def CacheP.all3_ok : CacheP.all3 = .true := rfl
+
+-- A concrete read-after-write and eviction fixture: store 0, store 8 (same index,
+-- other tag; evicts and writes back line 0), read 0 (a miss that evicts the dirty line
+-- 8 and fills line 0). The read is the first store's merged word.
+def CacheP.ops : List CM.Op :=
+  .cons (CM.opW 0) (.cons (CM.opW 8) (.cons (CM.opR 0) .nil))
+def CacheP.rawRun : CM.Run := CM.run CacheP.cfgWB CacheP.ops
+def CacheP.raw_ok : Bool :=
+  Bool.and CacheP.rawRun.ok
+    (Bool.and (Nat.beq (List.length CacheP.rawRun.reads) 3)
+      (Bool.and (Nat.beq CacheP.rawRun.evictions 2)
+        (Nat.beq (List.getD CacheP.rawRun.reads 2 0) (Nat.add 2863311530 0))))
+def CacheP.raw_ok_true : CacheP.raw_ok = .true := rfl
