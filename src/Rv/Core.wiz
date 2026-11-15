@@ -105,6 +105,7 @@ structure CoreSt (ab wb : Nat) (r : HwTy → Type) where
   rbuf : r B128
   rline : r B32
   bnew : r W1     -- the first cycle of a store's bus phase (the L1 is updated then)
+  csr : r B32     -- mscratch (0x340); the only CSR this machine implements
   deriving Bundle
 
 -- what the core shows: the trap code (0 while running), and a byte written to the
@@ -200,6 +201,8 @@ structure Dec (r : HwTy → Type) where
   md : r W1       -- M: OP with funct7 = 1
   ecall : r W1
   ebreak : r W1
+  csr : r W1      -- a CSR instruction on mscratch (Zicsr)
+  csru : r W1     -- its immediate form (CSRRWI, CSRRSI, CSRRCI)
   legal : r W1
   immI : r B32
   immS : r B32
@@ -230,6 +233,13 @@ def decode {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (w : r B32) : Dec r
   let fence := isK opc Op.fence;
   let ecall := isK w 115;
   let ebreak := isK w 1048691;
+  -- Zicsr: SYSTEM with mscratch and a CSR funct3.  Any other CSR number, and funct3 0
+  -- or 4, stay illegal (the privileged instructions this machine does not have).
+  let csrNo := isK (Hw.slice 20 12 w : r B12) 832;
+  let csrF3 := Hw.or (Hw.or (isK f3 1) (isK f3 2)) (Hw.or (isK f3 3)
+    (Hw.or (isK f3 5) (Hw.or (isK f3 6) (isK f3 7))));
+  let csr := Hw.and (isK opc Op.system) (Hw.and csrNo (Hw.and csrF3 (Hw.and (regOk ab rd) (regOk ab r1))));
+  let csru := Hw.or (isK f3 5) (Hw.or (isK f3 6) (isK f3 7));
   let okd := regOk ab rd;
   let ok1 := regOk ab r1;
   let ok2 := regOk ab r2;
@@ -244,7 +254,7 @@ def decode {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (w : r B32) : Dec r
       (Hw.or (Hw.or (Hw.and opimm (Hw.and okd (Hw.and ok1
             (Hw.mux (isK f3 1) f7z (Hw.mux (isK f3 5) (Hw.or f7z f7a) (Hw.lit 1 1))))))
           (Hw.and op (Hw.and (Hw.and okd (Hw.and ok1 ok2)) (Hw.or f7z (Hw.and f7a f30)))))
-        (Hw.or (Hw.or fence (Hw.or ecall ebreak)) (Hw.and md (Hw.and okd (Hw.and ok1 ok2))))));
+        (Hw.or (Hw.or fence (Hw.or ecall (Hw.or ebreak csr))) (Hw.and md (Hw.and okd (Hw.and ok1 ok2))))));
   let immI : r B32 := Hw.cat (rep 20 sgn) (Hw.slice 20 12 w : r B12);
   let immS : r B32 := Hw.cat (rep 20 sgn) (Hw.cat (Hw.slice 25 7 w : r B7) (Hw.slice 7 5 w : r B5));
   let immB : r B32 := Hw.cat (rep 20 sgn) (Hw.cat (bitOf 7 w) (Hw.cat (Hw.slice 25 6 w : r (HwTy.bits 6))
@@ -252,7 +262,7 @@ def decode {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (w : r B32) : Dec r
   let immU : r B32 := Hw.cat (Hw.slice 12 20 w : r B20) (Hw.lit 12 0);
   let immJ : r B32 := Hw.cat (rep 12 sgn) (Hw.cat (Hw.slice 12 8 w : r W8) (Hw.cat (bitOf 20 w)
       (Hw.cat (Hw.slice 21 10 w : r (HwTy.bits 10)) (Hw.lit 1 0))));
-  Dec.mk rd f3 r1 r2 (bitOf 30 w) lui auipc jal jalr branch load store opimm op md ecall ebreak legal
+  Dec.mk rd f3 r1 r2 (bitOf 30 w) lui auipc jal jalr branch load store opimm op md ecall ebreak csr csru legal
     immI immS immB immU immJ
 
 ------------------------------------------------------------------------------------
@@ -301,6 +311,12 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
   let eq := Hw.eq a b;
   let taken := Hw.xor (Hw.mux (bitOf 2 d.f3) (Hw.mux (bitOf 1 d.f3) ult slt) eq) (bitOf 0 d.f3);
   let f3 := d.f3;
+  -- Zicsr: the source is rs1, or the zero-extended rs1 field for the immediate forms;
+  -- CSRRW/CSRRWI always write, the set/clear forms only when the source is not zero.
+  let csrSrc : r B32 := Hw.mux d.csru (Hw.cat (Hw.lit 27 0) d.r1) s.x1;
+  let csrWr : r W1 := Hw.mux (Hw.or (isK f3 1) (isK f3 5)) (Hw.lit 1 1) (Hw.not (isK csrSrc 0));
+  let csrWd : r B32 := Hw.mux (Hw.or (isK f3 1) (isK f3 5)) csrSrc
+    (Hw.mux (Hw.or (isK f3 2) (isK f3 6)) (Hw.or s.csr csrSrc) (Hw.and s.csr (Hw.not csrSrc)));
   -- shifts in one cycle (a barrel shifter; the S phase is no longer used)
   let shRes := barrel (isK f3 1) (Hw.and d.alt (bitOf 31 a)) (Hw.slice 0 5 b) a;
   let aluRes := Hw.mux (isK f3 0) sum (Hw.mux (isK f3 2) (zext32 slt) (Hw.mux (isK f3 3) (zext32 ult)
@@ -334,10 +350,11 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
   let io := bitOf 31 sum;
   let wait := gate (gate d.store io) (Hw.not x.txReady);
   let goE := gate inE (gate (isK code 0) (Hw.not wait));
+  let csrWe := Hw.and goE (Hw.and d.csr csrWr);
   -- register writes: in E (everything but loads and shifts), M (loads), S (shifts)
   let rdNZ := Hw.not (isK d.rd 0);
-  let wE := gate goE (gate rdNZ (Hw.or (Hw.or (Hw.or d.lui d.auipc) (Hw.or d.jal d.jalr)) (Hw.and arith (Hw.not shift))));
-  let resE := Hw.mux d.lui d.immU (Hw.mux d.auipc pcImm (Hw.mux (Hw.or d.jal d.jalr) pcInc aluRes));
+  let wE := gate goE (gate rdNZ (Hw.or (Hw.or (Hw.or d.lui d.auipc) (Hw.or d.jal d.jalr)) (Hw.or (Hw.and arith (Hw.not shift)) d.csr)));
+  let resE := Hw.mux d.csr s.csr (Hw.mux d.lui d.immU (Hw.mux d.auipc pcImm (Hw.mux (Hw.or d.jal d.jalr) pcInc aluRes)));
   -- the loaded value
   let slo := s.slo;
   let byte := Hw.mux (bitOf 1 slo) (Hw.mux (bitOf 0 slo) wq3 wq2) (Hw.mux (bitOf 0 slo) wq1 wq0);
@@ -462,7 +479,8 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
       (gate inP fillWord)
       (Hw.mux fillWord fillLine s.rbuf)
       (Hw.mux (gate enterP miss) s.ra s.rline)
-      busWr))
+      busWr
+      (Hw.mux csrWe csrWd s.csr)))
     (Out.pack (Out.mk s.trap (gate goE (gate d.store io)) (Hw.slice 0 8 rs2v) (gate goE (gate d.load io)) sum rs2v
       (gate inP (Hw.and (Hw.not s.bsent) (Hw.not s.rgap)))
       (Hw.mux s.rmode (Hw.cat (Hw.slice 4 28 s.rline : r (HwTy.bits 28)) (Hw.cat s.rk (Hw.lit 2 0))) s.badr)
@@ -488,6 +506,7 @@ def CoreSt.init (ab wb : Nat) (prog : List Nat) : CoreSt ab wb HwTy.El :=
     (BitVec.ofNat 32 0) (BitVec.ofNat 128 0) (BitVec.ofNat (L1.tagW wb) 0)
     (fun (a : BitVec (L1.bits wb)) => BitVec.ofNat 128 0) (fun (a : BitVec (L1.bits wb)) => BitVec.ofNat (L1.tagW wb) 0)
     (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 2 0) (BitVec.ofNat 1 0) (BitVec.ofNat 128 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0)
+    (BitVec.ofNat 32 0)
 
 def core (ab wb : Nat) (mx : Bool) (prog : List Nat) : Circuit In.code Out.code :=
   Circuit.mk (CoreSt.code ab wb) (Bundle.toEl (CoreSt.bundle ab wb) (CoreSt.init ab wb prog))

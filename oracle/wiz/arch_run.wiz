@@ -1,0 +1,65 @@
+import OracleTrace
+import Rv.Lockstep
+import Rv.Core
+import IO
+import Text
+-- `arch_run FIXTURE`: run the multi-cycle core on a riscv-arch-test fixture until it
+-- stops (the test's EBREAK) or the fixture's step budget runs out, and print the
+-- signature region as one line:
+--
+--     ARCH <name> <instructions> <H|FUEL> <trap> <word> <word> ...
+--
+-- The words are little-endian 32-bit values from `[mbase, mbase + mcount)`, which the
+-- fixture header names after the test's `begin_signature` and `end_signature`.  This is
+-- the arch-test signature comparison's DUT side; `oracle/arch-test/arch_test.py` builds
+-- the fixture and compares the words with the suite's reference (or Spike).
+--
+-- The core is driven exactly as `core_trace` drives it (`coreStep` at `HwTy.El`, E is
+-- the instruction boundary), but only the final state is printed, so a long test costs
+-- one line instead of one line per instruction.
+
+def Ar.word (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (base k : Nat) : Nat :=
+  let ω a := Nat.add base (Nat.mul 4 k);
+  Nat.add (Ls.byte ab wb s a)
+    (Nat.mul 256 (Nat.add (Ls.byte ab wb s (Nat.add a 1))
+      (Nat.mul 256 (Nat.add (Ls.byte ab wb s (Nat.add a 2))
+        (Nat.mul 256 (Ls.byte ab wb s (Nat.add a 3)))))))
+
+structure Ar.Res (ab wb : Nat) where
+  steps : Nat
+  stopped : Bool
+  s : CoreSt ab wb HwTy.El
+
+def Ar.go (ab wb : Nat) (mx : Bool) : Nat → Nat → HwTy.El (CoreSt.code ab wb) → Ar.Res ab wb
+  | .zero, k, v => Ar.Res.mk k .false (Ls.hw (ab := ab) (wb := wb) v)
+  | .succ f, k, v =>
+    let ω s := Ls.hw (ab := ab) (wb := wb) v;
+    if Nat.beq s.ph.toNat Ph.h then Ar.Res.mk k .true s
+    else Ar.go ab wb mx f (if Nat.beq s.ph.toNat Ph.e then Nat.succ k else k)
+      (coreStep (r := HwTy.El) ab wb mx s In.idle).1
+
+def Ar.words (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (base : Nat) : Nat → Nat → List String
+  | .zero, i => .nil
+  | .succ n, i =>
+    List.append (.cons (Ox.hex 8 (Ar.word ab wb s base i)) .nil) (Ar.words ab wb s base n (Nat.succ i))
+
+def Ar.main (path : String) : IO Unit :=
+  IO.bind (IO.readFile path) (fun text =>
+    match Fx.ofLines (Fx.lines text) with
+    | .none => IO.println ("arch: bad fixture " ++ path)
+    | .some fx =>
+      let ab := 5;
+      let wb := Nat.sub fx.mbits 2;
+      let mx := String.startsWith fx.cfg "rv32im";
+      let init := Bundle.toEl (CoreSt.bundle ab wb) (CoreSt.init ab wb fx.words);
+      let r := Ar.go ab wb mx fx.steps 0 init;
+      IO.println (String.intercalate " " (List.append
+        (.cons "ARCH" (.cons fx.name (.cons (Nat.repr r.steps)
+          (.cons (if r.stopped then "H" else "FUEL")
+            (.cons (Nat.repr r.s.trap.toNat) .nil)))))
+        (Ar.words ab wb r.s fx.mbase (Nat.div fx.mcount 4) 0))))
+
+def main : IO Unit := IO.bind IO.args (fun args =>
+  match args with
+  | .cons path .nil => Ar.main path
+  | _ => IO.println "usage: arch_run FIXTURE")

@@ -4,6 +4,11 @@ This directory is verification infrastructure. It does not change `src/Rv/*.wiz`
 or the Wiz HDL library; it drives the existing cores and compares them with
 implementations written outside Wiz.
 
+`oracle/arch-test/` is the opt-in riscv-arch-test suite (the official generated
+I/M/Zicsr programs, 52 tests, signature comparison against the suite's references
+and Spike); `oracle/arch-test/README.md` has the commands and the results.  The rest
+of this file is the independent-trace oracle below.
+
 Four implementations of the same RV32I machine are compared on one trace at a time:
 
 | backend | what it is | always available? |

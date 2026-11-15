@@ -22,6 +22,10 @@ import Int
 --
 -- `Cfg.rbits` is 5 for RV32I (32 registers) and 4 for RV32E (16 registers; an
 -- instruction naming x16 … x31 is illegal). FENCE is a no-op (one hart, no caches).
+-- Zicsr: the machine has one CSR, `mscratch` (0x340), and the six CSR instructions
+-- (CSRRW/S/C and their immediate forms); any other CSR number is an illegal
+-- instruction.  That is exactly the subset the riscv-arch-test Zicsr programs use
+-- (`oracle/arch-test`); there is still no privilege mode, trap handler or `mtvec`.
 -- Misaligned loads and stores trap (the ISA allows it). Memory: the on-chip memory
 -- from address 0 (wrapping), and DDR from 0x40000000 (initially zero).
 --
@@ -57,6 +61,7 @@ structure Arch where
   epc : BitVec 32               -- the PC of the trapping instruction
   out : List Nat                -- the bytes written to the output port, newest first
   inp : List Nat                -- the bytes still to come on the input port
+  csr : BitVec 32               -- mscratch (0x340), the one CSR this machine has
 
 -- the trap state as one value (the core has the same three fields)
 structure TrapState where
@@ -88,6 +93,8 @@ def Ins.f3 (w : Nat) : Nat := Rv.bits w 12 3
 def Ins.rs1 (w : Nat) : Nat := Rv.bits w 15 5
 def Ins.rs2 (w : Nat) : Nat := Rv.bits w 20 5
 def Ins.f7 (w : Nat) : Nat := Rv.bits w 25 7
+-- the CSR number of a SYSTEM instruction (bits 31 … 20)
+def Ins.csr (w : Nat) : Nat := Rv.bits w 20 12
 
 def Ins.immI (w : Nat) : BitVec 32 := Rv.sext 12 (Rv.bits w 20 12)
 def Ins.immS (w : Nat) : BitVec 32 := Rv.sext 12 (Rv.bits w 25 7 * 32 + Rv.bits w 7 5)
@@ -133,12 +140,12 @@ def Rv.next (s : Arch) : BitVec 32 := Rv.plus s.pc 4
 
 -- PC := pc, x[rd] := v (unless rd is x0); the trap state is unchanged
 def Rv.write (s : Arch) (rd : Nat) (v : BitVec 32) (pc : BitVec 32) : Arch :=
-  if Nat.beq rd 0 then Arch.mk pc s.regs s.mem s.trap s.tval s.epc s.out s.inp
-  else Arch.mk pc (fun (j : BitVec 5) => if BitVec.beq j (BitVec.ofNat 5 rd) then v else s.regs j) s.mem s.trap s.tval s.epc s.out s.inp
+  if Nat.beq rd 0 then Arch.mk pc s.regs s.mem s.trap s.tval s.epc s.out s.inp s.csr
+  else Arch.mk pc (fun (j : BitVec 5) => if BitVec.beq j (BitVec.ofNat 5 rd) then v else s.regs j) s.mem s.trap s.tval s.epc s.out s.inp s.csr
 
 -- stop on a trap: the cause, what faulted, and the PC of this instruction (which does
 -- not move: a stopped machine stays as it is)
-def Rv.stop (s : Arch) (t : Nat) (v : BitVec 32) : Arch := Arch.mk s.pc s.regs s.mem t v s.pc s.out s.inp
+def Rv.stop (s : Arch) (t : Nat) (v : BitVec 32) : Arch := Arch.mk s.pc s.regs s.mem t v s.pc s.out s.inp s.csr
 
 -- The trap-state lemmas (all by `rfl`): a trap records its cause, its value and the PC
 -- of the trapping instruction, and changes nothing else. A stopped machine keeps them
@@ -151,7 +158,7 @@ def Rv.stop_out (s : Arch) (t : Nat) (v : BitVec 32) : (Rv.stop s t v).out = s.o
 def Rv.stop_inp (s : Arch) (t : Nat) (v : BitVec 32) : (Rv.stop s t v).inp = s.inp := rfl
 
 -- a load from the input port into rd
-def Rv.setInp (s : Arch) (i : List Nat) : Arch := Arch.mk s.pc s.regs s.mem s.trap s.tval s.epc s.out i
+def Rv.setInp (s : Arch) (i : List Nat) : Arch := Arch.mk s.pc s.regs s.mem s.trap s.tval s.epc s.out i s.csr
 def Rv.input (s : Arch) (rd : Nat) : Arch := match s.inp with
   | .nil => Rv.write s rd (Rv.w32 (Rv.pow2 32 - 1)) (Rv.next s)
   | .cons b bs => Rv.setInp (Rv.write s rd (Rv.w32 b) (Rv.next s)) bs
@@ -211,6 +218,22 @@ def Rv.cond (f3 : Nat) (a b : BitVec 32) : Bool :=
   else if Nat.beq f3 5 then Bool.not (BitVec.slt a b)
   else if Nat.beq f3 6 then BitVec.ult a b
   else Bool.not (BitVec.ult a b)
+
+-- Zicsr: the one CSR is mscratch (0x340).  `f3` selects the operation (001 CSRRW,
+-- 010 CSRRS, 011 CSRRC, 101 CSRRWI, 110 CSRRSI, 111 CSRRCI); the source is the rs1
+-- value for the register forms and rs1's field zero-extended for the immediate forms.
+def Rv.csrNo : Nat := 832  -- 0x340, mscratch
+def Rv.okCsr (f3 : Nat) : Bool :=
+  Bool.or (Bool.or (Nat.beq f3 1) (Nat.beq f3 2)) (Bool.or (Nat.beq f3 3)
+    (Bool.or (Nat.beq f3 5) (Bool.or (Nat.beq f3 6) (Nat.beq f3 7))))
+def Rv.csrNew (f3 : Nat) (old src : BitVec 32) : BitVec 32 :=
+  if Bool.or (Nat.beq f3 1) (Nat.beq f3 5) then src
+  else if Bool.or (Nat.beq f3 2) (Nat.beq f3 6) then BitVec.or old src
+  else BitVec.and old (BitVec.not src)
+-- CSRRW/CSRRWI always write; the set/clear forms write only when rs1 (or uimm) is not 0
+def Rv.csrWrites (f3 : Nat) (src : BitVec 32) : Bool :=
+  if Bool.or (Nat.beq f3 1) (Nat.beq f3 5) then .true
+  else Bool.not (BitVec.beq src (Rv.w32 0))
 
 ------------------------------------------------------------------------------------
 -- Legality
@@ -281,8 +304,8 @@ def Rv.exec (c : Cfg) (s : Arch) (w : Nat) : Arch :=
     (if Bool.and (Rv.okStore f3) (Rv.ok2 c r1 r2)
      then (let ω ad := BitVec.add a (Ins.immS w);
            if Bool.not (Rv.aligned f3 ad) then Rv.stop s Trap.store ad
-           else if Rv.bit ad.toNat 31 then Arch.mk (Rv.next s) s.regs s.mem s.trap s.tval s.epc (.cons (Rv.bits b.toNat 0 8) s.out) s.inp
-           else Arch.mk (Rv.next s) s.regs (Rv.store (Rv.size f3) c s.mem ad b.toNat) s.trap s.tval s.epc s.out s.inp)
+           else if Rv.bit ad.toNat 31 then Arch.mk (Rv.next s) s.regs s.mem s.trap s.tval s.epc (.cons (Rv.bits b.toNat 0 8) s.out) s.inp s.csr
+           else Arch.mk (Rv.next s) s.regs (Rv.store (Rv.size f3) c s.mem ad b.toNat) s.trap s.tval s.epc s.out s.inp s.csr)
      else Rv.illegal s w)
   else if Nat.beq op Op.opimm then
     (if Bool.and (Rv.okOpImm f3 f7) (Rv.ok2 c rd r1)
@@ -298,6 +321,13 @@ def Rv.exec (c : Cfg) (s : Arch) (w : Nat) : Arch :=
   else if Nat.beq op Op.system then
     (if Nat.beq w 115 then Rv.stop s Trap.ecall (Rv.w32 0)
      else if Nat.beq w 1048691 then Rv.stop s Trap.ebreak (Rv.w32 0)
+     else if Bool.and (Bool.and (Nat.beq (Ins.csr w) Rv.csrNo) (Rv.okCsr f3)) (Rv.ok2 c rd r1)
+     then (let ω src := if Nat.lt f3 4 then a else Rv.w32 (Rv.bits w 15 5);
+           let ω old := s.csr;
+           let ω s1 := if Rv.csrWrites f3 src
+             then Arch.mk s.pc s.regs s.mem s.trap s.tval s.epc s.out s.inp (Rv.csrNew f3 old src)
+             else s;
+           Rv.write s1 rd old (Rv.next s))
      else Rv.illegal s w)
   else Rv.illegal s w
 
@@ -318,4 +348,4 @@ def Rv.image (prog : List Nat) (a : BitVec 32) : BitVec 8 :=
   BitVec.ofNat 8 (Rv.bits (Rv.wordAt prog (Nat.div a.toNat 4)) (8 * Nat.mod a.toNat 4) 8)
 def Arch.start (c : Cfg) (prog : List Nat) : Arch :=
   Arch.mk (Rv.w32 0) (fun (j : BitVec 5) => Rv.w32 0) (fun (a : BitVec 32) => Rv.image prog (Rv.maddr c a))
-    0 (Rv.w32 0) (Rv.w32 0) .nil .nil
+    0 (Rv.w32 0) (Rv.w32 0) .nil .nil (Rv.w32 0)

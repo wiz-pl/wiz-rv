@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""An independent RV32I reference interpreter and trace generator.
+"""An independent RV32IM/Zicsr reference interpreter and trace generator.
 
 This is the *always-available* oracle: it is written from the RISC-V unprivileged
-ISA manual (RV32I, v2.1) and from the machine description in wiz-rv/README.md, not
+ISA manual (RV32I v2.1, the M extension, and the bounded Zicsr subset in
+`wiz-rv/README.md`) and from the machine description in wiz-rv/README.md, not
 from `src/Rv/Isa.wiz`.  It produces the same trace format as the Wiz side:
 
     S <step> <pc> <trap> <x0> … <x31> <mem bytes>
@@ -15,6 +16,10 @@ store to an address with bit 31 set writes the output port; a load from such an
 address takes a byte from the input port.  The fixtures in `oracle/fixtures` avoid
 those Wiz-specific cases; they are here so that a fixture that does exercise them
 has a defined reference.
+Zicsr is the same bounded subset as the machine: `mscratch` (0x340) and the six
+CSR instructions; any other CSR number is an illegal instruction.  The M extension
+is enabled by a `rv32im` fixture cfg.  `signature()` returns the final signature
+region, which `oracle/arch-test` uses as one of its references.
 
 Usage:
     python3 rv32_ref.py FIXTURE [FIXTURE …]
@@ -68,7 +73,7 @@ class Machine:
         self.cfg = fx.cfg
         self.rbits = 5
         self.mbits = fx.mbits
-        self.mx = False
+        self.mx = "m" in fx.cfg or "M" in fx.cfg
         self.pc = 0
         self.regs = [0] * (1 << self.rbits)
         self.mem = bytearray(1 << self.mbits)
@@ -79,6 +84,7 @@ class Machine:
         self.epc = 0
         self.out = []
         self.inp = list(getattr(fx, "input", []))
+        self.csr = 0  # mscratch (0x340), the one CSR this machine has
 
     # -- machine helpers -------------------------------------------------------
 
@@ -263,6 +269,20 @@ class Machine:
                 self.stop(TRAP_ECALL, 0)
             elif w == 0x00100073:
                 self.stop(TRAP_EBREAK, 0)
+            elif ((w >> 20) & 0xFFF) == 0x340 and f3 in (1, 2, 3, 5, 6, 7):
+                # Zicsr, mscratch: the source is rs1's value, or rs1's field for the
+                # immediate forms; the set/clear forms write only a non-zero source.
+                src = a if f3 < 4 else r1
+                old = self.csr
+                if f3 in (1, 5):
+                    self.csr = src & MASK32
+                elif f3 in (2, 6):
+                    if src != 0:
+                        self.csr = (self.csr | src) & MASK32
+                else:
+                    if src != 0:
+                        self.csr = self.csr & (~src & MASK32)
+                self.write(rd, old, nxt)
             else:
                 self.stop(TRAP_ILLEGAL, w)
         else:
@@ -287,7 +307,7 @@ class Machine:
 
 
 def muldiv(f3, a, b):
-    """The M extension, for completeness (fixtures are RV32I only)."""
+    """The M extension (enabled by a `rv32im` fixture cfg)."""
     au, bu = a & MASK32, b & MASK32
     as_, bs = s32(au), s32(bu)
     if f3 == 0:
@@ -331,6 +351,16 @@ def trace(fx):
         if k < fx.steps:
             m.step()
     return lines
+
+
+def signature(fx):
+    """The signature region after `fx.steps` steps (or at the trapping instruction)."""
+    m = Machine(fx)
+    for _ in range(fx.steps):
+        if m.trap != 0:
+            break
+        m.step()
+    return [m.mem[(fx.mbase + i) % (1 << fx.mbits)] for i in range(fx.mcount)]
 
 
 def main(argv):

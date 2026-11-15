@@ -21,7 +21,10 @@ tests/*.wiz          grail tests
 
 ## The machine
 
-RV32I (32 registers) or RV32E (16), the unprivileged base ISA v2.1 without CSRs:
+RV32I (32 registers) or RV32E (16), the unprivileged base ISA v2.1, with a bounded
+Zicsr subset: one CSR, `mscratch` (0x340), and the six CSR instructions (CSRRW/S/C,
+CSRRWI/SI/CI) that the riscv-arch-test Zicsr programs use. Any other CSR number is an
+illegal instruction; there is no privilege mode, `mtvec`, or trap handler.
 ECALL, EBREAK, an illegal instruction, a misaligned load, store or jump target stop the
 machine instead of trapping into a handler. The stopped machine records the RISC-V trap
 state: the cause (`mcause`; `src/Rv/Isa.wiz` has the list), `tval` (`mtval`: the
@@ -43,7 +46,9 @@ Xilinx part) and a 32-cycle restoring divider.
 
 ## The pipelined core
 
-`src/Rv/Pipe.wiz`: five stages, in order, at the full clock rate (no clock enable):
+`src/Rv/Pipe.wiz`: five stages, in order, at the full clock rate (no clock enable).
+The pipelined core decodes the base ISA and M; it does not implement the bounded
+Zicsr subset above (a CSR instruction is an illegal instruction there).
 
 * **F**: the next fetch address goes to block RAM: the on-chip RAM's fetch copy and the
   I-cache (16 KB, 16-byte lines, direct-mapped).
@@ -73,7 +78,7 @@ A store that may hit fetched instructions restarts the fetch after it: any on-ch
 store, or a DDR store to a line that is in the I-cache, which is then invalidated. So
 self-modifying code behaves as the specification says.
 
-The ISA (src/Rv/Isa.wiz) and the bus to DDR are unchanged.
+The ISA (src/Rv/Isa.wiz) and the bus to DDR are otherwise unchanged.
 
 Proofs (proofs/PipeProofs, `scripts/pipe-proofs.sh`; about 20 minutes each): from D,
 with the stages behind it empty, the next fetch address and, three cycles on, R's

@@ -1,0 +1,126 @@
+-- test: run
+import Rv.Lockstep
+import Rv.Core
+import IO
+import Text
+-- A small fixed subset of the official riscv-arch-test suite, run on the Wiz core.
+--
+-- The fixtures and the expected signatures are produced by
+-- `python3 oracle/arch-test/arch_test.py fixture --tests ...`; the full, opt-in suite
+-- is `python3 oracle/arch-test/arch_test.py run`.  This group needs no RISC-V
+-- toolchain: each `<name>.hex` is already the flat image the core boots from (the
+-- oracle fixture format) and `arch-test.expected` holds the reference signature.
+--
+-- This is the regression group: the full suite is long and opt-in, this one is small
+-- enough for CI.  I/M/Zicsr are all represented (ALU, branch, load, multiply, divide,
+-- and the six CSR-instruction forms).
+
+structure At.Fx where
+  name : String
+  cfg : String
+  mbits : Nat
+  steps : Nat
+  mbase : Nat
+  mcount : Nat
+  words : List Nat
+
+def At.keep (l : String) : Bool :=
+  Bool.and (Bool.not (String.isEmpty (String.trim l)))
+    (Bool.not (String.startsWith (String.trim l) "#"))
+
+def At.lines (s : String) : List String :=
+  List.filter At.keep (String.splitOn s "\n")
+
+def At.tok (i : Nat) (l : List String) : Nat :=
+  match List.head (List.drop i l) with
+  | .some s => (match String.parseNat (String.trim s) with
+                | .some n => n
+                | .none => 0)
+  | .none => 0
+
+def At.hv (c : Char) : Nat :=
+  let n := Char.code c;
+  if Nat.le 97 n then Nat.sub n 87 else Nat.sub n 48
+def At.hexGo : Nat → List Char → Nat
+  | acc, .nil => acc
+  | acc, .cons c cs => At.hexGo (Nat.add (Nat.mul acc 16) (At.hv c)) cs
+def At.hex (s : String) : Nat := At.hexGo 0 (String.chars (String.trim s))
+
+def At.ofLines : List String → Option At.Fx
+  | .nil => .none
+  | .cons name rest =>
+    (match rest with
+     | .nil => .none
+     | .cons hdr ws =>
+       let toks := String.splitOn (String.trim hdr) " ";
+       let cfg := match List.head toks with
+         | .some s => String.trim s
+         | .none => "rv32i";
+       .some (At.Fx.mk (String.trim name) cfg (At.tok 1 toks) (At.tok 2 toks) (At.tok 3 toks)
+         (At.tok 4 toks) (List.map At.hex ws)))
+
+structure At.Res (ab wb : Nat) where
+  steps : Nat
+  stopped : Bool
+  s : CoreSt ab wb HwTy.El
+
+def At.go (ab wb : Nat) (mx : Bool) : Nat → Nat → HwTy.El (CoreSt.code ab wb) → At.Res ab wb
+  | .zero, k, v => At.Res.mk k .false (Ls.hw (ab := ab) (wb := wb) v)
+  | .succ f, k, v =>
+    let ω s := Ls.hw (ab := ab) (wb := wb) v;
+    if Nat.beq s.ph.toNat Ph.h then At.Res.mk k .true s
+    else At.go ab wb mx f (if Nat.beq s.ph.toNat Ph.e then Nat.succ k else k)
+      (coreStep (r := HwTy.El) ab wb mx s In.idle).1
+
+def At.word (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (base k : Nat) : Nat :=
+  let ω a := Nat.add base (Nat.mul 4 k);
+  Nat.add (Ls.byte ab wb s a)
+    (Nat.mul 256 (Nat.add (Ls.byte ab wb s (Nat.add a 1))
+      (Nat.mul 256 (Nat.add (Ls.byte ab wb s (Nat.add a 2))
+        (Nat.mul 256 (Ls.byte ab wb s (Nat.add a 3)))))))
+
+def At.dig (n : Nat) : String :=
+  if Nat.lt n 10 then String.ofChars (.cons (Char.mk (Nat.add 48 n)) .nil)
+  else String.ofChars (.cons (Char.mk (Nat.add 87 n)) .nil)
+
+def At.enc (v : Nat) : String :=
+  String.append (At.dig (Nat.div v 268435456))
+    (String.append (At.dig (Nat.mod (Nat.div v 16777216) 16))
+    (String.append (At.dig (Nat.mod (Nat.div v 1048576) 16))
+    (String.append (At.dig (Nat.mod (Nat.div v 65536) 16))
+    (String.append (At.dig (Nat.mod (Nat.div v 4096) 16))
+    (String.append (At.dig (Nat.mod (Nat.div v 256) 16))
+    (String.append (At.dig (Nat.mod (Nat.div v 16) 16)) (At.dig (Nat.mod v 16))))))))
+
+def At.words (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (base : Nat) : Nat → Nat → List String
+  | .zero, i => .nil
+  | .succ n, i =>
+    List.append (.cons (At.enc (At.word ab wb s base i)) .nil) (At.words ab wb s base n (Nat.succ i))
+
+def At.line (fx : At.Fx) : String :=
+  let ab := 5;
+  let wb := Nat.sub fx.mbits 2;
+  let mx := String.startsWith fx.cfg "rv32im";
+  let init := Bundle.toEl (CoreSt.bundle ab wb) (CoreSt.init ab wb fx.words);
+  let r := At.go ab wb mx fx.steps 0 init;
+  if Bool.not r.stopped then fx.name ++ " FUEL"
+  else if Bool.not (Nat.beq r.s.trap.toNat 2) then fx.name ++ " TRAP " ++ Nat.repr r.s.trap.toNat
+  else String.intercalate " " (.cons fx.name (At.words ab wb r.s fx.mbase (Nat.div fx.mcount 4) 0))
+
+def At.one (dir name : String) : IO Unit :=
+  IO.bind (IO.readFile (dir ++ "/" ++ name ++ ".hex")) (fun text =>
+    match At.ofLines (At.lines text) with
+    | .none => IO.println (name ++ " BAD")
+    | .some fx => IO.println (At.line fx))
+
+def At.goNames (dir : String) : List String → IO Unit
+  | .nil => IO.pure ()
+  | .cons n ns => IO.bind (At.one dir n) (fun u => At.goNames dir ns)
+
+def At.names : List String :=
+  .cons "add-01" (.cons "fence-01" (.cons "jalr-01" (.cons "lw-align-01"
+  (.cons "sb-align-01" (.cons "slt-01" (.cons "div-01" (.cons "mul-01"
+  (.cons "Zicsr-csrrc-00" (.cons "Zicsr-csrrci-00" (.cons "Zicsr-csrrs-00"
+  (.cons "Zicsr-csrrsi-00" (.cons "Zicsr-csrrw-00" (.cons "Zicsr-csrrwi-00" .nil)))))))))))))
+
+def main : IO Unit := At.goNames "tests/rv/arch-test" At.names

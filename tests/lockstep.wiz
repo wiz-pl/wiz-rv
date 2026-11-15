@@ -70,3 +70,6 @@ def ctestE : String := (fun (r : Ls.Result) => Nat.repr r.instrs ++ " instructio
       | .nil => "agrees"
       | ps => "DISAGREES" ++ lines ps)) (Ls.run 5 12 .true (Hex.words CTest.hex) 40000)
 #eval ctestE
+-- Zicsr: mscratch with all six CSR instructions (src/Rv/Progs.wiz `Prog.csr`)
+def csrE : String := report 5 Prog.csr 100
+#eval csrE

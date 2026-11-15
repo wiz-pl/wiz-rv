@@ -201,6 +201,14 @@ def A.nop : Asm := Asm.opi 0 0 0 0 0
 def A.li (rd : Nat) (v : Int) : Asm := Asm.li rd v
 def A.ecall : Asm := Asm.word 115
 def A.ebreak : Asm := Asm.word 1048691
+-- Zicsr, mscratch (0x340): the six CSR instructions.  The immediate forms take the
+-- five-bit unsigned immediate in the `rs1` field.
+def A.csrrw (rd rs1 csr : Nat) : Asm := Asm.word (Enc.i Op.system 1 rd rs1 csr)
+def A.csrrs (rd rs1 csr : Nat) : Asm := Asm.word (Enc.i Op.system 2 rd rs1 csr)
+def A.csrrc (rd rs1 csr : Nat) : Asm := Asm.word (Enc.i Op.system 3 rd rs1 csr)
+def A.csrrwi (rd uimm csr : Nat) : Asm := Asm.word (Enc.i Op.system 5 rd uimm csr)
+def A.csrrsi (rd uimm csr : Nat) : Asm := Asm.word (Enc.i Op.system 6 rd uimm csr)
+def A.csrrci (rd uimm csr : Nat) : Asm := Asm.word (Enc.i Op.system 7 rd uimm csr)
 def A.fence : Asm := Asm.word 267386895   -- fence iorw, iorw
 def A.label (l : String) : Asm := Asm.label l
 def A.la (rd : Nat) (l : String) : Asm := Asm.la rd l

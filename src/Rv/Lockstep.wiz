@@ -32,7 +32,9 @@ def Ls.compare (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (a : Arch) : List String
         else .cons ("trap: core " ++ Nat.repr s.trap.toNat ++ ", spec " ++ Nat.repr a.trap) .nil)
       (List.append (if Nat.beq s.tval.toNat a.tval.toNat then .nil
           else .cons ("tval: core " ++ Nat.repr s.tval.toNat ++ ", spec " ++ Nat.repr a.tval.toNat) .nil)
-        (Ls.regDiff ab wb s a (Rv.pow2 ab - 1))))
+        (List.append (if Nat.beq s.csr.toNat a.csr.toNat then .nil
+            else .cons ("csr: core " ++ Nat.repr s.csr.toNat ++ ", spec " ++ Nat.repr a.csr.toNat) .nil)
+          (Ls.regDiff ab wb s a (Rv.pow2 ab - 1)))))
 
 -- the core's byte at address `x`
 def Ls.byte (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (x : Nat) : Nat :=

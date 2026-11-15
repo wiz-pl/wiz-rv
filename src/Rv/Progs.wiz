@@ -92,6 +92,12 @@ def Prog.trapStore : List Asm := A.li 1 1 :: A.sh 2 0 1 :: A.ebreak :: .nil
 def Prog.trapJump : List Asm := A.li 1 6 :: A.jalr 0 1 0 :: A.ebreak :: .nil
 def Prog.trapIllegal : List Asm := A.nop :: Asm.word 0 :: .nil
 def Prog.trapEcall : List Asm := A.nop :: A.ecall :: .nil
+-- Zicsr: all six instructions on mscratch (0x340).  The lockstep test compares the
+-- register file and `csr` with the specification at every instruction.
+def Prog.csr : List Asm :=
+  A.li 1 5 :: A.csrrw 2 1 832 :: A.csrrs 3 0 832 :: A.li 4 7 :: A.csrrc 5 4 832 ::
+  A.li 6 3 :: A.csrrwi 7 6 832 :: A.csrrsi 8 1 832 :: A.csrrci 9 2 832 ::
+  A.csrrs 10 0 832 :: A.addi 11 10 4 :: A.ebreak :: .nil
 def Prog.x16 : List Asm := A.li 16 5 :: A.ebreak :: .nil
 
 -- blink: a counter on the output port, a delay between steps (for the board)
