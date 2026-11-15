@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""golem-upload: send a program to the golem board's ROM loader.
+
+The golem bitstream carries a small ROM loader (src/Rv/Golem/Loader.wiz).  On reset it
+prints a banner and waits at 1 Mbaud 8N1 for one framed image:
+
+    +0   b"GLDR"                 magic
+    +4   u8  version (1)         u8 flags (0)         u16 reserved (0)
+    +8   u32 length              payload bytes, less than 1 MiB
+    +12  u32 crc32               of the payload (zlib crc32)
+    +16  u32 entry               absolute address, inside the payload, 4-byte aligned
+    +20  payload                 loaded at 0x40000000 (DDR)
+
+This tool opens the serial port with the standard library only (termios, no pyserial
+and no vendor SDK), waits for the loader's banner, sends the frame with progress, then
+prints whatever the ROM (and the program) says.  It never touches the FPGA: load the
+bitstream first with
+
+    openFPGALoader -b arty_a7_35t build/a35t/golem.bit
+
+then upload:
+
+    sw/golem-upload /dev/ttyUSB1 prog.bin
+
+The ROM refuses a bad CRC, an over-long image, a wrong version or an entry outside the
+image and stays in the loader (no jump).
+"""
+
+import argparse
+import errno
+import os
+import select
+import struct
+import sys
+import termios
+import time
+import zlib
+
+MAGIC = b"GLDR"
+VERSION = 1
+HEADER = struct.Struct("<4sBBHIII")  # magic, version, flags, reserved, length, crc, entry
+LOAD_BASE = 0x40000000
+LOAD_MAX = 0x00100000  # 1 MiB: the loader's hard cap (length must be < LOAD_MAX)
+BANNER = b"golem load 1\r\n"  # the whole line: the loader is not polling RX until it has printed it
+ERROR_WORDS = (b"crc error", b"length error", b"version error", b"entry error", b"ddr fail")
+
+
+def die(msg, code=2):
+    print("golem-upload: " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def parse_int(text):
+    try:
+        return int(text, 0)
+    except ValueError:
+        die("not a number: %r" % text)
+
+
+def make_frame(payload, entry):
+    if not payload:
+        die("the image is empty")
+    if len(payload) >= LOAD_MAX:
+        die("the image is %d bytes; the loader's cap is %d (strictly less)" % (len(payload), LOAD_MAX))
+    if entry % 4 != 0:
+        die("the entry 0x%x is not 4-byte aligned" % entry)
+    if entry < LOAD_BASE or entry >= LOAD_BASE + len(payload):
+        die("the entry 0x%x is not inside the image 0x%x..0x%x" %
+            (entry, LOAD_BASE, LOAD_BASE + len(payload) - 1))
+    crc = zlib.crc32(payload) & 0xFFFFFFFF
+    return HEADER.pack(MAGIC, VERSION, 0, 0, len(payload), crc, entry) + payload, crc
+
+
+def baud_constant(baud):
+    name = "B%d" % baud
+    value = getattr(termios, name, None)
+    if value is None:
+        die("the port does not support %d baud (the board's UART is 1000000)" % baud)
+    return value
+
+
+def open_port(port, baud):
+    try:
+        fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    except OSError as e:
+        die("cannot open %s: %s" % (port, e.strerror))
+    try:
+        attrs = termios.tcgetattr(fd)
+    except termios.error as e:
+        os.close(fd)
+        die("cannot configure %s: %s" % (port, e))
+    # raw 8N1, no echo, no flow control
+    attrs[0] = 0  # iflag
+    attrs[1] = 0  # oflag
+    attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL  # cflag
+    attrs[3] = 0  # lflag
+    speed = baud_constant(baud)
+    attrs[4] = speed
+    attrs[5] = speed
+    attrs[6][termios.VMIN] = 0
+    attrs[6][termios.VTIME] = 0
+    try:
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    except termios.error as e:
+        os.close(fd)
+        die("cannot configure %s: %s" % (port, e))
+    return fd
+
+
+def read_available(fd, seconds, sink, stop=None):
+    """Read for `seconds` (or until `stop` is found); print the bytes as text."""
+    deadline = time.monotonic() + seconds
+    got = False
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        try:
+            ready, _, _ = select.select([fd], [], [], min(left, 0.1))
+        except InterruptedError:
+            continue
+        if not ready:
+            continue
+        try:
+            data = os.read(fd, 4096)
+        except OSError as e:
+            if e.errno == errno.EAGAIN:
+                continue
+            break
+        if not data:
+            continue
+        got = True
+        sink.extend(data)
+        text = data.decode("latin-1", "replace")
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        if stop is not None and stop in bytes(sink):
+            return True
+    return got
+
+
+def wait_for_banner(fd, seconds):
+    seen = bytearray()
+    print("waiting for the loader banner (press BTN0 or load the bitstream) ...", file=sys.stderr)
+    found = read_available(fd, seconds, seen, stop=BANNER)
+    if found:
+        print("loader ready", file=sys.stderr)
+        return True
+    if seen:
+        print("no banner, but the port said something; sending anyway", file=sys.stderr)
+    else:
+        print("no banner; sending after a short pause (already booted?)", file=sys.stderr)
+        time.sleep(0.25)
+    return False
+
+
+def send_frame(fd, frame, chunk=4096):
+    total = len(frame)
+    sent = 0
+    started = time.monotonic()
+    last = started
+    while sent < total:
+        block = frame[sent:sent + chunk]
+        try:
+            n = os.write(fd, block)
+        except OSError as e:
+            if e.errno == errno.EAGAIN:
+                select.select([], [fd], [], 0.1)
+                continue
+            die("write failed: %s" % e)
+        sent += n
+        now = time.monotonic()
+        if now - last >= 0.1 or sent == total:
+            last = now
+            rate = sent / max(now - started, 1e-9)
+            print("\rsent %d/%d bytes (%3d%%) %.1f KiB/s" %
+                  (sent, total, 100 * sent // total, rate / 1024.0),
+                  end="", file=sys.stderr, flush=True)
+    print("", file=sys.stderr)
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Upload one framed image to the golem ROM loader over the UART.",
+        epilog="Load the bitstream first: openFPGALoader -b arty_a7_35t build/a35t/golem.bit",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("port", nargs="?", help="serial port (e.g. /dev/ttyUSB1); omit with --dry-run")
+    ap.add_argument("image", help="flat RV32IM binary linked at 0x40000000")
+    ap.add_argument("--entry", type=parse_int, default=LOAD_BASE,
+                    help="entry address (default 0x40000000, inside the image)")
+    ap.add_argument("--baud", type=parse_int, default=1000000,
+                    help="baud rate (the board's UART is fixed at 1000000)")
+    ap.add_argument("--wait", type=float, default=5.0,
+                    help="seconds to wait for the loader banner (default 5)")
+    ap.add_argument("--no-wait", action="store_true",
+                    help="send at once (the loader is already up and past its banner)")
+    ap.add_argument("--reply-wait", type=float, default=3.0,
+                    help="seconds to read the reply after the image (default 3)")
+    ap.add_argument("--frame", metavar="FILE",
+                    help="also write the exact frame to FILE (for inspection or a simulator)")
+    ap.add_argument("--dry-run", action="store_true", help="build the frame and stop (no port)")
+    args = ap.parse_args()
+
+    try:
+        with open(args.image, "rb") as f:
+            payload = f.read()
+    except OSError as e:
+        die("cannot read %s: %s" % (args.image, e.strerror))
+
+    frame, crc = make_frame(payload, args.entry)
+    print("image %s: %d bytes, entry 0x%x, crc32 0x%08x, frame %d bytes" %
+          (args.image, len(payload), args.entry, crc, len(frame)),
+          file=sys.stderr)
+    if args.frame:
+        with open(args.frame, "wb") as f:
+            f.write(frame)
+        print("frame written to %s" % args.frame, file=sys.stderr)
+
+    if args.dry_run:
+        if not args.port:
+            return 0
+        print("dry run: not opening %s" % args.port, file=sys.stderr)
+        return 0
+    if not args.port:
+        die("a serial port is required (or use --dry-run)")
+
+    fd = open_port(args.port, args.baud)
+    try:
+        if not args.no_wait:
+            wait_for_banner(fd, args.wait)
+        else:
+            time.sleep(0.1)
+        print("sending %d bytes at %d baud ..." % (len(frame), args.baud), file=sys.stderr)
+        send_frame(fd, frame)
+        print("image sent; reading the loader's reply:", file=sys.stderr)
+        reply = bytearray()
+        read_available(fd, args.reply_wait, reply)
+    finally:
+        os.close(fd)
+
+    text = bytes(reply)
+    if any(word in text for word in ERROR_WORDS):
+        print("golem-upload: the loader refused the image (see the message above)", file=sys.stderr)
+        return 2
+    if b"run" not in text:
+        print("golem-upload: no \"run\" from the loader; check the port, baud and reset", file=sys.stderr)
+        return 3
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

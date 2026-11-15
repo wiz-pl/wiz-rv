@@ -1,0 +1,1 @@
+tests/golem_load.wiz:149:1: info: "golem load: 143 words PASS, frame 56 bytes through Rx PASS; run trap 2 out \"golem load 1\nrun\nOK\" PASS; crc trap 0 out \"golem load 1\ncrc error\n\" PASS; length trap 0 out \"golem load 1\nlength error\n\" PASS"

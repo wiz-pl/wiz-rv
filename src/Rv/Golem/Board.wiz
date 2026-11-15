@@ -1,4 +1,5 @@
 import Rv.Golem.Prog
+import Rv.Golem.Loader
 import Rv.Progs
 import Rv.Asm
 import Ddr3.Board
@@ -25,36 +26,42 @@ import Text
 -- ref200 at 200 from the same VCO.
 --
 -- Boot image (the board has no host loader: `Golem.step` ties the arbiter's second
--- master off). The default is `Prog.boot`, the UART loader that is already proven on
--- the Arty: it waits for the calibration, prints "wiz-rv boot" and "DDR ok"/"DDR fail",
--- then accepts records from `rvload`. `--boot rom` selects `GProg.golem`, the
+-- master off). The default is `GLoad.boot`, the framed UART loader: after the
+-- calibration it prints "golem load 1", reads one GLDR frame (version, length, CRC32,
+-- entry), writes it to DDR at 0x40000000, verifies it and jumps. `sw/golem-upload`
+-- sends that frame. `--boot loader` selects `Prog.boot`, the older loader that speaks
+-- `rvload`'s L/G records (and can place a WAD); `--boot rom` selects `GProg.golem`, the
 -- self-contained bring-up ROM (banner, DDR status, timer, three framebuffer pixels and
 -- a routine called in DDR). A C image (`sw/golem.c`) is linked at 0x40000000 and sent
--- by the default loader; it is not a ROM image itself.
+-- by the default upload loader; it is not a ROM image itself.
 
 ------------------------------------------------------------------------------------
 -- Boot images
 
 inductive GBoard.Boot where
-  | rom
-  | loader
+  | rom       -- the self-contained bring-up ROM (GProg.golem)
+  | loader    -- the legacy rvload loader (Prog.boot; records, and a WAD)
+  | upload    -- the framed loader (GLoad.boot; sw/golem-upload)
 
 def GBoard.Boot.name : GBoard.Boot → String
   | .rom => "rom"
   | .loader => "loader"
+  | .upload => "upload"
 
 def GBoard.Boot.prog : GBoard.Boot → List Nat
   | .rom => Asm.assemble GProg.golem
   | .loader => Asm.assemble Prog.boot
+  | .upload => Asm.assemble GLoad.boot
 
 def GBoard.bootOf (s : String) : Option GBoard.Boot :=
-  match Hdl.strEq s "rom", Hdl.strEq s "loader" with
-  | .true, _ => .some .rom
-  | _, .true => .some .loader
-  | _, _ => .none
+  match Hdl.strEq s "rom", Hdl.strEq s "loader", Hdl.strEq s "upload" with
+  | .true, _, _ => .some .rom
+  | _, .true, _ => .some .loader
+  | _, _, .true => .some .upload
+  | _, _, _ => .none
 
--- the proven board image: the loader, so a C image (or Doom) can be sent over the UART
-def GBoard.defaultBoot : GBoard.Boot := .loader
+-- the default: build once, then send a program with sw/golem-upload (no rvload records)
+def GBoard.defaultBoot : GBoard.Boot := .upload
 
 ------------------------------------------------------------------------------------
 -- Clocks

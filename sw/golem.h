@@ -18,6 +18,27 @@
 #define WAD_BASE       0x48000000u
 #define HEAP_END       0x47f00000u
 
+/* The ROM loader's frame (sw/golem-upload sends it; src/Rv/Golem/Loader.wiz reads
+   it and DESIGN.md, "The ROM loader", is the long form). On reset the loader prints a
+   banner, waits for this frame at 1 Mbaud 8N1, writes the payload to LOAD_BASE, checks
+   the CRC32 and jumps to `entry`. All fields are little-endian; the header is 20
+   bytes. A length of LOAD_MAX or more, a version other than 1, an unaligned or
+   out-of-image entry, or a bad CRC is refused (a diagnostic, no jump).
+     +0   "GLDR"                        magic
+     +4   u8 version (1), u8 flags (0), u16 reserved (0)
+     +8   u32 length                    payload bytes, < LOAD_MAX
+     +12  u32 crc32                     payload only: reflected 0xEDB88320,
+                                        init/final xor 0xFFFFFFFF (zlib crc32)
+     +16  u32 entry                     absolute address in the payload
+     +20  payload */
+#define LOAD_MAGIC     0x52444c47u          /* "GLDR" in memory, little-endian */
+#define LOAD_VERSION   1u
+#define LOAD_HEADER    20u
+#define LOAD_BASE      0x40000000u          /* the payload's fixed DDR address */
+#define LOAD_MAX       0x00100000u          /* 1 MiB: the hard length cap */
+#define LOAD_CRC_INIT  0xffffffffu
+#define LOAD_CRC_POLY  0xedb88320u
+
 #define IO(off)        (*(volatile uint32_t *)(0x80000000u + (off)))
 #define UART_DATA      IO(0x00)             /* read: the next byte, or -1; write: send */
 #define UART_STATUS    IO(0x04)             /* bit 0: the transmitter is idle

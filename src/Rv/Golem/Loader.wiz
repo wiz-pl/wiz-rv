@@ -1,0 +1,111 @@
+import Rv.Asm
+-- The golem ROM loader: on reset it waits for the DDR3 calibration, prints a banner on
+-- the UART, then reads one framed image and runs it. The frame (sw/golem-upload sends
+-- it; the format is also in sw/golem.h and DESIGN.md, "The ROM loader"):
+--
+--   0   'G' 'L' 'D' 'R'        magic ("GLDR")
+--   4   u8  version            must be 1
+--   5   u8  flags              0 (reserved)
+--   6   u16 reserved           0
+--   8   u32 length             payload bytes, little-endian, less than 1 MiB
+--   12  u32 crc32              of the payload: reflected, poly 0xEDB88320, init and
+--                              final xor 0xFFFFFFFF (the zlib/Python `crc32`)
+--   16  u32 entry              the first instruction, 4-byte aligned, in the payload
+--   20  payload                loaded at 0x40000000 (DDR)
+--
+-- The loader writes every payload byte to DDR as it arrives and checks the CRC32
+-- before it jumps. A bad magic, version, length or entry, and a CRC that does not
+-- match, print a diagnostic and return to waiting for the next frame: the loader never
+-- jumps with a frame it has not verified. A failed DDR calibration is fatal (there is
+-- nowhere to load to) and leaves the loader in a loop after "ddr fail".
+--
+-- It is the board's default image (`GBoard.Boot.upload`). The legacy `Prog.boot`
+-- (`--boot loader`) speaks `rvload`'s L/G records and can also place a WAD; this
+-- loader deliberately has no records, no second load address and no WAD, so that the
+-- frame and the verification stay small (see DESIGN.md for the limits).
+--
+-- Registers: x15 the UART, x3 the DDR base, x12 the store pointer, x13 the bytes
+-- left, x14 the CRC, x6 the image length, x8 the expected CRC, x9 the entry, x7 a
+-- counter, x5 and x10 scratch, x4 the UART status. No M-extension instruction.
+
+-- read a byte into x10, return address in x5 (x4 is scratch)
+def GLoad.getb : List Asm :=
+  A.label "l.getb" :: A.lw 4 4 15 :: A.andi 4 4 2 :: A.beqz 4 "l.getb" ::
+  A.lw 10 0 15 :: A.jalr 0 5 0 :: .nil
+
+-- read four bytes into x11, little-endian, return address in x1 (x7 counts, x10 gets
+-- the byte; it uses x5 for getb)
+def GLoad.get32 : List Asm :=
+  A.label "l.get32" :: A.li 11 0 :: A.li 7 0 ::
+  A.label "l.get32.l" :: A.jal 5 "l.getb" :: A.sll 10 10 7 :: A.or 11 11 10 ::
+  A.addi 7 7 8 :: A.li 10 32 :: A.blt 7 10 "l.get32.l" :: A.ret :: .nil
+
+-- print the zero-terminated string at x10 (x5 is scratch)
+def GLoad.puts : List Asm :=
+  A.label "l.puts" :: A.lbu 5 0 10 :: A.beqz 5 "l.puts.e" :: A.sb 5 0 15 ::
+  A.addi 10 10 1 :: A.j "l.puts" :: A.label "l.puts.e" :: A.ret :: .nil
+
+-- one payload byte: x10 is the byte, x14 the running CRC, x7 the bit counter
+def GLoad.crcByte : List Asm :=
+  A.xor 14 14 10 :: A.li 7 8 ::
+  A.label "l.crc" :: A.andi 5 14 1 :: A.beqz 5 "l.crc.shift" ::
+  A.srli 14 14 1 :: A.li 5 (-306674912) :: A.xor 14 14 5 :: A.j "l.crc.next" ::
+  A.label "l.crc.shift" :: A.srli 14 14 1 ::
+  A.label "l.crc.next" :: A.addi 7 7 (-1) :: A.bnez 7 "l.crc" :: .nil
+
+def GLoad.start : List Asm :=
+  A.lui 15 524288 ::                              -- x15 = 0x80000000, the UART
+  A.lui 3 262144 ::                               -- x3 = 0x40000000, the DDR base
+  -- the DDR3 calibration: bit 0 done, bit 1 failed
+  A.label "l.ddr" :: A.lw 5 64 15 :: A.beqz 5 "l.ddr" ::
+  A.andi 5 5 2 :: A.bnez 5 "l.ddrfail" ::
+  A.la 10 "l.banner" :: A.call "l.puts" ::
+  A.label "l.start" :: A.li 14 (-1) ::
+  -- the magic: G L D R
+  A.label "l.magic" :: A.jal 5 "l.getb" :: A.li 5 71 :: A.bne 10 5 "l.magic" ::
+  A.jal 5 "l.getb" :: A.li 5 76 :: A.bne 10 5 "l.magic" ::
+  A.jal 5 "l.getb" :: A.li 5 68 :: A.bne 10 5 "l.magic" ::
+  A.jal 5 "l.getb" :: A.li 5 82 :: A.bne 10 5 "l.magic" ::
+  -- the version, then the flags and the two reserved bytes (ignored)
+  A.jal 5 "l.getb" :: A.li 5 1 :: A.bne 10 5 "l.verr" ::
+  A.jal 5 "l.getb" :: A.jal 5 "l.getb" :: A.jal 5 "l.getb" ::
+  -- the length: x13 (the loop) and x6 (the entry check); less than 1 MiB
+  A.call "l.get32" :: A.mv 13 11 :: A.mv 6 11 ::
+  A.li 5 1048576 :: A.bgeu 13 5 "l.lenerr" ::
+  -- the expected CRC and the entry
+  A.call "l.get32" :: A.mv 8 11 ::
+  A.call "l.get32" :: A.mv 9 11 ::
+  -- the entry must be 4-byte aligned and inside the image
+  A.andi 5 9 3 :: A.bnez 5 "l.enterr" ::
+  A.sub 5 9 3 :: A.bgeu 5 6 "l.enterr" ::
+  -- the payload: store every byte and fold it into the CRC
+  A.mv 12 3 ::
+  A.label "l.body" :: A.beqz 13 "l.verify" ::
+  A.jal 5 "l.getb" :: A.sb 10 0 12 ::
+  List.append GLoad.crcByte
+    (A.addi 12 12 1 :: A.addi 13 13 (-1) :: A.j "l.body" ::
+     A.label "l.verify" :: A.li 5 (-1) :: A.xor 14 14 5 ::
+     A.bne 14 8 "l.crcerr" ::
+     A.la 10 "l.run" :: A.call "l.puts" :: A.jalr 0 9 0 :: .nil)
+
+def GLoad.errors : List Asm :=
+  A.label "l.crcerr" :: A.la 10 "l.crcmsg" :: A.call "l.puts" :: A.j "l.start" ::
+  A.label "l.lenerr" :: A.la 10 "l.lenmsg" :: A.call "l.puts" :: A.j "l.start" ::
+  A.label "l.verr" :: A.la 10 "l.vermsg" :: A.call "l.puts" :: A.j "l.start" ::
+  A.label "l.enterr" :: A.la 10 "l.entmsg" :: A.call "l.puts" :: A.j "l.start" ::
+  A.label "l.ddrfail" :: A.la 10 "l.ddrmsg" :: A.call "l.puts" ::
+  A.label "l.ddrhalt" :: A.j "l.ddrhalt" :: .nil
+
+def GLoad.strings : List Asm :=
+  List.append (A.string "l.banner" "golem load 1\n")
+  (List.append (A.string "l.run" "run\n")
+  (List.append (A.string "l.crcmsg" "crc error\n")
+  (List.append (A.string "l.lenmsg" "length error\n")
+  (List.append (A.string "l.vermsg" "version error\n")
+  (List.append (A.string "l.entmsg" "entry error\n")
+  (A.string "l.ddrmsg" "ddr fail\n"))))))
+
+def GLoad.boot : List Asm :=
+  List.append GLoad.start (List.append GLoad.errors
+    (List.append GLoad.getb (List.append GLoad.get32
+      (List.append GLoad.puts GLoad.strings))))

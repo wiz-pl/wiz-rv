@@ -13,8 +13,11 @@
 #                                             GOLEM_FLASH=1 (the brief does not
 #                                             authorise hardware)
 #
-# Options after the command: --boot rom|loader (default loader, Prog.boot), --variant
-# golem|mc|both (default golem; mc is golemMc at 50 MHz effective).
+# Options after the command: --boot rom|loader|upload (default upload, GLoad.boot and
+# sw/golem-upload; loader = rvload/Prog.boot), --variant golem|mc|both (default golem;
+# mc is golemMc at 50 MHz effective). The two hardware commands are
+#   openFPGALoader -b arty_a7_35t build/a35t/golem.bit
+#   sw/golem-upload /dev/ttyUSB1 prog.bin
 #
 # Build the driver first: `grail build` (or `heavy grail build`).
 set -eu
@@ -44,8 +47,8 @@ case "${1:-}" in
   flash|load)
     BIN=${2:-build/a35t/golem.bit}
     echo "hardware step: openFPGALoader -b arty_a7_35t $BIN  (SRAM only)"
-    echo "then, on the UART: stty -F PORT 1000000 raw -echo; cat PORT"
-    echo "loader prints \"wiz-rv boot\" and \"DDR ok\"/\"DDR fail\"; LD0 done, LD1 failed"
+    echo "then: sw/golem-upload PORT prog.bin   (default upload loader)"
+    echo "it prints \"golem load 1\" and the loader's reply; LD0 done, LD1 failed"
     if [ "${GOLEM_FLASH:-0}" != "1" ]; then
       echo "not flashing: set GOLEM_FLASH=1 only when the brief authorises the board" >&2
       exit 1
