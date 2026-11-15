@@ -81,11 +81,11 @@ def aStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (n : Nat)
   let take := Hw.and o.rd uartA;
   let rst := bitOf 0 x.btn;
   let ω c := CoreSt.unpack ab wb (Hw.fst cr);
-  -- the reset: the phase, the PC and the trap code only (no reset on the memories'
+  -- the reset: the phase, the PC and the trap state only (no reset on the memories'
   -- read registers, which are block RAM's output latches)
   let c2 := CoreSt.mk (Hw.mux rst (Hw.lit 4 Ph.f) c.ph) (Hw.mux rst (Hw.lit 32 0) c.pc) c.q0 c.q1 c.q2 c.q3
     c.m0 c.m1 c.m2 c.m3 c.rfa c.rfb c.x1 c.x2 c.acc c.dv c.rm c.cnt c.srd c.sf3 c.slo c.sio (Hw.mux rst (Hw.lit 3 0) c.trap)
-    c.busq c.fromBus c.badr c.bwe c.bwd c.bst c.bret c.bsent c.ra c.l1q c.l1t c.l1d c.l1tag c.fromL1 c.rmode c.rk c.rgap c.rbuf c.rline c.bnew c.resv c.resOk c.amoA c.amoD c.amoO c.sf5 c.ak c.baop c.baf5;
+    (Hw.mux rst (Hw.lit 32 0) c.tval) c.busq c.fromBus c.badr c.bwe c.bwd c.bst c.bret c.bsent c.ra c.l1q c.l1t c.l1d c.l1tag c.fromL1 c.rmode c.rk c.rgap c.rbuf c.rline c.bnew c.resv c.resOk c.amoA c.amoD c.amoO c.sf5 c.ak c.baop c.baf5;
   Hw.pair
     (ASys.pack ab wb (ASys.mk
       c2

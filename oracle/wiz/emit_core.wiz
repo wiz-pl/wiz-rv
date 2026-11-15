@@ -1,0 +1,38 @@
+import Rv.Board
+import OracleTrace
+import IO
+import Text
+-- `emit_core FIXTURE`: emit the multi-cycle core (`Rv.Core.core`, wrapped by the
+-- iCEstick `board` top) with the fixture's program in its memory, as flat
+-- Verilog on stdout.  `oracle.py rvfi` uses this to give the rvfi testbench a
+-- core whose program is the same as the trace fixture's.  Nothing here changes
+-- the core.
+--
+--   emit_core oracle/fixtures/alu.hex > build/oracle_core.v
+--
+-- The board top is used only because it is a self-contained `Circuit` with the
+-- core's state; the rvfi wrapper observes `ph`, `pc`, `rfa`, the byte lanes and
+-- the trap register through hierarchical references, so the top's ports do not
+-- matter (uart_rx is tied off and the LEDs are left unconnected).
+
+def Emit.main (path : String) (mbitsArg : Nat) : IO Unit :=
+  IO.bind (IO.readFile path) (fun text =>
+    match Fx.ofLines (Fx.lines text) with
+    | .none => IO.println ("oracle: bad fixture " ++ path)
+    | .some fx =>
+      let ab := 5;
+      let mbits := if Nat.beq mbitsArg 0 then fx.mbits else mbitsArg;
+      let wb := Nat.sub mbits 2;
+      let n := Circuit.netlist "oracle_core" (board ab wb .false fx.words);
+      IO.print (Verilog.emit n))
+
+def Emit.parseMbits : List String → Nat
+  | .nil => 0
+  | .cons s _ => (match String.parseNat (String.trim s) with
+                  | .some n => n
+                  | .none => 0)
+
+def main : IO Unit := IO.bind IO.args (fun args =>
+  match args with
+  | .cons path rest => Emit.main path (Emit.parseMbits rest)
+  | .nil => IO.println "usage: emit_core FIXTURE [MBITS] > core.v")

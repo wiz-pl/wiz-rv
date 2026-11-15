@@ -27,8 +27,10 @@ tests/*.wiz          grail tests
 
 RV32I (32 registers) or RV32E (16), the unprivileged base ISA v2.1 without CSRs:
 ECALL, EBREAK, an illegal instruction, a misaligned load, store or jump target stop the
-machine with a trap code (`src/Rv/Isa.wiz` has the list) instead of trapping; FENCE is a
-no-op. Memory is 2^n bytes from address 0 (addresses wrap); the program image is its
+machine instead of trapping into a handler. The stopped machine records the RISC-V trap
+state: the cause (`mcause`; `src/Rv/Isa.wiz` has the list), `tval` (`mtval`: the
+faulting address, or the instruction word for an illegal instruction; 0 for
+ECALL/EBREAK) and `epc` (`mepc`: the PC of the trapping instruction). FENCE is a no-op. Memory is 2^n bytes from address 0 (addresses wrap); the program image is its
 initial contents and execution starts at 0. A store to an address with bit 31 set
 writes its low byte to the output port instead.
 
@@ -53,9 +55,9 @@ Xilinx part) and a 32-cycle restoring divider.
   read asynchronously, with a bypass of R's write.
 * **E**: the ALU and the barrel shifter. Branches are predicted not taken and resolved
   here; a taken branch or jump is registered and redirects the fetch a cycle later, so
-  it costs 2 cycles. Also here: the traps, and the four 16 × 16 partial products of the
-  multiplier (4 DSP48E1). The divider is iterative (34 cycles; E waits). The D-side
-  memories are read at the address.
+  it costs 2 cycles. Also here: the traps (cause, tval and epc are latched/held at H),
+  and the four 16 × 16 partial products of the multiplier (4 DSP48E1). The divider is
+  iterative (34 cycles; E waits). The D-side memories are read at the address.
 * **M**: the load data comes from the on-chip RAM's data copy, the D-cache (16 KB,
   write-through, no allocation on a store) or I/O. Also here: the store merge and the
   product's sum.
@@ -127,21 +129,52 @@ It ran on the user's Arty A7-35T on 2026-11-12 (loaded by artix-target): the 711
 above, byte for byte, then the echo.
 
 Lockstep (`tests/lockstep.wiz`): the core and the specification agree, instruction by
-instruction (PC and every register at each instruction boundary, all memory and the
-output at the end), on programs exercising every RV32I instruction, the traps, RV32E's
-register limit, and (RV32IM) every M instruction on the edge cases.
+instruction (PC, the trap state (cause, tval) and every register at each instruction
+boundary; cause, tval and epc, all memory and the output at the end), on programs
+exercising every RV32I instruction, the traps, RV32E's register limit, and (RV32IM)
+every M instruction on the edge cases.
 
 Proofs (`src/Rv/Proofs.wiz`, kernel-checked): from the decode phase, two cycles of the
 RV32E core give the specification's PC and rd for XOR, OR, AND, XORI, ORI, ANDI, LUI and
 AUIPC, for every PC, register file, memory (holding the instruction at PC) and every
-value of the core's other registers. FINDINGS.md, H2, says why not the others.
+value of the core's other registers. The trap-state claims (`Pf.TrapClaimAt`) give the
+specification's cause, tval and epc for ECALL, EBREAK, an illegal instruction, and a
+misaligned load, store and jump (the address ones from a concrete x1, because the
+address adder is not bridged for a symbolic operand yet). FINDINGS.md, H2, says why not
+the other instructions.
+
+## Independent oracle
+
+`oracle/` is verification infrastructure, not part of the core. It compares the
+executable specification (`Rv.Isa`), the multi-cycle core, an independent Python RV32I
+reference, `sail-riscv` and Spike on one architectural trace per instruction (PC, trap
+cause, all 32 registers and the data memory), on ALU, branch, load/store, shift and
+mixed fixtures. The Wiz sides also emit the rest of the trap state (`tval`, `epc`) on a
+`T` line; six `trap_*` fixtures stop the machine on each trap cause and compare it
+between `isa`, `core` and `py` (Sail/Spike enter a handler and are reported as skips,
+not passes). The recorded run (sail-riscv 0.12, Spike 1.1.1-dev) has 31 passing
+comparisons, 0 failures and 2 documented skips (Spike cannot load at 0, so the two
+AUIPC fixtures are Sail/Python-only); the trap set adds 33 `isa`/`core`/`py`
+comparisons, all passing.
+
+The same directory has an `rvfi` (RISC-V Formal Interface) wrapper for the emitted
+core. It is generated from the flat Verilog by `oracle/scripts/mkrvfi.py`, linted with
+Icarus, and its rvfi beats are simulated and compared with the Python reference on all
+five fixtures. The riscv-formal checks were then run against the pinned revision
+`c992aa61fdfe0846c5ed90324c596202a1c69b76` (2026-07-16, yosys 0.70+post, sby 0.70,
+boolector 3.2.4, Icarus 13.0): **37/37 `insn_*_ch0` checks pass** (every base-I
+instruction), `causal_mem_ch0` passes on the mixed load/store program, and the
+`reg`/`pc_fwd`/`pc_bwd`/`causal`/`unique`/`liveness` consistency checks pass on the
+load program. No assertion failed. See [oracle/README.md](oracle/README.md) and
+[oracle/riscv-formal/README.md](oracle/riscv-formal/README.md).
 
 ## Toolchain
 
-The HDL memories are Wiz PR #166 and the fast netlist simulator PR #199, both unmerged
-when this was written: the toolchain here is wiz master 50cd3e7 with both branches
-merged locally (`wiz-toolchain` names it). `flake.nix` gives yosys, nextpnr-ice40,
-icestorm and Icarus Verilog.
+The HDL memories (PR #166) and the fast netlist simulator (PR #199) were unmerged when
+this was written, so the original toolchain was wiz master 50cd3e7 with both branches
+merged locally. They are in master now: `wiz-toolchain` pins `master@071a033a…`, the
+first snapshot release that has both, instead of a local-merge description. `flake.nix`
+gives yosys, nextpnr-ice40, icestorm and Icarus Verilog.
 
 ```sh
 grail build          # check the library, compile the driver

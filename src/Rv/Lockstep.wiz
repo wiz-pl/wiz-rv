@@ -31,7 +31,11 @@ def Ls.regDiff (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (a : Arch) : Nat → Lis
 def Ls.compare (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (a : Arch) : List String :=
   List.append (if Nat.beq s.pc.toNat a.pc.toNat then .nil
       else .cons ("pc: core " ++ Nat.repr s.pc.toNat ++ ", spec " ++ Nat.repr a.pc.toNat) .nil)
-    (Ls.regDiff ab wb s a (Rv.pow2 ab - 1))
+    (List.append (if Nat.beq s.trap.toNat a.trap then .nil
+        else .cons ("trap: core " ++ Nat.repr s.trap.toNat ++ ", spec " ++ Nat.repr a.trap) .nil)
+      (List.append (if Nat.beq s.tval.toNat a.tval.toNat then .nil
+          else .cons ("tval: core " ++ Nat.repr s.tval.toNat ++ ", spec " ++ Nat.repr a.tval.toNat) .nil)
+        (Ls.regDiff ab wb s a (Rv.pow2 ab - 1))))
 
 -- the core's byte at address `x`
 def Ls.byte (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (x : Nat) : Nat :=
@@ -77,9 +81,13 @@ def Ls.finish (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (a : Arch) (cyc ins : Nat
   let ω outP : List String := if Ls.natsEq o (List.reverse a.out) then .nil else .cons "output differs" .nil;
   let ω trapP : List String := if Nat.beq s.trap.toNat a.trap then .nil
     else .cons ("trap: core " ++ Nat.repr s.trap.toNat ++ ", spec " ++ Nat.repr a.trap) .nil;
+  let ω tvalP : List String := if Nat.beq s.tval.toNat a.tval.toNat then .nil
+    else .cons ("tval: core " ++ Nat.repr s.tval.toNat ++ ", spec " ++ Nat.repr a.tval.toNat) .nil;
+  let ω epcP : List String := if Nat.beq s.pc.toNat a.epc.toNat then .nil
+    else .cons ("epc: core " ++ Nat.repr s.pc.toNat ++ ", spec " ++ Nat.repr a.epc.toNat) .nil;
   Ls.Result.mk cyc ins s.trap.toNat o
-    (List.append why (List.append trapP (List.append outP (List.append (Ls.compare ab wb s a)
-      (List.append (Ls.memDiff ab wb s a (Rv.pow2 (wb + 2))) (Ls.ddrDiff ddr a 256))))))
+    (List.append why (List.append trapP (List.append tvalP (List.append epcP (List.append outP (List.append (Ls.compare ab wb s a)
+      (List.append (Ls.memDiff ab wb s a (Rv.pow2 (wb + 2))) (Ls.ddrDiff ddr a 256))))))))
 
 -- The bus: a DDR model (bytes, initially zero) that answers a request `lat` cycles
 -- after it is made.

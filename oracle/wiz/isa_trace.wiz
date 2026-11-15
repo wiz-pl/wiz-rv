@@ -1,0 +1,8 @@
+import OracleTrace
+import IO
+-- `isa_trace FIXTURE`: the executable ISA specification (`Rv.Isa`) on a fixture,
+-- as a trace in the oracle's line format (see Trace.wiz).
+def main : IO Unit := IO.bind IO.args (fun args =>
+  match args with
+  | .cons path .nil => Tr.isaMain path
+  | _ => IO.println "usage: isa_trace FIXTURE")

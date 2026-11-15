@@ -6,6 +6,13 @@ import Rv.Asm
 -- value in rd. The architectural state is symbolic (any PC, any registers, any memory,
 -- any leftovers in the core's other registers); the instruction is a fixed word.
 --
+-- The trap half (`Pf.TrapClaimAt`): a trapping instruction stops with the specification's
+-- cause, tval and epc. ECALL, EBREAK and an illegal instruction are proved for a fully
+-- symbolic architectural state; the misaligned load/store/jump, whose tval is an
+-- address, are proved from a state with a concrete x1 (the PC, memory and the other
+-- registers stay symbolic), because the core's address adder and the specification's
+-- `BitVec.add` are not yet bridged for a symbolic operand (rv-core-proofs.md §6 item 1).
+--
 -- What goes through by `rfl` and what does not: FINDINGS.md, P1.
 
 def Pf.wb : Nat := 9
@@ -20,6 +27,7 @@ def Pf.at (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc 
   CoreSt.mk (BitVec.ofNat 4 Ph.d) a.pc
     (BitVec.ofNat 8 (Rv.bits w 0 8)) (BitVec.ofNat 8 (Rv.bits w 8 8)) (BitVec.ofNat 8 (Rv.bits w 16 8)) (BitVec.ofNat 8 (Rv.bits w 24 8))
     m0 m1 m2 m3 (Pf.rf a) (Pf.rf a) x1 x2 acc dv rm cnt srd sf3 slo sio (BitVec.ofNat 3 0)
+    (BitVec.ofNat 32 0)
     (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0)
     (BitVec.ofNat 4 0) (BitVec.ofNat 4 0) (BitVec.ofNat 1 0)
     (BitVec.ofNat 32 0) (BitVec.ofNat 128 0) (BitVec.ofNat (L1.tagW 9) 0)
@@ -53,7 +61,7 @@ def Pf.bytes (w : Nat) : Pf.Q :=
 
 -- a state with other read data
 def Pf.setQ (s : CoreSt 4 9 HwTy.El) (q : Pf.Q) : CoreSt 4 9 HwTy.El :=
-  CoreSt.mk s.ph s.pc q.1 q.2.1 q.2.2.1 q.2.2.2 s.m0 s.m1 s.m2 s.m3 s.rfa s.rfb s.x1 s.x2 s.acc s.dv s.rm s.cnt s.srd s.sf3 s.slo s.sio s.trap s.busq s.fromBus s.badr s.bwe s.bwd s.bst s.bret s.bsent s.ra s.l1q s.l1t s.l1d s.l1tag s.fromL1 s.rmode s.rk s.rgap s.rbuf s.rline s.bnew s.resv s.resOk s.amoA s.amoD s.amoO s.sf5 s.ak s.baop s.baf5
+  CoreSt.mk s.ph s.pc q.1 q.2.1 q.2.2.1 q.2.2.2 s.m0 s.m1 s.m2 s.m3 s.rfa s.rfb s.x1 s.x2 s.acc s.dv s.rm s.cnt s.srd s.sf3 s.slo s.sio s.trap s.tval s.busq s.fromBus s.badr s.bwe s.bwd s.bst s.bret s.bsent s.ra s.l1q s.l1t s.l1d s.l1tag s.fromL1 s.rmode s.rk s.rgap s.rbuf s.rline s.bnew s.resv s.resOk s.amoA s.amoD s.amoO s.sf5 s.ak s.baop s.baf5
 
 -- the execute cycle, as a function of the read data
 def Pf.G (a : Arch) (w rd : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32) (cnt srd : BitVec 5)
@@ -75,6 +83,58 @@ def Pf.Claim (w rd : Nat) : Prop :=
   (a : Arch) → (m0 m1 m2 m3 : BitVec 9 → BitVec 8) → (x1 x2 acc dv rm : BitVec 32) → (cnt srd : BitVec 5) → (sf3 : BitVec 3) → (slo : BitVec 2) → (sio : BitVec 1) →
   Pf.fetchQ a m0 m1 m2 m3 = Pf.bytes w →
   Pf.core (Pf.step (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio))) rd = Pf.spec a w rd
+
+------------------------------------------------------------------------------------
+-- The trap-state claim: cause, tval and epc
+
+-- what a core state shows of its trap (in H, the PC is the epc: it stopped on the
+-- trapping instruction and does not move), and what the specification says
+def Pf.trapCore (s : CoreSt 4 9 HwTy.El) : Nat × BitVec 32 × BitVec 32 :=
+  (s.trap.toNat, s.tval, s.pc)
+def Pf.trapSpec (a : Arch) (w : Nat) : Nat × BitVec 32 × BitVec 32 :=
+  let a' := Rv.exec Pf.cfg a w; (a'.trap, a'.tval, a'.epc)
+
+-- the execute cycle, as a function of the read data (as `Pf.G`)
+def Pf.trapG (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32) (cnt srd : BitVec 5)
+    (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) (q : Pf.Q) : Nat × BitVec 32 × BitVec 32 :=
+  Pf.trapCore (Pf.step (Pf.setQ (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) q))
+
+def Pf.trapOk (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32) (cnt srd : BitVec 5)
+    (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1)
+    (hE : Pf.trapG a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio (Pf.bytes w) = Pf.trapSpec a w)
+    (h : Pf.fetchQ a m0 m1 m2 m3 = Pf.bytes w) :
+    Pf.trapCore (Pf.step (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio))) = Pf.trapSpec a w :=
+  Eq.trans (Eq.congrArg (Pf.trapG a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h) hE
+
+-- The trap-state claim for `w`, from a state built by `p` (the traps that record an
+-- address need a concrete register value; see `Pf.x1is2`).
+def Pf.TrapClaimAt (p : Arch → Arch) (w : Nat) : Prop :=
+  (a : Arch) → (m0 m1 m2 m3 : BitVec 9 → BitVec 8) → (x1 x2 acc dv rm : BitVec 32) → (cnt srd : BitVec 5) → (sf3 : BitVec 3) → (slo : BitVec 2) → (sio : BitVec 1) →
+  Pf.fetchQ (p a) m0 m1 m2 m3 = Pf.bytes w →
+  Pf.trapCore (Pf.step (Pf.step (Pf.at (p a) w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio))) = Pf.trapSpec (p a) w
+
+-- x1 = 2, the other registers 0: the PC, memory, trap state and ports stay symbolic
+def Pf.x1is2 (a : Arch) : Arch :=
+  Arch.mk a.pc (fun (j : BitVec 5) => if BitVec.beq j (BitVec.ofNat 5 1) then Rv.w32 2 else Rv.w32 0)
+    a.mem a.trap a.tval a.epc a.out a.inp
+
+-- ECALL and EBREAK: tval 0; epc the instruction's PC; nothing else moves
+def Pf.ecall_trap : Pf.TrapClaimAt (fun a => a) (Pf.w A.ecall) := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+  Pf.trapOk a (Pf.w A.ecall) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio rfl h
+def Pf.ebreak_trap : Pf.TrapClaimAt (fun a => a) (Pf.w A.ebreak) := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+  Pf.trapOk a (Pf.w A.ebreak) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio rfl h
+-- an illegal instruction: tval is the instruction word (here 0xffffffff)
+def Pf.illegal_trap : Pf.TrapClaimAt (fun a => a) 4294967295 := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+  Pf.trapOk a 4294967295 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio rfl h
+-- a misaligned load (x1 = 2, LW at 2): tval is the effective address
+def Pf.load_trap : Pf.TrapClaimAt Pf.x1is2 (Pf.w (A.lw 2 0 1)) := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+  Pf.trapOk (Pf.x1is2 a) (Pf.w (A.lw 2 0 1)) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio rfl h
+-- a misaligned store (x1 = 2, SW at 2): tval is the effective address
+def Pf.store_trap : Pf.TrapClaimAt Pf.x1is2 (Pf.w (A.sw 2 0 1)) := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+  Pf.trapOk (Pf.x1is2 a) (Pf.w (A.sw 2 0 1)) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio rfl h
+-- a misaligned jump (x1 = 2, JALR at 2): tval is the target
+def Pf.jump_trap : Pf.TrapClaimAt Pf.x1is2 (Pf.w (A.jalr 0 1 0)) := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+  Pf.trapOk (Pf.x1is2 a) (Pf.w (A.jalr 0 1 0)) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio rfl h
 
 def Pf.xor_ok : Pf.Claim (Pf.w (A.xor 3 1 2)) 3 := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
   Pf.ok a (Pf.w (A.xor 3 1 2)) 3 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio rfl h

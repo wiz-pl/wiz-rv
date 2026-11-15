@@ -14,8 +14,20 @@ def report (name : String) (p : List Asm) (steps : Nat) : IO Unit := reportCfg n
 
 def cfgA : Cfg := Cfg.rv32ia 12
 
+-- the trap state (cause, tval, epc) after the run: the specification's `mcause`/
+-- `mtval`/`mepc` triple
+def reportTrap (name : String) (p : List Asm) (steps : Nat) : IO Unit :=
+  let s := Rv.run (Cfg.rv32e 12) steps (Arch.start (Cfg.rv32e 12) (Asm.assemble p));
+  IO.println (name ++ ": cause " ++ Nat.repr s.trap ++ ", tval " ++ Nat.repr s.tval.toNat
+    ++ ", epc " ++ Nat.repr s.epc.toNat ++ ", pc " ++ Nat.repr s.pc.toNat)
+
 def main : IO Unit := do
   report "sum" Prog.sum 100;
   reportCfg "atomics" cfgA Prog.atomics 200;
   reportCfg "atomics ddr" cfgA Prog.atomicsDdr 100;
-  reportCfg "atomics resv" cfgA Prog.atomicsResv 30
+  reportCfg "atomics resv" cfgA Prog.atomicsResv 30;
+  reportTrap "trapLoad" Prog.trapLoad 50;
+  reportTrap "trapStore" Prog.trapStore 50;
+  reportTrap "trapJump" Prog.trapJump 50;
+  reportTrap "trapIllegal" Prog.trapIllegal 50;
+  reportTrap "trapEcall" Prog.trapEcall 50
