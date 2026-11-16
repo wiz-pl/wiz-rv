@@ -8,7 +8,7 @@ import Rv.Asm
 --
 -- The trap half (`Pf.TrapClaimAt`): a trapping instruction stops with the specification's
 -- cause, tval and epc. ECALL, EBREAK and an illegal instruction are proved for a fully
--- symbolic architectural state; the misaligned load/store/jump, whose tval is an
+-- symbolic architectural state; the misaligned load and store, whose tval is an
 -- address, are proved from a state with a concrete x1 (the PC, memory and the other
 -- registers stay symbolic), because the core's address adder and the specification's
 -- `BitVec.add` are not yet bridged for a symbolic operand (rv-core-proofs.md §6 item 1).
@@ -17,9 +17,8 @@ import Rv.Asm
 -- `J` phase), so these two-cycle claims are about an aligned 32-bit instruction: the
 -- core state's `al` (bit 1 of the instruction's PC) is 0. That is the case the claims
 -- are about; `tests/lockstep.wiz` and `tests/plockstep.wiz` cover the unaligned one.
--- The C expansion's terms make the kernel's `rfl` reduction of the 32-bit path exceed a
--- 4 GiB cap, so this file is opt-in (`scripts/core-proofs.sh`) rather than part of
--- `grail build`; FINDINGS.md H12.
+-- With `al` 0 the core's second-fetch test (`need2`, a `gate`) is 0 for any word, so the
+-- glue (`Pf.ok`, for a symbolic word) never reduces the C expansion; FINDINGS.md H12.
 --
 -- What goes through by `rfl` and what does not: FINDINGS.md, P1.
 
@@ -70,20 +69,61 @@ def Pf.bytes (w : Nat) : Pf.Q :=
 def Pf.setQ (s : CoreSt 4 9 HwTy.El) (q : Pf.Q) : CoreSt 4 9 HwTy.El :=
   CoreSt.mk s.ph s.pc q.1 q.2.1 q.2.2.1 q.2.2.2 s.m0 s.m1 s.m2 s.m3 s.rfa s.rfb s.x1 s.x2 s.acc s.dv s.rm s.cnt s.srd s.sf3 s.slo s.sio s.trap s.tval s.busq s.fromBus s.badr s.bwe s.bwd s.bst s.bret s.bsent s.ra s.l1q s.l1t s.l1d s.l1tag s.fromL1 s.rmode s.rk s.rgap s.rbuf s.rline s.bnew s.w1 s.ins s.half s.al
 
--- the execute cycle, as a function of the read data
-def Pf.G (a : Arch) (w rd : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32) (cnt srd : BitVec 5)
-    (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) (q : Pf.Q) : BitVec 32 × BitVec 32 :=
-  Pf.core (Pf.step (Pf.setQ (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) q)) rd
-
 -- The glue: if memory at PC holds the instruction and the execute cycle on it does what
 -- the specification says, the two cycles from decode do. (For any `w`: the decode
 -- cycle reads the memory at PC whatever the instruction.)
+--
+-- It goes in three steps, none of which compares two cycles of the core with an unknown
+-- instruction (with the C expansion in `decode` that comparison does not finish in 5 GB):
+-- `Pf.eta` (a state is itself with its own read data put back: η, for any state),
+-- `Pf.readQ` (the decode cycle's read data are the memory at PC: one cycle, evaluated,
+-- and only the read data compared), and congruence to put the hypotheses in.
+def Pf.eta (s : CoreSt 4 9 HwTy.El) : s = Pf.setQ s (s.q0, s.q1, s.q2, s.q3) := rfl
+
+def Pf.readQ (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32) (cnt srd : BitVec 5)
+    (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) :
+    ((Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q0,
+     (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q1,
+     (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q2,
+     (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q3) = Pf.fetchQ a m0 m1 m2 m3 := rfl
+
+-- Any observation `F` of a state is `F` of that state with its read data replaced by
+-- data equal to them. For any state and any data: nothing here is evaluated.
+def Pf.glueG {0 T : Type} (F : CoreSt 4 9 HwTy.El → T) (D : CoreSt 4 9 HwTy.El) (q : Pf.Q)
+    (hq : (D.q0, D.q1, D.q2, D.q3) = q) : F D = F (Pf.setQ D q) :=
+  Eq.trans (A := T) (a := F D) (b := F (Pf.setQ D (D.q0, D.q1, D.q2, D.q3))) (c := F (Pf.setQ D q))
+    (Eq.congrArg (A := CoreSt 4 9 HwTy.El) (B := T) F
+      (a := D) (b := Pf.setQ D (D.q0, D.q1, D.q2, D.q3)) (Pf.eta D))
+    (Eq.congrArg (A := Pf.Q) (B := T) (fun (q' : Pf.Q) => F (Pf.setQ D q'))
+      (a := (D.q0, D.q1, D.q2, D.q3)) (b := q) hq)
+
+-- the decode cycle's read data are the instruction's bytes, given memory at PC holds them
+def Pf.readW (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32) (cnt srd : BitVec 5)
+    (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1)
+    (h : Pf.fetchQ a m0 m1 m2 m3 = Pf.bytes w) :
+    ((Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q0, (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q1,
+     (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q2, (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q3) = Pf.bytes w :=
+  Eq.trans (A := Pf.Q)
+    (a := ((Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q0, (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q1,
+           (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q2, (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q3))
+    (b := Pf.fetchQ a m0 m1 m2 m3) (c := Pf.bytes w)
+    (Pf.readQ a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h
+
+-- (The implicit arguments of `Eq.trans` are given: inferring them would put an
+-- equation between two cycles of the core in normal form, at the record's type, where
+-- it is a record of equations.)
 def Pf.ok (a : Arch) (w rd : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32) (cnt srd : BitVec 5)
     (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1)
-    (hE : Pf.G a w rd m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio (Pf.bytes w) = Pf.spec a w rd)
+    (hE : Pf.core (Pf.step (Pf.setQ (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) (Pf.bytes w))) rd = Pf.spec a w rd)
     (h : Pf.fetchQ a m0 m1 m2 m3 = Pf.bytes w) :
     Pf.core (Pf.step (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio))) rd = Pf.spec a w rd :=
-  Eq.trans (Eq.congrArg (Pf.G a w rd m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h) hE
+  Eq.trans (A := BitVec 32 × BitVec 32)
+    (a := Pf.core (Pf.step (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio))) rd)
+    (b := Pf.core (Pf.step (Pf.setQ (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) (Pf.bytes w))) rd)
+    (c := Pf.spec a w rd)
+    (Pf.glueG (fun (s : CoreSt 4 9 HwTy.El) => Pf.core (Pf.step s) rd) (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) (Pf.bytes w)
+      (Pf.readW a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h))
+    hE
 
 -- The claim for one instruction word `w` writing rd.
 def Pf.Claim (w rd : Nat) : Prop :=
@@ -101,17 +141,18 @@ def Pf.trapCore (s : CoreSt 4 9 HwTy.El) : Nat × BitVec 32 × BitVec 32 :=
 def Pf.trapSpec (a : Arch) (w : Nat) : Nat × BitVec 32 × BitVec 32 :=
   let a' := Rv.exec Pf.cfg a w; (a'.trap, a'.tval, a'.epc)
 
--- the execute cycle, as a function of the read data (as `Pf.G`)
-def Pf.trapG (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32) (cnt srd : BitVec 5)
-    (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) (q : Pf.Q) : Nat × BitVec 32 × BitVec 32 :=
-  Pf.trapCore (Pf.step (Pf.setQ (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) q))
-
 def Pf.trapOk (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32) (cnt srd : BitVec 5)
     (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1)
-    (hE : Pf.trapG a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio (Pf.bytes w) = Pf.trapSpec a w)
+    (hE : Pf.trapCore (Pf.step (Pf.setQ (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) (Pf.bytes w))) = Pf.trapSpec a w)
     (h : Pf.fetchQ a m0 m1 m2 m3 = Pf.bytes w) :
     Pf.trapCore (Pf.step (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio))) = Pf.trapSpec a w :=
-  Eq.trans (Eq.congrArg (Pf.trapG a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h) hE
+  Eq.trans (A := Nat × BitVec 32 × BitVec 32)
+    (a := Pf.trapCore (Pf.step (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio))))
+    (b := Pf.trapCore (Pf.step (Pf.setQ (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) (Pf.bytes w))))
+    (c := Pf.trapSpec a w)
+    (Pf.glueG (fun (s : CoreSt 4 9 HwTy.El) => Pf.trapCore (Pf.step s)) (Pf.step (Pf.at a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) (Pf.bytes w)
+      (Pf.readW a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h))
+    hE
 
 -- The trap-state claim for `w`, from a state built by `p` (the traps that record an
 -- address need a concrete register value; see `Pf.x1is2`).
@@ -139,9 +180,16 @@ def Pf.load_trap : Pf.TrapClaimAt Pf.x1is2 (Pf.w (A.lw 2 0 1)) := fun a m0 m1 m2
 -- a misaligned store (x1 = 2, SW at 2): tval is the effective address
 def Pf.store_trap : Pf.TrapClaimAt Pf.x1is2 (Pf.w (A.sw 2 0 1)) := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
   Pf.trapOk (Pf.x1is2 a) (Pf.w (A.sw 2 0 1)) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio rfl h
--- a misaligned jump (x1 = 2, JALR at 2): tval is the target
-def Pf.jump_trap : Pf.TrapClaimAt Pf.x1is2 (Pf.w (A.jalr 0 1 0)) := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
-  Pf.trapOk (Pf.x1is2 a) (Pf.w (A.jalr 0 1 0)) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio rfl h
+-- With C a jump target need only be a multiple of 2, so JALR to x1 = 2 is not a trap
+-- (and no JAL/JALR/branch encoding can make one: JALR clears bit 0, the offsets are
+-- even). What is proved instead: the core's next PC is the specification's, 2, and x0
+-- stays 0.
+def Pf.ClaimAt (p : Arch → Arch) (w rd : Nat) : Prop :=
+  (a : Arch) → (m0 m1 m2 m3 : BitVec 9 → BitVec 8) → (x1 x2 acc dv rm : BitVec 32) → (cnt srd : BitVec 5) → (sf3 : BitVec 3) → (slo : BitVec 2) → (sio : BitVec 1) →
+  Pf.fetchQ (p a) m0 m1 m2 m3 = Pf.bytes w →
+  Pf.core (Pf.step (Pf.step (Pf.at (p a) w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio))) rd = Pf.spec (p a) w rd
+def Pf.jump_half : Pf.ClaimAt Pf.x1is2 (Pf.w (A.jalr 0 1 0)) 0 := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+  Pf.ok (Pf.x1is2 a) (Pf.w (A.jalr 0 1 0)) 0 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio rfl h
 
 def Pf.xor_ok : Pf.Claim (Pf.w (A.xor 3 1 2)) 3 := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
   Pf.ok a (Pf.w (A.xor 3 1 2)) 3 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio rfl h

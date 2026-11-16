@@ -433,8 +433,10 @@ def coreStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (s : CoreSt ab
   let win : r B32 := Hw.mux s.half s.ins
     (Hw.mux s.al (Hw.cat (Hw.lit 16 0) (Hw.slice 16 16 w : r B16)) w);
   -- C: a 32-bit instruction at an odd halfword: its second word is at pc + 2
-  let need2 : r W1 := Hw.and (Hw.not s.half)
-    (Hw.and s.al (isK (Hw.slice 16 2 w : r B2) 3));
+  -- (`gate`, not `Hw.and`: with `al` known to be 0 this is 0 whatever the word, so the
+  -- next phase and read address of a symbolic instruction still reduce; FINDINGS H2)
+  let need2 : r W1 := gate (Hw.not s.half)
+    (gate s.al (isK (Hw.slice 16 2 w : r B2) 3));
   let wq0 : r W8 := Hw.slice 0 8 w;
   let wq1 : r W8 := Hw.slice 8 8 w;
   let wq2 : r W8 := Hw.slice 16 8 w;
