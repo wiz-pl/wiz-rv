@@ -51,6 +51,9 @@ def trapsE : List String :=
 -- Zicsr: write, read back, set and clear bits, the immediate forms, the WARL masks
 -- (docs/csr.md)
 def csrE : String := report 4 Prog.csr 400
+-- the immediate forms at uimm = 0: CSRRWI writes, CSRRSI/CSRRCI do not (issue #11);
+-- the output bytes are fixed by the ISA manual, so a bug both models share shows here
+def csrImmE : String := report 4 Prog.csrImm 100
 -- traps and interrupts with handlers (vectored mtvec): ECALL handled and returned past,
 -- the timer interrupt in a loop, WFI waiting for MEIP with MIE off, the external
 -- interrupt once MIE is set; then interrupts at arbitrary points of a load/store/branch
@@ -105,7 +108,7 @@ def say : List String → IO Unit
 def all : List String :=
   List.append (sumE :: aluE :: shiftE :: memE :: branchE :: sortE :: .nil)
     (List.append trapsE
-      (List.append (csrE :: irqE :: irqStressE :: ddrE :: ioE :: x16I :: aluI :: mulI :: mulIM :: .nil)
+      (List.append (csrE :: csrImmE :: irqE :: irqStressE :: ddrE :: ioE :: x16I :: aluI :: mulI :: mulIM :: .nil)
         (List.append (cE :: cUE :: .nil)
           (List.append cBadE
             (List.append (atomicsI :: atomicsResvI :: .nil)

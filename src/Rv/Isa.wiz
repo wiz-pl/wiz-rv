@@ -630,8 +630,8 @@ def Rv.execAt (c : Cfg) (s : Arch) (w : Nat) (len : Nat) (raw : Nat) : Arch :=
   let ω csr := Rv.bits w 20 12;
   let ω a := Rv.reg s r1;
   let ω b := Rv.reg s r2;
-  -- CSRRS/CSRRC with rs1 = x0 do not write; CSRRW always does
-  let ω csrWrite := Bool.or (Nat.beq f3 1) (Bool.not (Nat.beq r1 0));
+  -- CSRRS/CSRRC (and CSRRSI/CSRRCI) with rs1 (uimm) = 0 do not write; CSRRW and CSRRWI always do
+  let ω csrWrite := Bool.or (Bool.or (Nat.beq f3 1) (Nat.beq f3 5)) (Bool.not (Nat.beq r1 0));
   let ω csrKind := Bool.or (Bool.or (Nat.beq f3 1) (Nat.beq f3 2)) (Bool.or (Nat.beq f3 3)
     (Bool.or (Nat.beq f3 5) (Bool.or (Nat.beq f3 6) (Nat.beq f3 7))));
   let ω csrOk := Bool.and (Rv.csrExists csr) (Bool.or (Bool.not csrWrite) (Rv.csrWritable csr));
