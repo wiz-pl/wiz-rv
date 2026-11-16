@@ -14,11 +14,12 @@ def GProg.puts : List Asm :=
   A.label "g.puts" :: A.lbu 5 0 10 :: A.beqz 5 "g.puts.e" :: A.sb 5 0 15 :: A.addi 10 10 1 ::
   A.j "g.puts" :: A.label "g.puts.e" :: A.ret :: .nil
 
--- copy `ws` to x11 + 256 + 4k, one store per word
+-- copy the image `hs` to x11 + 256 + 2k, one store per halfword (an assembled image is
+-- halfwords since the C extension, as `D.copyWords` has it)
 def GProg.copy : Nat → List Nat → List Asm
   | _, .nil => .nil
-  | k, .cons w ws =>
-    A.li 7 (Int.ofNat w) :: A.sw 7 (Int.ofNat (256 + 4 * k)) 11 :: GProg.copy (Nat.succ k) ws
+  | k, .cons h hs =>
+    A.li 7 (Int.ofNat h) :: A.sh 7 (Int.ofNat (256 + 2 * k)) 11 :: GProg.copy (Nat.succ k) hs
 
 -- the DDR routine (adds 7 to x5, doubles it, returns): copied and called from DDR
 def GProg.ddrRoutine : List Nat := D.routine
