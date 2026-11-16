@@ -1,3 +1,5 @@
+import Rv.Golem.Bus
+import Rv.DPipe
 import Rv.Doom
 import Ddr3.Cache
 import Ddr3.Board
@@ -53,7 +55,7 @@ def Top.core {r : HwTy → Type} [Hw r] (t : Timing) (h : Circuit DIn.code DOut.
   -- the machine's bus request comes from its state: ask with no answer first
   let quiet := DIn.pack (DIn.mk rx btn (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 32 0) (Hw.lit 2 0) (Hw.lit 32 0) (Hw.lit 32 0));
   let ω o0 := DOut.unpack (Hw.snd (Circuit.inst h s.sys quiet));
-  let ω a0 := Hw.snd (busStep bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb (CacheResp.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 32 0)));
+  let ω a0 := Hw.snd (busStep bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb o0.aop o0.af5 (CacheResp.mk (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 32 0)));
   let ω q := CacheReq.unpack (Hw.fst a0);
   -- the controller's answer to the cache comes from its state and its PHY input
   let co0 := Ctrl.step t cs (PortIn.mk U.lo U.lo (Hw.lit 24 0) (Hw.lit 128 0) (Hw.lit 16 0)) (PhyIn.unpack phyIn);
@@ -63,7 +65,7 @@ def Top.core {r : HwTy → Type} [Hw r] (t : Timing) (h : Circuit DIn.code DOut.
   let ω cst := CSt.unpack s.cache;
   let co := Ctrl.step t cs (PortIn.unpack (Hw.snd (Hw.snd cr))) (PhyIn.unpack phyIn);
   let ω po := PortOut.unpack (Hw.fst (Hw.snd co));
-  let br := busStep bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb (CacheResp.mk resp.ready resp.rvalid resp.rdata);
+  let br := busStep bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb o0.aop o0.af5 (CacheResp.mk resp.ready resp.rvalid resp.rdata);
   let ω toCore := CacheResp.unpack (Hw.snd (Hw.snd br));
   -- the core waits in reset for the calibration
   let calEnd := Hw.or po.calDone po.calFail;
@@ -146,7 +148,7 @@ def stubStep {r : HwTy → Type} [Hw r] (s : Stub r) (x : DIn r) : r (HwTy.prod 
           (Hw.mux busy s.we (bitOf 5 s.lfsr))
           (Hw.mux x.rvalid (Hw.xor s.acc x.rdata) s.acc)))
         (DOut.pack (DOut.mk (bitOf 0 s.acc) (Hw.slice 1 4 s.acc) (Hw.slice 8 8 s.acc) (Hw.slice 16 8 s.acc)
-          s.valid s.addr s.we s.lfsr (Hw.slice 4 4 s.lfsr) s.valid))
+          s.valid s.addr s.we s.lfsr (Hw.slice 4 4 s.lfsr) (Hw.lit 2 0) (Hw.lit 5 0) s.valid))
 def stubSys : Circuit DIn.code DOut.code :=
   Circuit.bundled Stub.bundle DIn.bundle DOut.bundle
     (Stub.mk (BitVec.ofNat 32 2463534242) (BitVec.ofNat 1 0) (BitVec.ofNat 32 1073741824) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0))

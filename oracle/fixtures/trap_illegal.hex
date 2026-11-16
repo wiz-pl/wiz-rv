@@ -1,0 +1,5 @@
+trap_illegal
+rv32i 14 6 8192 256
+00100093
+ffffffff
+0000006f

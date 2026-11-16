@@ -1,0 +1,38 @@
+import Rv.Oled
+import Rv.Golem.Mini
+-- The OLED half of the golem simulation, on its own: the framebuffer, the SSD1331
+-- streamer and the SPI serialiser, with no core and no bus. The state is the controller
+-- at its `pixels` step (`Mini.oledPixels`) and a framebuffer preloaded with the pixels;
+-- `Circuit.run` for 200 cycles streams the first bytes of the frame, which the test
+-- decodes from JA. (The whole machine's run is over the build cap; DESIGN.md,
+-- "Simulation".)
+
+structure OSt (fl : Nat) (r : HwTy → Type) where
+  pix : r (HwTy.mem 13 16)
+  col : r (HwTy.bits 16)
+  oled : RCtl fl r
+  deriving Bundle
+
+structure OOut (r : HwTy → Type) where
+  ja : r W8
+  jb : r W8
+  deriving Bundle
+
+def OledSim.step (cfg : RgbCfg) {r : HwTy → Type} [Hw r] (s : OSt cfg.frameLog r) (x : r W1) :
+    r (HwTy.prod (OSt.code cfg.frameLog) OOut.code) :=
+  let ω ol := s.oled;
+  let y13 : r (HwTy.bits 13) := Hw.cat (Hw.lit 7 0) ol.gen.y;
+  let idx : r (HwTy.bits 13) := Hw.add (Hw.add (Hw.shl y13 6) (Hw.shl y13 5)) (Hw.cat (Hw.lit 6 0) ol.gen.x);
+  let oledNext := rctlStep cfg RProg.tree ol s.col;
+  Hw.pair
+    (OSt.pack cfg.frameLog (OSt.mk s.pix (Hw.memRead s.pix idx) (RCtl.unpack cfg.frameLog oledNext)))
+    (OOut.pack (OOut.mk
+      (Hw.cat ol.pins.pmoden (Hw.cat ol.pins.vccen (Hw.cat ol.pins.res (Hw.cat ol.pins.dc
+        (Hw.cat ol.spi.sclk (Hw.cat (Hw.lit 1 0) (Hw.cat ol.spi.mosi ol.pins.cs)))))))
+      (Hw.lit 8 0)))
+
+def OledSim.circuit (cfg : RgbCfg) (pixels : List Nat) : Circuit (HwTy.bits 1) OOut.code :=
+  Circuit.mk (OSt.code cfg.frameLog)
+    (Bundle.toEl (OSt.bundle cfg.frameLog)
+      (OSt.mk (Mini.pix0 pixels) (BitVec.ofNat 16 (Hdl.nthD 0 pixels 0)) (Mini.oledPixels cfg)))
+    (fun s x => OledSim.step cfg (OSt.unpack cfg.frameLog s) x)
