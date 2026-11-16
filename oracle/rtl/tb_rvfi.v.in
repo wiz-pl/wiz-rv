@@ -1,0 +1,93 @@
+// Testbench for the rvfi wrapper: run the emitted core and print one trace line
+// per retired instruction, in the oracle's trace format.
+//
+//   iverilog -g2005 -o sim core.v rvfi.v tb_rvfi.v \
+//       -Ptb_rvfi.STEPS=32 -Ptb_rvfi.MBASE=8192 -Ptb_rvfi.MCOUNT=256
+//   vvp sim
+//
+// The rvfi beat is the *completion* of an instruction, so the printed state is the
+// post-state: it corresponds to `isa`/`py` trace line `step + 1` (the pre-state of
+// the following instruction), not line `step`.  oracle.py rvfi compares it that
+// way.  The register file and the four byte lanes are read hierarchically from the
+// core instance `dut` inside the wrapper; that is why the wrapper is a simulation
+// / formal artefact, not synthesisable RTL.
+`timescale 1ns/1ps
+
+module tb_rvfi;
+  parameter integer STEPS  = 32;
+  parameter integer MBASE  = 8192;
+  parameter integer MCOUNT = 256;
+
+  reg clk = 1'b0;
+  always #5 clk = ~clk;
+
+  wire        rvfi_valid;
+  wire [63:0] rvfi_order;
+  wire [31:0] rvfi_insn;
+  wire        rvfi_trap;
+  wire        rvfi_halt;
+  wire        rvfi_intr;
+  wire [1:0]  rvfi_mode;
+  wire [1:0]  rvfi_ixl;
+  wire [4:0]  rvfi_rs1_addr;
+  wire [4:0]  rvfi_rs2_addr;
+  wire [31:0] rvfi_rs1_rdata;
+  wire [31:0] rvfi_rs2_rdata;
+  wire [4:0]  rvfi_rd_addr;
+  wire [31:0] rvfi_rd_wdata;
+  wire [31:0] rvfi_pc_rdata;
+  wire [31:0] rvfi_pc_wdata;
+  wire [31:0] rvfi_mem_addr;
+  wire [3:0]  rvfi_mem_rmask;
+  wire [3:0]  rvfi_mem_wmask;
+  wire [31:0] rvfi_mem_rdata;
+  wire [31:0] rvfi_mem_wdata;
+
+  rvfi u(
+    .clk(clk), .rst(1'b0),
+    .rvfi_valid(rvfi_valid), .rvfi_order(rvfi_order), .rvfi_insn(rvfi_insn),
+    .rvfi_trap(rvfi_trap), .rvfi_halt(rvfi_halt), .rvfi_intr(rvfi_intr),
+    .rvfi_mode(rvfi_mode), .rvfi_ixl(rvfi_ixl),
+    .rvfi_rs1_addr(rvfi_rs1_addr), .rvfi_rs2_addr(rvfi_rs2_addr),
+    .rvfi_rs1_rdata(rvfi_rs1_rdata), .rvfi_rs2_rdata(rvfi_rs2_rdata),
+    .rvfi_rd_addr(rvfi_rd_addr), .rvfi_rd_wdata(rvfi_rd_wdata),
+    .rvfi_pc_rdata(rvfi_pc_rdata), .rvfi_pc_wdata(rvfi_pc_wdata),
+    .rvfi_mem_addr(rvfi_mem_addr), .rvfi_mem_rmask(rvfi_mem_rmask),
+    .rvfi_mem_wmask(rvfi_mem_wmask), .rvfi_mem_rdata(rvfi_mem_rdata),
+    .rvfi_mem_wdata(rvfi_mem_wdata));
+
+  integer beats = 0;
+  integer i, j, wa;
+  reg [31:0] b;
+  reg [31:0] regv;
+
+  always @(posedge clk) begin
+    if (rvfi_valid) begin
+      $write("S %0d %08x %08x", beats + 1, rvfi_pc_wdata, u.core_trap);
+      for (i = 0; i < 32; i = i + 1) begin
+        if (i == 0) regv = 32'd0;
+        else regv = u.dut.${P}rfa[i];
+        $write(" %08x", regv);
+      end
+      for (j = 0; j < MCOUNT; j = j + 1) begin
+        wa = (MBASE + j) >> 2;
+        case ((MBASE + j) & 3)
+          0: b = u.dut.${P}m0[wa];
+          1: b = u.dut.${P}m1[wa];
+          2: b = u.dut.${P}m2[wa];
+          default: b = u.dut.${P}m3[wa];
+        endcase
+        $write(" %02x", b[7:0]);
+      end
+      $write("\n");
+      beats = beats + 1;
+      if (beats >= STEPS) $finish;
+    end
+  end
+
+  initial begin
+    #(100000);
+    $display("# rvfi: timeout after %0d beats", beats);
+    $finish;
+  end
+endmodule

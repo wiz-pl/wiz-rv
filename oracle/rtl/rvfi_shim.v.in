@@ -1,0 +1,155 @@
+// rvfi (RISC-V Formal Interface) wrapper for a Wiz-emitted multi-cycle core.
+//
+// This file is a template: oracle/scripts/mkrvfi.py fills in the core name, the
+// port instantiation and the byte-lane width from the emitted Verilog (app/rv.wiz
+// `gen` writes build/<name>.v).  Do not edit the generated copy.
+//
+// The core has no rvfi port and no reset port.  This wrapper observes its state
+// through hierarchical references to the flat Verilog:
+//
+//     ph, pc, q0..q3, x1, x2, rfa, m0..m3, trap_2
+//
+// and reports one rvfi beat per instruction.  The beat is emitted when the
+// instruction has completed and the core is about to fetch the next one (phase
+// F, D or H); that is after E for ALU ops, after M for loads, after S for shifts,
+// after X/V for the M extension, and at H for a trap.  `rvfi_rd_wdata` and the
+// trap code are therefore final at the beat, and `rvfi_pc_wdata` is the core's
+// next pc.
+//
+// `rst` is accepted for the interface and ignored: the core resets from its
+// Verilog `initial` block, not from a reset input.  A formal harness must start
+// the core from that initial state (riscv-formal's `prep`/BMC does) rather than
+// from an arbitrary state with `rst` low.
+//
+// The M extension, if the core has it, reports its one-cycle multiplier and its
+// iterative divider at the same completion point; riscv-formal's `rvfi_muldiv`
+// checkers can then be run too (not exercised here).
+//
+// Signal conventions are those of riscv-formal's `rvfi` (dut/rvfi_wrapper.v):
+// `rvfi_mem_addr` is the access address aligned down to 4 bytes, masks have the
+// size and alignment of the access, and `rvfi_mem_wdata` has the store data in
+// the byte lanes selected by the mask.
+
+module rvfi(
+  input  clk,
+  input  rst,
+
+  output        rvfi_valid,
+  output [63:0] rvfi_order,
+  output [31:0] rvfi_insn,
+  output        rvfi_trap,
+  output        rvfi_halt,
+  output        rvfi_intr,
+  output [1:0]  rvfi_mode,
+  output [1:0]  rvfi_ixl,
+
+  output [4:0]  rvfi_rs1_addr,
+  output [4:0]  rvfi_rs2_addr,
+  output [31:0] rvfi_rs1_rdata,
+  output [31:0] rvfi_rs2_rdata,
+
+  output [4:0]  rvfi_rd_addr,
+  output [31:0] rvfi_rd_wdata,
+
+  output [31:0] rvfi_pc_rdata,
+  output [31:0] rvfi_pc_wdata,
+
+  output [31:0] rvfi_mem_addr,
+  output [3:0]  rvfi_mem_rmask,
+  output [3:0]  rvfi_mem_wmask,
+  output [31:0] rvfi_mem_rdata,
+  output [31:0] rvfi_mem_wdata
+);
+
+  localparam [3:0] PH_F = 4'd0;
+  localparam [3:0] PH_D = 4'd1;
+  localparam [3:0] PH_E = 4'd2;
+  localparam [3:0] PH_H = 4'd5;
+  localparam WB = ${WB};              // word-address bits of the byte lanes
+
+${DEBUG_WIRES}
+  wire [WB-1:0] dbg_wa;
+${INSTANCE}
+
+  wire [2:0] core_trap = ${TRAP_READ};
+
+  // The rvfi beat is one cycle after E and waits for completion (F, D or H).
+  reg        pend = 1'b0;
+  reg [31:0] insn_q = 32'd0;
+  reg [31:0] pc_q = 32'd0;
+  reg [31:0] rs1_q = 32'd0;
+  reg [31:0] rs2_q = 32'd0;
+  reg [63:0] order_q = 64'd0;
+
+  wire at_e = (${PH} == PH_E);
+  wire done = pend && ((${PH} == PH_F) || (${PH} == PH_D) || (${PH} == PH_H));
+
+  always @(posedge clk) begin
+    if (at_e) begin
+      insn_q <= {${Q3}, ${Q2}, ${Q1}, ${Q0}};
+      pc_q   <= ${PC};
+      rs1_q  <= ${X1};
+      rs2_q  <= ${X2};
+      pend   <= 1'b1;
+    end
+    if (done) begin
+      pend    <= 1'b0;
+      order_q <= order_q + 64'd1;
+    end
+  end
+
+  wire [6:0] opc = insn_q[6:0];
+  wire [4:0] rd  = insn_q[11:7];
+  wire [2:0] f3  = insn_q[14:12];
+
+  wire op_lui   = (opc == 7'h37);
+  wire op_auipc = (opc == 7'h17);
+  wire op_jal   = (opc == 7'h6f);
+  wire op_jalr  = (opc == 7'h67);
+  wire op_load  = (opc == 7'h03);
+  wire op_store = (opc == 7'h23);
+  wire op_imm   = (opc == 7'h13);
+  wire op_reg   = (opc == 7'h33);
+  wire writes_rd = op_lui || op_auipc || op_jal || op_jalr || op_load || op_imm || op_reg;
+
+  wire [31:0] imm_i = {{20{insn_q[31]}}, insn_q[31:20]};
+  wire [31:0] imm_s = {{20{insn_q[31]}}, insn_q[31:25], insn_q[11:7]};
+  wire [31:0] addr_raw = rs1_q + (op_store ? imm_s : imm_i);
+  wire [31:0] mem_addr_aligned = {addr_raw[31:2], 2'b00};
+  assign dbg_wa = addr_raw[WB+1:2];
+
+  // The size of a load/store from funct3: 0=byte, 1=half, 2=word, 4/5=byte/half.
+  wire [3:0] size_mask = (f3[1:0] == 2'd0) ? 4'b0001 :
+                         (f3[1:0] == 2'd1) ? 4'b0011 : 4'b1111;
+  wire [3:0] lane_shift = {2'b00, addr_raw[1:0]};
+
+  wire [WB-1:0] wa = addr_raw[WB+1:2];
+  wire [31:0] mem_word = ${MEM_READ};
+
+  assign rvfi_valid   = done;
+  assign rvfi_order   = order_q;
+  assign rvfi_insn    = insn_q;
+  assign rvfi_trap    = (core_trap != 3'd0);
+  assign rvfi_halt    = (${PH} == PH_H);
+  assign rvfi_intr    = 1'b0;
+  assign rvfi_mode    = 2'b11;   // machine mode
+  assign rvfi_ixl     = 2'b01;   // 32-bit
+
+  assign rvfi_rs1_addr  = insn_q[19:15];
+  assign rvfi_rs2_addr  = insn_q[24:20];
+  assign rvfi_rs1_rdata = rs1_q;
+  assign rvfi_rs2_rdata = rs2_q;
+
+  assign rvfi_rd_addr  = (writes_rd && (rd != 5'd0) && !rvfi_trap) ? rd : 5'd0;
+  assign rvfi_rd_wdata = (rvfi_rd_addr != 5'd0) ? ${RFA_READ} : 32'd0;
+
+  assign rvfi_pc_rdata = pc_q;
+  assign rvfi_pc_wdata = ${PC};
+
+  assign rvfi_mem_addr  = (op_load || op_store) ? mem_addr_aligned : 32'd0;
+  assign rvfi_mem_rmask = op_load  ? (size_mask << lane_shift) : 4'd0;
+  assign rvfi_mem_wmask = op_store ? (size_mask << lane_shift) : 4'd0;
+  assign rvfi_mem_rdata = op_load  ? mem_word : 32'd0;
+  assign rvfi_mem_wdata = op_store ? (rs2_q << {lane_shift, 3'b000}) : 32'd0;
+
+endmodule

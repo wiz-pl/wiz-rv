@@ -1,9 +1,10 @@
 import Serial
 import Text
--- `rvload PORT PROGRAM.bin WAD`: load Doom into the Arty's DDR through the boot loader
--- (src/Rv/Progs.wiz, `Prog.boot`), at 1 Mbaud: the program at 0x40000000, the WAD's
--- length at 0x47fffff0 and the WAD at 0x48000000, then jump to 0x40000000; then show
--- what the board prints, until interrupted.
+-- `rvload PORT PROGRAM.bin [WAD]`: load a program into the Arty's DDR through the boot
+-- loader (src/Rv/Progs.wiz, `Prog.boot`), at 1 Mbaud: the program at 0x40000000, and,
+-- when a WAD is given, its length at 0x47fffff0 and its bytes at 0x48000000; then jump
+-- to 0x40000000 and show what the board prints, until interrupted. Without a WAD it is
+-- just the golem/C image (or another flat RV32IM binary).
 
 def say (s : String) : EIO Unit := EIO.lift (IO.println s)
 
@@ -45,20 +46,28 @@ def console (f : Fd) : Nat → EIO Unit
       EIO.lift (IO.print (String.mk (List.map Char.mk (Bytes.toList b))));
       console f k
 
-def run (port binPath wadPath : String) : EIO Unit := do
+def run (port binPath : String) (wad : Option String) : EIO Unit := do
   bin ← FS.readBytes binPath;
-  wad ← FS.readBytes wadPath;
   f ← Serial.open port (SerialConfig.raw8N1 .b1000000);
   load f binPath bin 1073741824;
-  load f "the WAD's length" (Bytes.ofList (le32 (Bytes.size wad))) 1207959536;
-  load f wadPath wad 1207959552;
+  (match wad with
+   | .some wadPath => do
+     wad ← FS.readBytes wadPath;
+     load f "the WAD's length" (Bytes.ofList (le32 (Bytes.size wad))) 1207959536;
+     load f wadPath wad 1207959552;
+     EIO.pure ()
+   | .none => EIO.pure ());
   Fd.write f (Bytes.ofList (.cons 71 (le32 1073741824)));
   expect f 33 100000;
   say "started";
   console f 1000000000
 
+def wadOf : List String → Option String
+  | .cons wad .nil => .some wad
+  | _ => .none
+
 def main : IO Unit := EIO.toIO (do
   args ← EIO.lift IO.args;
   match args with
-  | .cons port (.cons bin (.cons wad .nil)) => run port bin wad
-  | _ => EIO.fail "usage: rvload PORT PROGRAM.bin WAD")
+  | .cons port (.cons bin rest) => run port bin (wadOf rest)
+  | _ => EIO.fail "usage: rvload PORT PROGRAM.bin [WAD]")

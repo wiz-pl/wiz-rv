@@ -1,0 +1,117 @@
+-- test: check
+import Rv.Core
+import Rv.Asm
+import Rv.Golem.Map
+import Rv.Golem.Intc
+import Text
+-- The PLIC per hart, end to end: four real multi-cycle cores (`coreStepHC h`, each with
+-- its own `mhartid`, its own 1 KB RAM holding the same image) and the real `Intc`,
+-- whose `mip` for hart h (its own CLINT bits and its own PLIC context h) drives that
+-- core's three interrupt lines. Every hart installs a trap handler, enables MEIE and
+-- MIE and sleeps in WFI; hart 0 first sets the mailbox sources' priorities, enables
+-- each context's own mailbox source (2, 3, 5, 6) and posts messages 103, 102, 101, 100
+-- to harts 3, 2, 1, 0. Each hart wakes on MEIP, takes the external interrupt (mcause
+-- 0x8000000b), claims PLIC_CLAIM(mhartid), reads its message, completes the claim and
+-- MRETs, then halts on EBREAK with mtvec = 0. No hart sees another's source.
+--
+-- MMIO: the four cores' I/O accesses of one cycle are applied to the `Intc` in hart
+-- order (an interleaving the shared port of `G4` can also produce: it serves one hart a
+-- cycle), and every core sees its `mip` from the state at the start of the cycle. The
+-- design note is docs/plic.md.
+
+def H.ab : Nat := 4
+def H.wb : Nat := 8
+
+structure H.S where
+  k0 : CoreSt 4 8 HwTy.El
+  k1 : CoreSt 4 8 HwTy.El
+  k2 : CoreSt 4 8 HwTy.El
+  k3 : CoreSt 4 8 HwTy.El
+  intc : Intc.Ctl HwTy.El
+  cyc : Nat
+
+def H.src : Intc.Src HwTy.El := Intc.Src.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
+def H.srcB : HwTy.El (HwTy.bits 7) := Intc.srcBits H.src
+
+def H.prog : List Asm :=
+  A.la 5 "h" :: A.csrrw 0 Csr.aMtvec 5 ::
+  A.csrrs 1 Csr.aMhartid 0 ::
+  A.bnez 1 "wait" ::
+  -- hart 0: priorities 1 for sources 2, 3, 5, 6; context h enables source mboxSrc(h)
+  A.li 14 2147491840 ::                                   -- 0x80002000, the PLIC
+  A.li 6 1 :: A.sw 6 8 14 :: A.sw 6 12 14 :: A.sw 6 20 14 :: A.sw 6 24 14 ::
+  A.li 6 4 :: A.sw 6 64 14 :: A.li 6 8 :: A.sw 6 68 14 ::
+  A.li 6 32 :: A.sw 6 72 14 :: A.li 6 64 :: A.sw 6 76 14 ::
+  -- the messages (each raises the receiver's mailbox source)
+  A.li 13 2147487744 ::                                   -- 0x80001000, the mailbox
+  A.li 6 103 :: A.sw 6 24 13 :: A.li 6 102 :: A.sw 6 16 13 ::
+  A.li 6 101 :: A.sw 6 8 13 :: A.li 6 100 :: A.sw 6 0 13 ::
+  A.label "wait" :: A.li 6 2048 :: A.csrrs 0 Csr.aMie 6 :: A.csrrsi 0 Csr.aMstatus 8 ::
+  A.label "idle" :: A.wfi :: A.beqz 2 "idle" ::
+  A.csrrw 0 Csr.aMtvec 0 :: A.ebreak ::
+  -- the external interrupt: claim in this hart's context, take the message, complete
+  A.label "h" :: A.csrrs 10 Csr.aMcause 0 ::
+  A.li 14 2147491968 :: A.slli 7 1 2 :: A.add 14 14 7 ::  -- 0x80002080 + 4 hart
+  A.lw 11 0 14 ::
+  A.li 13 2147487744 :: A.slli 7 1 3 :: A.add 13 13 7 ::  -- 0x80001000 + 8 hart
+  A.lw 12 0 13 ::
+  A.sw 11 0 14 ::
+  A.li 2 1 :: A.mret :: .nil
+
+def H.img : List Nat := Asm.assemble H.prog
+
+def H.init : H.S :=
+  H.S.mk (CoreSt.init 4 8 H.img) (CoreSt.init 4 8 H.img) (CoreSt.init 4 8 H.img) (CoreSt.init 4 8 H.img)
+    Intc.init 0
+
+-- one hart's cycle against the Intc state `ic`: the core's next state and the Intc's
+def H.hart (h : Nat) (ic0 ic : Intc.Ctl HwTy.El) (tick : Nat) (k : CoreSt 4 8 HwTy.El) :
+    CoreSt 4 8 HwTy.El × Intc.Ctl HwTy.El :=
+  let ω o0 := Bundle.ofEl Out.bundle (coreStepHC (r := HwTy.El) h 4 8 .false .false k In.idle).2;
+  let ω off := GMap.mmioOff (r := HwTy.El) o0.ioa;
+  let ω v := Intc.read ic H.srcB off;
+  let ω mip := Intc.mip ic0 H.srcB h;
+  let ω x : In HwTy.El := In.mk (BitVec.ofNat 1 1) v (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0)
+    (Intc.irqM mip) (Intc.irqT mip) (Intc.irqE mip);
+  let ω r := coreStepHC (r := HwTy.El) h 4 8 .false .false k x;
+  let ω o := Bundle.ofEl Out.bundle r.2;
+  let ω ic2 := Intc.Ctl.unpack (Intc.step ic (BitVec.ofNat 1 tick) H.srcB (Intc.Bus.mk o.rd o.wr off o.iod));
+  (Bundle.ofEl (CoreSt.bundle 4 8) r.1, ic2)
+
+def H.step (s : H.S) : H.S :=
+  let ω a := H.hart 0 s.intc s.intc 1 s.k0;
+  let ω b := H.hart 1 s.intc a.2 0 s.k1;
+  let ω c := H.hart 2 s.intc b.2 0 s.k2;
+  let ω d := H.hart 3 s.intc c.2 0 s.k3;
+  H.S.mk a.1 b.1 c.1 d.1 d.2 (Nat.succ s.cyc)
+
+def H.halted (k : CoreSt 4 8 HwTy.El) : Bool := Nat.beq k.ph.toNat Ph.h
+
+def H.run : Nat → H.S → H.S
+  | .zero, s => s
+  | .succ n, s =>
+    if Bool.and (Bool.and (H.halted s.k0) (H.halted s.k1)) (Bool.and (H.halted s.k2) (H.halted s.k3)) then s
+    else H.run n (H.step s)
+
+def H.reg (k : CoreSt 4 8 HwTy.El) (i : Nat) : Nat := (k.rfa (BitVec.ofNat 4 i)).toNat
+
+-- per hart: trap code, mcause (x10), claimed source (x11), message (x12), mhartid (x1)
+def H.of (k : CoreSt 4 8 HwTy.El) : List Nat :=
+  .cons k.trap.toNat (.cons (H.reg k 10) (.cons (H.reg k 11) (.cons (H.reg k 12) (.cons (H.reg k 1) .nil))))
+
+def H.showL (xs : List Nat) : String :=
+  "[" ++ Hdl.concat (List.map (fun (k : Nat) => Nat.repr k ++ " ") xs) ++ "]"
+
+def H.want (h : Nat) : List Nat :=
+  .cons Trap.ebreak (.cons 2147483659 (.cons (Intc.mboxSrc h) (.cons (100 + h) (.cons h .nil))))
+
+def H.report : String :=
+  let ω s := H.run 3000 H.init;
+  let ω ok := Bool.and (Bool.and (Hdl.natsEq (H.of s.k0) (H.want 0)) (Hdl.natsEq (H.of s.k1) (H.want 1)))
+    (Bool.and (Hdl.natsEq (H.of s.k2) (H.want 2)) (Hdl.natsEq (H.of s.k3) (H.want 3)));
+  "golem plic harts: " ++ Nat.repr s.cyc ++ " cycles; hart 0 " ++ H.showL (H.of s.k0)
+    ++ " hart 1 " ++ H.showL (H.of s.k1) ++ " hart 2 " ++ H.showL (H.of s.k2)
+    ++ " hart 3 " ++ H.showL (H.of s.k3) ++ "; pending " ++ Nat.repr s.intc.plic.pend.toNat
+    ++ (if ok then " — PASS" else " — FAIL")
+
+#eval H.report
