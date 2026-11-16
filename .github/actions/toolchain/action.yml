@@ -1,0 +1,86 @@
+name: Wiz toolchain (the pinned one)
+description: >
+  Nix, then wiz and grail at the commit `wiz-toolchain` names, built from the wiz flake
+  (github:wiz-pl/wiz/COMMIT#wiz) and put on PATH. The store paths come from the wiz Cachix
+  cache when it has them; otherwise from this repository's Actions cache, which the
+  `toolchain` job fills after building them once (a cold build of wiz takes a while).
+  Expects the checkout in ./wiz-rv (wiz-ddr3 next to it, as grail.wiz wants).
+inputs:
+  save:
+    description: Build the toolchain if needed and save it to the Actions cache (the `toolchain` job only).
+    default: "false"
+  packages:
+    description: Extra nixpkgs packages for PATH (space-separated attribute names), from the nixpkgs the pinned wiz uses.
+    default: ""
+outputs:
+  ref:
+    description: The wiz commit (or tag) the toolchain is built from.
+    value: ${{ steps.pin.outputs.ref }}
+runs:
+  using: composite
+  steps:
+    - name: The pin (wiz-toolchain)
+      id: pin
+      shell: bash
+      run: |
+        spec=$(head -n1 wiz-rv/wiz-toolchain | tr -d '[:space:]')
+        # tower's SPEC: REF@COMMIT, a commit or a tag; CI needs something immutable
+        ref=${spec##*@}
+        if ! printf %s "$ref" | grep -Eq '^([0-9a-f]{40}|v[0-9][0-9A-Za-z.+-]*)$'; then
+          echo "::error file=wiz-toolchain::CI needs a commit (REF@COMMIT or COMMIT) or a version tag, not '$spec'"
+          exit 1
+        fi
+        echo "ref=$ref" >> "$GITHUB_OUTPUT"
+        echo "toolchain: $spec -> github:wiz-pl/wiz/$ref#wiz"
+        # A local binary cache that the Nix daemon substitutes from (below). Created by
+        # this user before Nix is installed, so `nix copy --to` can write into it later.
+        mkdir -p "$RUNNER_TEMP/wiz-nix/nar"
+        [ -f "$RUNNER_TEMP/wiz-nix/nix-cache-info" ] || printf 'StoreDir: /nix/store\n' > "$RUNNER_TEMP/wiz-nix/nix-cache-info"
+    - name: Restore the toolchain (Actions cache)
+      id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/wiz-nix
+        key: wiz-toolchain-${{ steps.pin.outputs.ref }}-${{ runner.os }}-${{ runner.arch }}
+    - uses: cachix/install-nix-action@v31
+      with:
+        extra_nix_config: |
+          extra-substituters = file://${{ runner.temp }}/wiz-nix?trusted=1&priority=45
+    # Substitution only (no token: the cache is public, and nothing is pushed).
+    - uses: cachix/cachix-action@v16
+      with:
+        name: badlydrawnwizards
+        skipPush: true
+    - name: wiz and grail
+      shell: bash
+      env:
+        REF: ${{ steps.pin.outputs.ref }}
+        SAVE: ${{ inputs.save }}
+        HIT: ${{ steps.restore.outputs.cache-hit }}
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        if [ "$SAVE" != true ] && [ "$HIT" != true ]; then
+          echo "::warning title=toolchain::not in the Actions cache: building wiz here (the toolchain job should have saved it)"
+        fi
+        wiz=$(nix build "github:wiz-pl/wiz/$REF#wiz" --no-link --print-out-paths -L)
+        echo "$wiz/bin" >> "$GITHUB_PATH"
+        "$wiz/bin/wiz" --version
+        for p in $PACKAGES; do
+          out=$(nix build --inputs-from "github:wiz-pl/wiz/$REF" "nixpkgs#$p" --no-link --print-out-paths | head -n1)
+          echo "$out/bin" >> "$GITHUB_PATH"
+          echo "$p: $out"
+        done
+        if [ "$SAVE" = true ] && [ "$HIT" != true ]; then
+          # only what neither cache.nixos.org nor Cachix has: wiz and wiz-unwrapped
+          paths=$(nix path-info -r "$wiz" | grep -E '^/nix/store/[0-9a-z]{32}-wiz-(unwrapped-)?[0-9]')
+          echo "$paths"
+          nix copy --no-recursive --to "file://$RUNNER_TEMP/wiz-nix?compression=zstd" $paths
+          du -sh "$RUNNER_TEMP/wiz-nix"
+          echo "WIZ_TOOLCHAIN_SAVE=true" >> "$GITHUB_ENV"
+        fi
+    - name: Save the toolchain (Actions cache)
+      if: env.WIZ_TOOLCHAIN_SAVE == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}/wiz-nix
+        key: wiz-toolchain-${{ steps.pin.outputs.ref }}-${{ runner.os }}-${{ runner.arch }}
