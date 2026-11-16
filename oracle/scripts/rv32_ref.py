@@ -52,6 +52,132 @@ def s32(x):
     return x - (1 << 32) if x & 0x80000000 else x
 
 
+def u(h, lo, n):
+    return (h >> lo) & ((1 << n) - 1)
+
+
+def expand_c(h):
+    """Expand a 16-bit (RV32C) instruction to its 32-bit equivalent.
+
+    Returns None for an illegal encoding (the reserved ones and the floating-point
+    forms, which this machine does not have). This is the Python side of the same
+    table as Rv.expand in src/Rv/Isa.wiz; the oracle compares them through the
+    instruction traces.
+    """
+    def enc_i(op, f3, rd_, rs1, imm):
+        return ((imm & 0xFFF) << 20) | (rs1 << 15) | (f3 << 12) | (rd_ << 7) | op
+
+    def enc_s(op, f3, rs1, rs2_, imm):
+        return (((imm >> 5) & 0x7F) << 25) | (rs2_ << 20) | (rs1 << 15) | (f3 << 12) \
+            | ((imm & 0x1F) << 7) | op
+
+    def enc_b(f3, rs1, rs2_, imm):
+        return (((imm >> 12) & 1) << 31) | (((imm >> 5) & 0x3F) << 25) | (rs2_ << 20) \
+            | (rs1 << 15) | (f3 << 12) | (((imm >> 1) & 0xF) << 8) | (((imm >> 11) & 1) << 7) | 0x63
+
+    def enc_u(op, rd_, imm):
+        return ((imm & 0xFFFFF000)) | (rd_ << 7) | op
+
+    def enc_j(rd_, imm):
+        return (((imm >> 20) & 1) << 31) | (((imm >> 1) & 0x3FF) << 21) | (((imm >> 11) & 1) << 20) \
+            | (((imm >> 12) & 0xFF) << 12) | (rd_ << 7) | 0x6F
+
+    def enc_r(op, f3, f7, rd_, rs1, rs2_):
+        return (f7 << 25) | (rs2_ << 20) | (rs1 << 15) | (f3 << 12) | (rd_ << 7) | op
+
+    q, f3, b12 = h & 3, u(h, 13, 3), u(h, 12, 1)
+    rd, rs2 = u(h, 7, 5), u(h, 2, 5)
+    rdp, rs1p = u(h, 2, 3) + 8, u(h, 7, 3) + 8
+    imm6 = sx((b12 << 5) | u(h, 2, 5), 6)
+
+    if q == 0:
+        if f3 == 0:                                        # C.ADDI4SPN
+            nz = u(h, 11, 2) * 16 + u(h, 7, 4) * 64 + u(h, 6, 1) * 4 + u(h, 5, 1) * 8
+            return None if nz == 0 else enc_i(0x13, 0, rdp, 2, nz)
+        if f3 == 2:                                        # C.LW
+            i = u(h, 10, 3) * 8 + u(h, 6, 1) * 4 + u(h, 5, 1) * 64
+            return enc_i(0x03, 2, rdp, rs1p, i)
+        if f3 == 6:                                        # C.SW
+            i = u(h, 10, 3) * 8 + u(h, 6, 1) * 4 + u(h, 5, 1) * 64
+            return enc_s(0x23, 2, rs1p, rdp, i)
+        return None                                        # C.FLD/C.FLW/C.FSD/C.FSW/reserved
+
+    if q == 1:
+        if f3 == 0:                                        # C.ADDI / C.NOP (and hints)
+            return enc_i(0x13, 0, rd, rd, imm6)
+        if f3 == 1:                                        # C.JAL (RV32)
+            v = sx(u(h, 12, 1) * 2048 + u(h, 8, 1) * 1024 + u(h, 10, 2) * 256
+                   + u(h, 6, 1) * 128 + u(h, 7, 1) * 64 + u(h, 2, 1) * 32
+                   + u(h, 11, 1) * 16 + u(h, 3, 3) * 2, 12)
+            return enc_j(1, v)
+        if f3 == 2:                                        # C.LI
+            return enc_i(0x13, 0, rd, 0, imm6)
+        if f3 == 3:
+            if rd == 2:                                    # C.ADDI16SP
+                v = sx(u(h, 12, 1) * 512 + u(h, 4, 1) * 256 + u(h, 3, 1) * 128
+                       + u(h, 5, 1) * 64 + u(h, 2, 1) * 32 + u(h, 6, 1) * 16, 10)
+                return None if v == 0 else enc_i(0x13, 0, 2, 2, v)
+            if rd == 0:                                    # reserved
+                return None
+            v = sx((b12 << 17) | (u(h, 2, 5) << 12), 18)  # C.LUI
+            return None if v == 0 else enc_u(0x37, rd, v)
+        if f3 == 4:
+            sub = u(h, 10, 2)
+            sh = (b12 << 5) | u(h, 2, 5)
+            if sub == 0:                                   # C.SRLI
+                return None if b12 == 1 else enc_i(0x13, 5, rs1p, rs1p, sh)
+            if sub == 1:                                   # C.SRAI
+                return None if b12 == 1 else enc_i(0x13, 5, rs1p, rs1p, 0x400 | sh)
+            if sub == 2:                                   # C.ANDI
+                return enc_i(0x13, 7, rs1p, rs1p, imm6)
+            if b12 == 1:                                   # C.SUBW/C.ADDW: RV64 only
+                return None
+            g = u(h, 5, 2)
+            if g == 0:
+                return enc_r(0x33, 0, 0x20, rs1p, rs1p, rdp)   # C.SUB
+            if g == 1:
+                return enc_r(0x33, 4, 0, rs1p, rs1p, rdp)      # C.XOR
+            if g == 2:
+                return enc_r(0x33, 6, 0, rs1p, rs1p, rdp)      # C.OR
+            return enc_r(0x33, 7, 0, rs1p, rs1p, rdp)          # C.AND
+        if f3 == 5:                                        # C.J
+            v = sx(u(h, 12, 1) * 2048 + u(h, 8, 1) * 1024 + u(h, 10, 2) * 256
+                   + u(h, 6, 1) * 128 + u(h, 7, 1) * 64 + u(h, 2, 1) * 32
+                   + u(h, 11, 1) * 16 + u(h, 3, 3) * 2, 12)
+            return enc_j(0, v)
+        v = sx(u(h, 12, 1) * 256 + u(h, 6, 1) * 128 + u(h, 5, 1) * 64
+               + u(h, 2, 1) * 32 + u(h, 11, 1) * 16 + u(h, 10, 1) * 8
+               + u(h, 4, 1) * 4 + u(h, 3, 1) * 2, 9)
+        return enc_b(0, rs1p, 0, v) if f3 == 6 else enc_b(1, rs1p, 0, v)
+
+    if q == 2:
+        if f3 == 0:                                        # C.SLLI
+            return None if b12 == 1 else enc_i(0x13, 1, rd, rd, u(h, 2, 5))
+        if f3 == 2:                                        # C.LWSP
+            if rd == 0:
+                return None
+            i = u(h, 2, 2) * 64 + b12 * 32 + u(h, 4, 3) * 4
+            return enc_i(0x03, 2, rd, 2, i)
+        if f3 == 4:
+            if b12 == 0:
+                if rs2 == 0:                               # C.JR
+                    return None if rd == 0 else enc_i(0x67, 0, 0, rd, 0)
+                return enc_r(0x33, 0, 0, rd, 0, rs2)       # C.MV (rd = 0 is a hint)
+            if rd == 0:
+                if rs2 == 0:                               # C.EBREAK
+                    return 0x00100073
+                return None                                # reserved
+            if rs2 == 0:                                   # C.JALR
+                return enc_i(0x67, 0, 1, rd, 0)
+            return enc_r(0x33, 0, 0, rd, rd, rs2)          # C.ADD
+        if f3 == 6:                                        # C.SWSP
+            i = u(h, 7, 2) * 64 + u(h, 9, 4) * 4
+            return enc_s(0x23, 2, 2, rs2, i)
+        return None                                        # C.FLDSP/C.FLWSP/C.FSDSP/C.FSWSP
+
+    return None
+
+
 class Fixture:
     def __init__(self, path):
         with open(path) as f:
@@ -64,7 +190,17 @@ class Fixture:
         self.steps = int(cfg[2])
         self.mbase = int(cfg[3])
         self.mcount = int(cfg[4])
-        self.words = [int(l, 16) for l in lines[2:]]
+        # a line of 8 hex digits is a 32-bit instruction (two halfwords, low first);
+        # 4 digits is a 16-bit (C) instruction. The image is halfwords.
+        self.halves = []
+        for l in lines[2:]:
+            v = int(l, 16)
+            if len(l) <= 4:
+                self.halves.append(v & 0xFFFF)
+            else:
+                self.halves.append(v & 0xFFFF)
+                self.halves.append((v >> 16) & 0xFFFF)
+        self.words = self.halves          # the legacy name (oracle.py)
         self.path = path
 
 
@@ -77,8 +213,8 @@ class Machine:
         self.pc = 0
         self.regs = [0] * (1 << self.rbits)
         self.mem = bytearray(1 << self.mbits)
-        for i, w in enumerate(fx.words):
-            self.mem[4 * i:4 * i + 4] = w.to_bytes(4, "little")
+        for i, h in enumerate(fx.halves):
+            self.mem[2 * i:2 * i + 2] = h.to_bytes(2, "little")
         self.trap = TRAP_NONE
         self.tval = 0
         self.epc = 0
@@ -130,7 +266,7 @@ class Machine:
         f7 = (w >> 25) & 0x7F
         a = self.reg(r1)
         b = self.reg(r2)
-        nxt = (self.pc + 4) & MASK32
+        nxt = (self.pc + self.ilen) & MASK32
         imm_i = sx(w >> 20, 12)
         imm_s = sx(((w >> 25) << 5) | ((w >> 7) & 0x1F), 12)
         imm_b = sx((((w >> 31) & 1) << 12) | (((w >> 7) & 1) << 11)
@@ -159,7 +295,7 @@ class Machine:
             return (x & y) & MASK32
 
         def jump(rd_, value, target):
-            if target % 4 != 0:
+            if target % 2 != 0:
                 self.stop(TRAP_JUMP, target)
             else:
                 self.write(rd_, value, target)
@@ -177,26 +313,26 @@ class Machine:
             if ok_reg(rd):
                 self.write(rd, imm_u, nxt)
             else:
-                self.stop(TRAP_ILLEGAL, w)
+                self.stop(TRAP_ILLEGAL, self.rawins)
         elif op == 0x17:                                 # AUIPC
             if ok_reg(rd):
                 self.write(rd, (self.pc + imm_u) & MASK32, nxt)
             else:
-                self.stop(TRAP_ILLEGAL, w)
+                self.stop(TRAP_ILLEGAL, self.rawins)
         elif op == 0x6F:                                 # JAL
             if ok_reg(rd):
                 jump(rd, nxt, (self.pc + imm_j) & MASK32)
             else:
-                self.stop(TRAP_ILLEGAL, w)
+                self.stop(TRAP_ILLEGAL, self.rawins)
         elif op == 0x67:                                 # JALR
             if f3 == 0 and ok2(rd, r1):
                 t = ((a + imm_i) & MASK32) & ~1
                 jump(rd, nxt, t)
             else:
-                self.stop(TRAP_ILLEGAL, w)
+                self.stop(TRAP_ILLEGAL, self.rawins)
         elif op == 0x63:                                 # BRANCH
             if f3 in (2, 3) or not ok2(r1, r2):
-                self.stop(TRAP_ILLEGAL, w)
+                self.stop(TRAP_ILLEGAL, self.rawins)
             else:
                 if f3 == 0:
                     taken = a == b
@@ -216,7 +352,7 @@ class Machine:
                     self.write(0, 0, nxt)
         elif op == 0x03:                                 # LOAD
             if not (f3 < 3 or f3 in (4, 5)) or not ok2(rd, r1):
-                self.stop(TRAP_ILLEGAL, w)
+                self.stop(TRAP_ILLEGAL, self.rawins)
             else:
                 ad = (a + imm_i) & MASK32
                 size = 1 << (f3 & 3)
@@ -235,7 +371,7 @@ class Machine:
                     self.write(rd, v, nxt)
         elif op == 0x23:                                 # STORE
             if f3 > 2 or not ok2(r1, r2):
-                self.stop(TRAP_ILLEGAL, w)
+                self.stop(TRAP_ILLEGAL, self.rawins)
             else:
                 ad = (a + imm_s) & MASK32
                 size = 1 << f3
@@ -253,7 +389,7 @@ class Machine:
             if ok_imm and ok2(rd, r1):
                 self.write(rd, alu(f3, f3 == 5 and f7 == 0x20, a, imm_i), nxt)
             else:
-                self.stop(TRAP_ILLEGAL, w)
+                self.stop(TRAP_ILLEGAL, self.rawins)
         elif op == 0x33:                                 # OP
             ok_op = f7 == 0 or (f7 == 0x20 and f3 in (0, 5))
             if ok_op and ok3(rd, r1, r2):
@@ -261,7 +397,7 @@ class Machine:
             elif self.mx and f7 == 1 and ok3(rd, r1, r2):
                 self.write(rd, muldiv(f3, a, b), nxt)
             else:
-                self.stop(TRAP_ILLEGAL, w)
+                self.stop(TRAP_ILLEGAL, self.rawins)
         elif op == 0x0F:                                 # FENCE (a no-op here)
             self.write(0, 0, nxt)
         elif op == 0x73:                                 # SYSTEM
@@ -284,13 +420,27 @@ class Machine:
                         self.csr = self.csr & (~src & MASK32)
                 self.write(rd, old, nxt)
             else:
-                self.stop(TRAP_ILLEGAL, w)
+                self.stop(TRAP_ILLEGAL, self.rawins)
         else:
-            self.stop(TRAP_ILLEGAL, w)
+            self.stop(TRAP_ILLEGAL, self.rawins)
 
     def step(self):
-        if self.trap == 0:
-            self.exec_one(self.fetch())
+        if self.trap != 0:
+            return
+        h = self.byte(self.pc) | (self.byte((self.pc + 1) & MASK32) << 8)
+        if h & 3 != 3:
+            w = expand_c(h)
+            self.ilen = 2
+            self.rawins = h
+            if w is None:
+                self.stop(TRAP_ILLEGAL, h)
+            else:
+                self.exec_one(w)
+        else:
+            self.ilen = 4
+            w = self.word(self.pc)
+            self.rawins = w
+            self.exec_one(w)
 
     # -- trace -----------------------------------------------------------------
 

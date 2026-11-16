@@ -60,7 +60,7 @@ rs1/uimm is zero" rule for the set/clear forms. The machine's full CSR file
 (golem-csr: `mstatus`, `mie`, `mtvec`, `mscratch`, `mepc`, `mcause`, `mtval`, `mip`,
 `mhartid`, MRET, WFI; docs/csr.md) is in both `src/Rv/Isa.wiz` (`Arch.csr`) and
 `src/Rv/Core.wiz` (`CoreSt.csr`), so the lockstep checker compares it, and
-`Prog.csr` (tests/lockstep.wiz) exercises all six forms on `mscratch`. An earlier
+`Prog.csrAll` (tests/lockstep.wiz `csrAllE`) exercises all six forms on `mscratch`. An earlier
 version of this branch carried its own one-register Zicsr subset; it was replaced
 by that CSR file when the branch was merged with golem-csr.
 

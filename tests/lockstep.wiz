@@ -1,12 +1,13 @@
--- test: check
+-- test: run
 import Rv.Lockstep
 import Rv.Progs
+import IO
 import Rv.CTest
 -- The core against the specification, in lockstep (src/Rv/Lockstep.wiz), on the test
 -- programs: RV32E (16 registers, the HX1K configuration) and RV32I (32), 1 KB of
 -- memory. Each line: instructions, cycles, trap code, the bytes output, and "agrees"
--- or what differed. (By `#eval`, in the kernel's evaluator: compiled, the value
--- simulation is slower; FINDINGS.md, S2.)
+-- or what differed. (Compiled and run: the kernel's `#eval` of this file is slower
+-- now that the C decoder's expansion is in every step; FINDINGS.md, H12.)
 
 def showBytes : List Nat → String
   | .nil => ""
@@ -39,59 +40,51 @@ def reportA (ab : Nat) (mx : Bool) (p : List Asm) (fuel : Nat) : String :=
       | ps => "DISAGREES" ++ lines ps)) (Ls.runA ab 8 mx (Asm.assemble p) fuel)
 
 def sumE : String := report 4 Prog.sum 400
-#eval sumE
 def aluE : String := report 4 Prog.alu 400
-#eval aluE
 def shiftE : String := report 4 Prog.shift 1000
-#eval shiftE
 def memE : String := report 4 Prog.mem 400
-#eval memE
 def branchE : String := report 4 Prog.branch 400
-#eval branchE
 def sortE : String := report 4 Prog.sort 6000
-#eval sortE
 def trapsE : List String :=
-  .cons (report 4 Prog.trapLoad 50) (.cons (report 4 Prog.trapStore 50) (.cons (report 4 Prog.trapJump 50)
+  .cons (report 4 Prog.trapLoad 50) (.cons (report 4 Prog.trapStore 50) (.cons (report 4 Prog.jumpHalf 50)
   (.cons (report 4 Prog.trapIllegal 50) (.cons (report 4 Prog.trapEcall 50) (.cons (report 4 Prog.x16 50) .nil)))))
-#eval trapsE
 -- Zicsr: write, read back, set and clear bits, the immediate forms, the WARL masks
 -- (docs/csr.md)
 def csrE : String := report 4 Prog.csr 400
-#eval csrE
+-- all six Zicsr instructions on mscratch, the immediate forms too (Prog.csrAll)
+def csrAllE : String := report 4 Prog.csrAll 400
 -- traps and interrupts with handlers (vectored mtvec): ECALL handled and returned past,
 -- the timer interrupt in a loop, WFI waiting for MEIP with MIE off, the external
 -- interrupt once MIE is set; then interrupts at arbitrary points of a load/store/branch
 -- loop (the timer input pulses). The specification is given the interrupts the core
 -- took (src/Rv/Lockstep.wiz) and must agree on every one.
 def irqE : String := reportIrq 4 Prog.irq Prog.irqAt 1500
-#eval irqE
 def irqStressE : String := reportIrq 4 Prog.irqStress Prog.pulseAt 3000
-#eval irqStressE
+
 -- RV32I: x16 is a register
 def ddrE : String := report 4 Prog.ddr 600
-#eval ddrE
 def ioE : String := report 4 Prog.ioload 100
-#eval ioE
 def x16I : String := report 5 Prog.x16 50
-#eval x16I
 def aluI : String := report 5 Prog.alu 400
-#eval aluI
 -- RV32IM: the M extension (and without it, MUL is illegal)
 def mulI : String := report 5 Prog.muldivShort 400
-#eval mulI
 def mulIM : String := reportM 5 .true Prog.muldivShort 3000
-#eval mulIM
+-- the C extension: the compressed program and its uncompressed twin (same state)
+def cE : String := report 4 (Prog.cProg Prog.cPad) 800
+def cUE : String := report 4 Prog.uProg 800
+-- an illegal 16-bit encoding (C.FLD: no FP) and the reserved zero C.ADDI4SPN
+def cBadE : List String := .cons (report 4 Prog.cIllegal 20) (.cons (report 4 Prog.cIllegal0 20)
+  -- a C instruction in the last halfword of the 1024-byte memory (wb 8)
+  (.cons (report 4 (Prog.cLast 1024) 40) (.cons (report 4 (Prog.cLastBreak 1024) 40) .nil)))
 -- RV32A: LR/SC success and failure, every AMO, reservation invalidation, fences, and
 -- the misaligned/illegal traps
 def atomicsI : String := reportA 5 .false Prog.atomics 5000
-#eval atomicsI
 def atomicsResvI : String := reportA 5 .false Prog.atomicsResv 500
-#eval atomicsResvI
 def aTrapsI : List String :=
   .cons (reportA 5 .false Prog.aTrapLr 50) (.cons (reportA 5 .false Prog.aTrapSc 50)
   (.cons (reportA 5 .false Prog.aTrapAmo 50) (.cons (reportA 5 .false Prog.aTrapIo 50)
   (.cons (reportA 5 .false Prog.aTrapF5 50) .nil))))
-#eval aTrapsI
+
 -- the Doom machine's boot loader (on-chip RAM, 16 KB), loading a program into DDR over
 -- the UART and running it there (the specification models every I/O load as the UART's:
 -- the boot loader's read of the DDR status takes the first byte, 1: "DDR ok")
@@ -99,15 +92,25 @@ def bootE : String := (fun (r : Ls.Result) => Nat.repr r.instrs ++ " instruction
     ++ (match r.problems with
       | .nil => "agrees"
       | ps => "DISAGREES" ++ lines ps)) (Ls.runIn 4 12 .false (Asm.assemble Prog.boot) (.cons 1 (Boot.session (Asm.assemble Prog.hello))) 6000)
-#eval bootE
 -- compiled C (sw/ctest, gcc for RV32IM, newlib's string functions on misaligned
 -- buffers, division, a 64-bit product), in the on-chip RAM
 def ctestE : String := (fun (r : Ls.Result) => Nat.repr r.instrs ++ " instructions, out \""
     ++ String.mk (List.map Char.mk r.out) ++ "\" "
     ++ (match r.problems with
       | .nil => "agrees"
-      | ps => "DISAGREES" ++ lines ps)) (Ls.run 5 12 .true (Hex.words CTest.hex) 40000)
-#eval ctestE
--- Zicsr: mscratch with all six CSR instructions (src/Rv/Progs.wiz `Prog.csr`)
-def csrE : String := report 5 Prog.csr 100
-#eval csrE
+      | ps => "DISAGREES" ++ lines ps)) (Ls.run 5 12 .true (Hex.halves CTest.hex) 40000)
+
+def say : List String → IO Unit
+  | .nil => IO.pure ()
+  | .cons s ss => IO.bind (IO.println s) (fun _ => say ss)
+
+def all : List String :=
+  List.append (sumE :: aluE :: shiftE :: memE :: branchE :: sortE :: .nil)
+    (List.append trapsE
+      (List.append (csrE :: csrAllE :: irqE :: irqStressE :: ddrE :: ioE :: x16I :: aluI :: mulI :: mulIM :: .nil)
+        (List.append (cE :: cUE :: .nil)
+          (List.append cBadE
+            (List.append (atomicsI :: atomicsResvI :: .nil)
+              (List.append aTrapsI (bootE :: ctestE :: .nil)))))))
+
+def main : IO Unit := say all
