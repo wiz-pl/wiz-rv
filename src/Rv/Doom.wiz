@@ -210,22 +210,37 @@ def dSys (full : Bool) (cfg : RgbCfg) (ediv : Nat) (cc : Circuit CIn.code COut.c
   let ω sn := s.snd;
   let count : r B13 := Hw.sub sn.wp sn.rp;
   let free : r B32 := Hw.sub (Hw.lit 32 4096) (Hw.cat (Hw.lit 19 0) count);
-  -- the interrupt block's registers are at offsets 0x1000 and up (GMap.mbox, plic,
-  -- clint), the machine's own below 0x100, and `Intc.read` is 0 below 0x1000: so the
-  -- block's read is chosen first, by the top four bits, and not at the end of the chain
-  -- below (where its decode and data went through every multiplexer of it)
+  -- the I/O read: the interrupt block's registers are at offsets 0x1000 and up (GMap.mbox,
+  -- plic, clint), the machine's own are words below 0x100, and `Intc.read` is 0 below
+  -- 0x1000. So the block's read is picked by bits 15:12, and the machine's registers by a
+  -- balanced multiplexer on bits 7:2 (an offset with other bits set reads 0, as an exact
+  -- match on all 16 bits gave before), not a chain of 20 compares that the block's read
+  -- went through at its end (a critical path of doom_top into the core's load result).
+  -- (A framebuffer read, bit 24, still compares the low 16 bits; only the UART is
+  -- gated by it, as before.)
   let intcA := Hw.not (isK (Hw.slice 12 4 ioff : r (HwTy.bits 4)) 0);
-  let ioIn : r B32 := Hw.mux intcA (Intc.read s.intc isrc ioff) (Hw.mux uartA (Hw.mux s.full (Hw.cat (Hw.lit 24 0) s.byte) (Hw.lit 32 4294967295))
-    (Hw.mux (isK off 4) (Hw.cat (Hw.lit 30 0) (Hw.cat s.full (Hw.and (txIdle s.tx) (Hw.not s.txGo))))
-    (Hw.mux (isK off 16) (Hw.slice lob 32 s.cyc) (Hw.mux (isK off 20) (Hw.slice (32 + lob) 32 s.cyc)
-    (Hw.mux (isK off 52) sn.free (Hw.mux (isK off 64) (Hw.cat (Hw.lit 30 0) x.ddr)
-    (Hw.mux (isK off 80) s.perf.instr (Hw.mux (isK off 84) s.perf.bus (Hw.mux (isK off 88) s.perf.mem
-    (Hw.mux (isK off 92) s.perf.long (Hw.mux (isK off 96) s.perf.fetch
-    (Hw.mux (isK off 100) s.edge.hits (Hw.mux (isK off 104) s.edge.misses (Hw.mux (isK off 108) s.perf.fbw
-    (Hw.mux (isK off 112) s.perf.refreshes (Hw.mux (isK off 116) s.perf.odd (Hw.mux (isK off 120) s.perf.lastSum (Hw.mux (isK off 124) s.perf.under (Hw.mux (isK off 128)
-      (Hw.cat (Hw.lit 20 0) (Hw.cat s.oled.pins.pmoden (Hw.cat s.oled.pins.vccen (Hw.cat s.oled.pins.res
-        (Hw.cat s.oled.pins.dc (Hw.cat s.oled.pins.cs s.oled.sq.pc)))))) (Hw.mux (isK off GMap.mip)
-          s.mipR (Hw.lit 32 0)))))))))))))))))))));
+  let lowOk := Hw.and (isK (Hw.slice 8 8 off : r W8) 0) (isK (Hw.slice 0 2 off : r B2) 0);
+  let ix : r (HwTy.bits 6) := Hw.slice 2 6 off;
+  let z32 : r B32 := Hw.lit 32 0;
+  let m8 := fun (sel : r B3) (v0 v1 v2 v3 v4 v5 v6 v7 : r B32) =>
+    (Hw.mux (bitOf 2 sel)
+      (Hw.mux (bitOf 1 sel) (Hw.mux (bitOf 0 sel) v7 v6) (Hw.mux (bitOf 0 sel) v5 v4))
+      (Hw.mux (bitOf 1 sel) (Hw.mux (bitOf 0 sel) v3 v2) (Hw.mux (bitOf 0 sel) v1 v0)) : r B32);
+  let lo3 : r B3 := Hw.slice 0 3 ix;
+  let hi3 : r B3 := Hw.slice 3 3 ix;
+  let g0 := m8 lo3 (Hw.mux fbA z32 (Hw.mux s.full (Hw.cat (Hw.lit 24 0) s.byte) (Hw.lit 32 4294967295)))
+    (Hw.cat (Hw.lit 30 0) (Hw.cat s.full (Hw.and (txIdle s.tx) (Hw.not s.txGo)))) z32 z32
+    (Hw.slice lob 32 s.cyc) (Hw.slice (32 + lob) 32 s.cyc) z32 z32;
+  let g1 := m8 lo3 z32 z32 z32 z32 z32 sn.free z32 z32;
+  let g2 := m8 lo3 (Hw.cat (Hw.lit 30 0) x.ddr) z32 z32 z32 s.perf.instr s.perf.bus s.perf.mem s.perf.long;
+  let g3 := m8 lo3 s.perf.fetch s.edge.hits s.edge.misses s.perf.fbw s.perf.refreshes s.perf.odd
+    s.perf.lastSum s.perf.under;
+  let g4 := m8 lo3
+    (Hw.cat (Hw.lit 20 0) (Hw.cat s.oled.pins.pmoden (Hw.cat s.oled.pins.vccen (Hw.cat s.oled.pins.res
+      (Hw.cat s.oled.pins.dc (Hw.cat s.oled.pins.cs s.oled.sq.pc))))))
+    z32 z32 z32 s.mipR z32 z32 z32;
+  let ioIn : r B32 := Hw.mux intcA (Intc.read s.intc isrc ioff)
+    (Hw.mux lowOk (m8 hi3 g0 g1 g2 g3 g4 z32 z32 z32) z32);
   let cr := Circuit.inst cc s.cpu (CIn.pack (CIn.mk (In.mk (Hw.and (txIdle s.tx) (Hw.not s.txGo)) ioIn s.edge.ready s.edge.rvalid s.edge.rdata
     (Intc.irqM s.mipR) (Intc.irqT s.mipR) (Intc.irqE s.mipR)) rst));
   let ω co := COut.unpack (Hw.snd cr);
