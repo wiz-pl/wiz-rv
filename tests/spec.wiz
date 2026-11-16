@@ -24,10 +24,11 @@ def cfgA : Cfg := Cfg.rv32ia 12
 
 -- the trap state (cause, tval, epc) after the run: the specification's `mcause`/
 -- `mtval`/`mepc` triple
-def reportTrap (name : String) (p : List Asm) (steps : Nat) : IO Unit :=
-  let s := Rv.run (Cfg.rv32e 12) steps (Arch.start (Cfg.rv32e 12) (Asm.assemble p));
+def reportTrapCfg (name : String) (c : Cfg) (p : List Asm) (steps : Nat) : IO Unit :=
+  let s := Rv.run c steps (Arch.start c (Asm.assemble p));
   IO.println (name ++ ": cause " ++ Nat.repr s.trap ++ ", tval " ++ Nat.repr s.tval.toNat
     ++ ", epc " ++ Nat.repr s.epc.toNat ++ ", pc " ++ Nat.repr s.pc.toNat)
+def reportTrap (name : String) (p : List Asm) (steps : Nat) : IO Unit := reportTrapCfg name (Cfg.rv32e 12) p steps
 
 ------------------------------------------------------------------------------------
 -- The expansion: the specification against the cores' gate-level function
@@ -80,6 +81,8 @@ def main : IO Unit := do
   report "jumpHalf" Prog.jumpHalf 50;
   reportTrap "trapIllegal" Prog.trapIllegal 50;
   reportTrap "trapEcall" Prog.trapEcall 50;
+  reportCfg "cLast" (Cfg.rv32e 10) (Prog.cLast 1024) 40;
+  reportTrapCfg "cLastBreak" (Cfg.rv32e 10) (Prog.cLastBreak 1024) 40;
   let bad := expandCount 65536 0;
   IO.println ("C expansion: " ++ (if Nat.beq bad 0 then "PASS" else "FAIL " ++ Nat.repr bad)
     ++ " (65536 encodings, spec Rv.expand = core Cx.expand)");

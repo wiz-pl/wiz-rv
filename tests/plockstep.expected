@@ -23,6 +23,8 @@
 44 instructions, 81 cycles, trap 2, out 10 20 0 20 1 agrees
 1 instructions, 6 cycles, trap 3, out agrees
 1 instructions, 6 cycles, trap 3, out agrees
+10 instructions, 20 cycles, trap 2, out 16 agrees
+6 instructions, 12 cycles, trap 2, out agrees
 666 instructions, out 119 105 122 45 114 118 32 98 111 111 116 13 10 68 68 82 32 111 107 13 10 46 33 111 107 agrees
 1060 instructions, out "wiz-rv 6 1 wiz-rv 4294843840 4294966507 4294967267
 " agrees

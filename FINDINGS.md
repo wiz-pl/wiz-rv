@@ -461,6 +461,27 @@ interrupt-entry claims (src/Rv/TrapProofs) name the step at a given fetched word
 the length. That is the same step (the halfword is the low half of the fetch), and the
 claims about the fetched word go through unchanged.
 
+Reading four bytes for a 16-bit instruction is safe because instruction fetch cannot
+fault, in the specification or in either core. In the specification `Rv.fetch` is
+`Rv.load 4` over `Rv.byte`, which reads `s.mem` (a total function) at `Rv.maddr`:
+an on-chip address wraps modulo `2^mbits` and a DDR address is itself, so the bytes at
+PC + 2 and PC + 3 always exist, and reading them changes nothing in the state. No trap
+depends on the address: the causes are ECALL, EBREAK, illegal, a misaligned jump, a
+misaligned load or store, and interrupts. There is no instruction access fault, no
+fetch-side region or aperture check, no MMU and so no page boundary. If instruction access faults, PMP/PMA or an MMU are ever added, stepW must read the
+upper halfword only for 32-bit instructions. `stepW` uses the
+upper halfword only when the low two bits are 11 (a 32-bit instruction). For a 16-bit
+instruction it uses `f mod 65536`, so whatever is at PC + 2 cannot change the result.
+The cores read less. The multi-cycle core reads the aligned word that holds the PC and
+asks for PC + 2 only in J, which it enters only when `need2` is set (a 32-bit
+instruction at `pc[1] = 1`). The pipeline asks for its second fetch only when `h2need`
+is set, on the same condition. Neither core has a bus error input: on-chip RAM is
+indexed by `pc[wb+1:2]`, so it wraps as `Rv.maddr` does, and a DDR fetch fills the L1
+line that holds the PC. `tests/spec.wiz`, `lockstep.wiz` and `plockstep.wiz` test this
+case. In `Prog.cLast` a JALR goes to a C.JR in the last halfword of a 1024-byte memory,
+so the upper half wraps to the program's first word, a 32-bit LUI. In
+`Prog.cLastBreak` a C.EBREAK sits in the same place and the trap has epc 1022.
+
 The pipeline's second-fetch request (`h2need`) was first computed from D's word
 whatever D held. In the cycle after a taken branch D holds the squashed word (`fe.rdr`),
 and when that word's halfword looked like the first half of a 32-bit instruction at

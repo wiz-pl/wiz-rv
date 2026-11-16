@@ -64,7 +64,9 @@ def mulIM : String := reportM 5 .true Prog.muldivShort 3000
 def cE : String := report 4 (Prog.cProg Prog.cPad) 800
 def cUE : String := report 4 Prog.uProg 800
 -- an illegal 16-bit encoding (C.FLD: no FP) and the reserved zero C.ADDI4SPN
-def cBadE : List String := .cons (report 4 Prog.cIllegal 20) (.cons (report 4 Prog.cIllegal0 20) .nil)
+def cBadE : List String := .cons (report 4 Prog.cIllegal 20) (.cons (report 4 Prog.cIllegal0 20)
+  -- a C instruction in the last halfword of the 1024-byte memory (wb 8)
+  (.cons (report 4 (Prog.cLast 1024) 40) (.cons (report 4 (Prog.cLastBreak 1024) 40) .nil)))
 -- the Doom machine's boot loader (on-chip RAM, 16 KB), loading a program into DDR over
 -- the UART and running it there (the specification models every I/O load as the UART's:
 -- the boot loader's read of the DDR status takes the first byte, 1: "DDR ok")

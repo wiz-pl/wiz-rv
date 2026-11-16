@@ -332,6 +332,23 @@ def Prog.cIllegal : List Asm := A.chalf 8192 :: A.ebreak :: .nil
 -- the reserved C.ADDI4SPN with a zero immediate
 def Prog.cIllegal0 : List Asm := A.chalf 0 :: A.ebreak :: .nil
 
+-- a 16-bit instruction in the last halfword of an n-byte memory (FINDINGS H12): the
+-- specification's `Rv.fetch` reads four bytes, so the upper halfword wraps to address 0
+-- (a 32-bit LUI here), which a 16-bit instruction must ignore. `cLast` jumps to a C.JR
+-- there and returns; `cLastBreak` stops on a C.EBREAK there (epc n - 2). The gap is
+-- filled with the illegal halfword 0, so a fall-through would trap.
+def P.zeros : Nat → List Asm
+  | .zero => .nil
+  | .succ k => A.chalf 0 :: P.zeros k
+def P.atTail (n : Nat) (head : List Asm) (last : Asm) : List Asm :=
+  List.append head (List.append
+    (P.zeros (Nat.sub (Nat.sub (Nat.div n 2) 1) (List.length (Asm.assemble head)))) (last :: .nil))
+def Prog.cLast (n : Nat) : List Asm :=
+  P.atTail n (P.port :: A.li 5 9 :: A.li 2 (Int.ofNat (Nat.sub n 2)) :: A.jalr 1 2 0 ::
+    A.caddi 5 7 :: P.out 5 :: A.ebreak :: .nil) (A.cjr 1)
+def Prog.cLastBreak (n : Nat) : List Asm :=
+  P.atTail n (A.li 5 9 :: A.li 2 (Int.ofNat (Nat.sub n 2)) :: A.jalr 0 2 0 :: A.ebreak :: .nil) A.cebreak
+
 -- the oracle's C fixture: no AUIPC (Sail/Spike would need a load base), no traps until
 -- the final EBREAK, and a 32-bit instruction (LUI) at a halfword boundary so the fetch
 -- of a 32-bit instruction across two words is exercised
