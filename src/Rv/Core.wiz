@@ -520,10 +520,11 @@ def coreStepHC {r : HwTy → Type} [Hw r] (hart ab wb : Nat) (mx cache : Bool) (
     (Hw.mux misJ (Hw.lit 3 Trap.jump)
     (Hw.mux (Hw.or misL (Hw.and misA d.lr)) (Hw.lit 3 Trap.load)
     (Hw.mux (Hw.or misS (Hw.and misA (Hw.not d.lr))) (Hw.lit 3 Trap.store) (Hw.lit 3 0)))))));
-  -- what a trap records (mtval): the instruction word for an illegal instruction, the
+  -- what a trap records (mtval): the instruction word for an illegal instruction (an
+  -- atomic to an address it may not use included), the
   -- target for a misaligned jump, the effective address for a misaligned access, 0 for
   -- ECALL/EBREAK. The PC is not written on a trap, so it is the epc as it stands.
-  let tvalE : r B32 := Hw.mux (Hw.not d.legal) w
+  let tvalE : r B32 := Hw.mux (Hw.or (Hw.not d.legal) badA) w
     (Hw.mux d.ecall (Hw.lit 32 0) (Hw.mux d.ebreak (Hw.lit 32 0)
     (Hw.mux misJ target (Hw.mux (Hw.or misL (Hw.and misA d.lr)) sum
     (Hw.mux (Hw.or misS (Hw.and misA (Hw.not d.lr))) sum (Hw.lit 32 0))))));
