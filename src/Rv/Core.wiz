@@ -528,7 +528,9 @@ def coreStepHC {r : HwTy → Type} [Hw r] (hart ab wb : Nat) (mx cache : Bool) (
     (Hw.mux d.ecall (Hw.lit 32 0) (Hw.mux d.ebreak (Hw.lit 32 0)
     (Hw.mux misJ target (Hw.mux (Hw.or misL (Hw.and misA d.lr)) sum
     (Hw.mux (Hw.or misS (Hw.and misA (Hw.not d.lr))) sum (Hw.lit 32 0))))));
-  let trapE := Hw.and inE (Hw.not (isK code 0));
+  -- (the trap controls are `gate`s: with inE known to be 0 they are 0 without the
+  -- trap code, which in the decode cycle depends on leftover latches; FINDINGS H13)
+  let trapE := gate inE (Hw.not (isK code 0));
   -- an interrupt is taken between instructions, in E before the instruction there:
   -- MIE and a pending enabled bit. It always goes to the vector (a zero mtvec
   -- included); only an exception halts while mtvec is 0 (docs/csr.md). A WFI is not
@@ -537,16 +539,16 @@ def coreStepHC {r : HwTy → Type} [Hw r] (hart ab wb : Nat) (mx cache : Bool) (
   let handled := Hw.not (isK s.csr.mtvec 0);
   let irqOn := Hw.and mip s.csr.mie;
   let irqCode := coreIrqCode irqOn;
-  let intr := Hw.and inE (Hw.and (Hw.not d.wfi)
-    (Hw.and (bitOf Csr.mieBit s.csr.mstatus) (Hw.not (isK irqOn 0))));
+  let intr := gate inE (gate (Hw.not d.wfi)
+    (gate (bitOf Csr.mieBit s.csr.mstatus) (Hw.not (isK irqOn 0))));
   let takeTrap := Hw.or trapE intr;
-  let stopTrap := Hw.and trapE (Hw.not handled);
-  let enterTrap := Hw.and takeTrap (Hw.not stopTrap);
+  let stopTrap := gate trapE (Hw.not handled);
+  let enterTrap := gate takeTrap (Hw.not stopTrap);
   -- a store to the output port waits in E while the output is busy; a WFI while no
   -- enabled interrupt is pending
   let io := bitOf 31 sum;
   let wait := Hw.or (gate (gate d.store io) (Hw.not x.txReady)) (gate d.wfi (isK irqOn 0));
-  let goE := gate inE (gate (isK code 0) (Hw.and (Hw.not wait) (Hw.not intr)));
+  let goE := gate inE (gate (isK code 0) (gate (Hw.not intr) (Hw.not wait)));
   let retireM := Hw.and d.mret goE;
   let csrWe := Hw.and d.csr (Hw.and goE d.csrWrite);
   let csrW := coreCsrWarl d.csrAddr csrNew;

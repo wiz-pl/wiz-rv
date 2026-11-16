@@ -5,4 +5,5 @@ def Pf.csrrw_ok : (a : Arch) → (m0 m1 m2 m3 : BitVec 9 → BitVec 8) → (x1 x
     Pf.csrCore (Pf.stepX In.idle (Pf.stepX In.idle (Pf.atC (Pf.withH a) (Pf.w (A.csrrw 3 Csr.aMscratch 1)) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)))
       = Pf.csrSpec (Rv.exec Pf.cfg (Pf.withH a) (Pf.w (A.csrrw 3 Csr.aMscratch 1))) :=
   fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
-    Eq.trans (Eq.congrArg (Pf.csrG (Pf.withH a) (Pf.w (A.csrrw 3 Csr.aMscratch 1)) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h) rfl
+    Pf.glueC (T := Pf.CsrObs) Pf.csrCore In.idle (Pf.withH a) (Pf.w (A.csrrw 3 Csr.aMscratch 1)) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+      (Pf.csrSpec (Rv.exec Pf.cfg (Pf.withH a) (Pf.w (A.csrrw 3 Csr.aMscratch 1)))) rfl h

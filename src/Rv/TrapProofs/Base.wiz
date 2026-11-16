@@ -66,18 +66,31 @@ def Pf.entryCore (s : CoreSt 4 9 HwTy.El) : Pf.Entry :=
 def Pf.entryOf (a : Arch) : Pf.Entry :=
   Pf.Entry.mk a.pc a.epc a.csr.mcause a.csr.mstatus a.tval a.trap
 
--- the two cycles as a function of the decode phase's read data, and the glue (as
--- `Pf.ok`): the decode cycle reads memory at PC whatever the instruction
-def Pf.entryG (x : In HwTy.El) (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
-    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) (q : Pf.Q) : Pf.Entry :=
-  Pf.entryCore (Pf.stepX x (Pf.setQ (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) q))
+-- the glue (as `Pf.ok`, through `Pf.glueO`): the decode cycle from `Pf.atC` reads
+-- memory at the PC (one cycle; only the read data compared)
+def Pf.readQC (x : In HwTy.El) (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
+    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) :
+    ((Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q0, (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q1,
+     (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q2, (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q3) = Pf.fetchQ a m0 m1 m2 m3 := rfl
+
+-- any observation `F` of the two cycles, given `F` of them with the word's bytes read
+def Pf.glueC {0 T : Type} (F : CoreSt 4 9 HwTy.El → T) (x : In HwTy.El) (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
+    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) (o : T)
+    (hE : F (Pf.stepX x (Pf.setQ (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) (Pf.bytes w))) = o)
+    (h : Pf.fetchQ a m0 m1 m2 m3 = Pf.bytes w) :
+    F (Pf.stepX x (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio))) = o :=
+  Pf.glueO (T := T) (fun (s : CoreSt 4 9 HwTy.El) => F (Pf.stepX x s))
+    (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) (Pf.bytes w) o
+    (Pf.readW (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) (Pf.fetchQ a m0 m1 m2 m3) w
+      (Pf.readQC x a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h)
+    hE
 
 def Pf.entryOk (x : In HwTy.El) (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
     (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) (o : Pf.Entry)
-    (hE : Pf.entryG x a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio (Pf.bytes w) = o)
+    (hE : Pf.entryCore (Pf.stepX x (Pf.setQ (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) (Pf.bytes w))) = o)
     (h : Pf.fetchQ a m0 m1 m2 m3 = Pf.bytes w) :
     Pf.entryCore (Pf.stepX x (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio))) = o :=
-  Eq.trans (Eq.congrArg (Pf.entryG x a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h) hE
+  Pf.glueC (T := Pf.Entry) Pf.entryCore x a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio o hE h
 
 ------------------------------------------------------------------------------------
 -- (1) Exception entry: from a state with a handler, ECALL / EBREAK / an illegal word
@@ -118,15 +131,19 @@ def Pf.IrqClaim (x : In HwTy.El) (p : Arch → Arch) (w : Nat) : Prop :=
 -- the glue on the specification's side: `Rv.step` is `Pf.stepF` at the fetched word
 def Pf.stepAt (c : Cfg) (s : Arch) (w : Nat) (hs : Rv.fetch c s = w) :
     Pf.entryOf (Rv.step c s) = Pf.entryOf (Pf.stepF c s w) :=
-  Eq.congrArg (fun (v : Nat) => Pf.entryOf (Pf.stepF c s v)) hs
+  Eq.congrArg (A := Nat) (B := Pf.Entry) (fun (v : Nat) => Pf.entryOf (Pf.stepF c s v)) (a := Rv.fetch c s) (b := w) hs
 
 def Pf.irqOk (x : In HwTy.El) (b : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
     (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1)
-    (hE : Pf.entryG x b w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio (Pf.bytes w) = Pf.entryOf (Pf.stepF Pf.cfg b w))
+    (hE : Pf.entryCore (Pf.stepX x (Pf.setQ (Pf.stepX x (Pf.atC b w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) (Pf.bytes w))) = Pf.entryOf (Pf.stepF Pf.cfg b w))
     (h : Pf.fetchQ b m0 m1 m2 m3 = Pf.bytes w) (hs : Rv.fetch Pf.cfg b = w) :
     Pf.entryCore (Pf.stepX x (Pf.stepX x (Pf.atC b w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)))
       = Pf.entryOf (Rv.step Pf.cfg b) :=
-  Eq.trans (Pf.entryOk x b w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio (Pf.entryOf (Pf.stepF Pf.cfg b w)) hE h) (Eq.symm (Pf.stepAt Pf.cfg b w hs))
+  Eq.trans (A := Pf.Entry)
+    (a := Pf.entryCore (Pf.stepX x (Pf.stepX x (Pf.atC b w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio))))
+    (b := Pf.entryOf (Pf.stepF Pf.cfg b w)) (c := Pf.entryOf (Rv.step Pf.cfg b))
+    (Pf.entryOk x b w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio (Pf.entryOf (Pf.stepF Pf.cfg b w)) hE h)
+    (Eq.symm (A := Pf.Entry) (a := Pf.entryOf (Rv.step Pf.cfg b)) (b := Pf.entryOf (Pf.stepF Pf.cfg b w)) (Pf.stepAt Pf.cfg b w hs))
 
 -- the interrupt taken before an ADD (the word does not matter but must be fixed)
 
@@ -147,8 +164,3 @@ structure Pf.CsrObs where
 
 def Pf.csrCore (s : CoreSt 4 9 HwTy.El) : Pf.CsrObs := Pf.CsrObs.mk s.pc (s.rfa (BitVec.ofNat 4 3)) s.csr.mscratch
 def Pf.csrSpec (a : Arch) : Pf.CsrObs := Pf.CsrObs.mk a.pc (Rv.reg a 3) a.csr.mscratch
-
-def Pf.csrG (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
-    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) (q : Pf.Q) : Pf.CsrObs :=
-  Pf.csrCore (Pf.stepX In.idle (Pf.setQ (Pf.stepX In.idle (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) q))
-
