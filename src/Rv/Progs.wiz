@@ -157,8 +157,11 @@ def Prog.pulseAt (c : Nat) : Nat := if Nat.lt (Nat.mod c 23) 2 then 128 else 0
 
 def Prog.trapLoad : List Asm := A.li 1 2 :: A.lw 2 0 1 :: A.ebreak :: .nil
 def Prog.trapStore : List Asm := A.li 1 1 :: A.sh 2 0 1 :: A.ebreak :: .nil
-def Prog.trapJump : List Asm := A.li 1 6 :: A.jalr 0 1 0 :: A.ebreak :: .nil
-def Prog.trapIllegal : List Asm := A.nop :: Asm.word 0 :: .nil
+-- with C a jump to a halfword boundary is legal: this one lands on the C.ADDI at 2
+-- (the reserved `Trap.jump` is unreachable through JAL/JALR/branch encodings now)
+def Prog.jumpHalf : List Asm :=
+  A.cj "j2" :: A.label "j2" :: A.caddi 5 7 :: A.ebreak :: .nil
+def Prog.trapIllegal : List Asm := A.nop :: Asm.word 4294967295 :: .nil
 def Prog.trapEcall : List Asm := A.nop :: A.ecall :: .nil
 def Prog.x16 : List Asm := A.li 16 5 :: A.ebreak :: .nil
 
@@ -265,12 +268,110 @@ def Prog.ioload : List Asm :=
   P.port :: A.lw 1 0 15 :: A.lb 2 4 15 :: A.lhu 3 8 15 :: A.lw 0 0 15 ::
   A.srli 4 1 24 :: P.out 4 :: P.out 2 :: P.out 3 :: A.ebreak :: .nil
 
+------------------------------------------------------------------------------------
+-- The C extension: one program written with 16-bit instructions and the same program
+-- in 32-bit ones (`Prog.cProg`, `Prog.uProg`). `tests/spec.wiz` runs both on the
+-- specification and compares the architectural state; the lockstep tests run both on
+-- the cores. `Prog.cProg pad` puts `pad` C.NOPs before the final EBREAK so that the two
+-- programs have the same length and the same final PC.
+
+def P.nops : Nat → List Asm
+  | .zero => .nil
+  | .succ k => .cons A.cnop (P.nops k)
+
+def P.cBody : List Asm :=
+  P.port :: A.li 2 512 ::
+  A.cli 8 7 :: A.caddi 8 3 :: A.caddi4spn 9 16 ::
+  A.csw 8 0 9 :: A.clw 10 0 9 :: A.cadd 10 8 :: A.cmv 11 10 ::
+  A.cslli 11 2 :: A.csrli 11 2 :: A.csrai 11 2 :: A.candi 11 12 ::
+  A.csub 11 8 :: A.cxor 11 8 :: A.cor 11 10 :: A.cand 11 8 ::
+  A.cbeqz 0 "cs1" :: A.li 12 99 :: A.label "cs1" ::
+  A.cbnez 8 "cg1" :: A.li 12 99 :: A.label "cg1" ::
+  A.cj "cc1" :: A.li 12 99 :: A.label "cc1" ::
+  A.cnop :: A.clui 13 65536 ::
+  A.cjal "csub" :: A.cj "cafter" ::
+  A.label "csub" :: A.cjr 1 :: A.label "cafter" ::
+  A.cswsp 10 0 :: A.clwsp 12 0 ::
+  A.la 14 "ctgt" :: A.cjalr 14 :: A.cj "cdone" ::
+  A.label "ctgt" :: A.cjr 1 :: A.label "cdone" ::
+  A.li 1 0 :: A.li 14 0 ::
+  A.sb 8 0 15 :: A.sb 10 0 15 :: A.sb 11 0 15 :: A.sb 12 0 15 ::
+  A.srli 13 13 16 :: A.sb 13 0 15 :: .nil
+
+def Prog.cProg (pad : Nat) : List Asm :=
+  List.append P.cBody (List.append (P.nops pad) (A.ebreak :: .nil))
+
+def P.uBody : List Asm :=
+  P.port :: A.li 2 512 ::
+  A.addi 8 0 7 :: A.addi 8 8 3 :: A.addi 9 2 16 ::
+  A.sw 8 0 9 :: A.lw 10 0 9 :: A.add 10 10 8 :: A.mv 11 10 ::
+  A.slli 11 11 2 :: A.srli 11 11 2 :: A.srai 11 11 2 :: A.andi 11 11 12 ::
+  A.sub 11 11 8 :: A.xor 11 11 8 :: A.or 11 11 10 :: A.and 11 11 8 ::
+  A.beq 0 0 "us1" :: A.li 12 99 :: A.label "us1" ::
+  A.bne 8 0 "ug1" :: A.li 12 99 :: A.label "ug1" ::
+  A.j "uc1" :: A.li 12 99 :: A.label "uc1" ::
+  A.nop :: A.lui 13 16 ::
+  A.jal 1 "usub" :: A.j "uafter" ::
+  A.label "usub" :: A.jalr 0 1 0 :: A.label "uafter" ::
+  A.sw 10 0 2 :: A.lw 12 0 2 ::
+  A.la 14 "utgt" :: A.jalr 1 14 0 :: A.j "udone" ::
+  A.label "utgt" :: A.jalr 0 1 0 :: A.label "udone" ::
+  A.li 1 0 :: A.li 14 0 ::
+  A.sb 8 0 15 :: A.sb 10 0 15 :: A.sb 11 0 15 :: A.sb 12 0 15 ::
+  A.srli 13 13 16 :: A.sb 13 0 15 :: A.ebreak :: .nil
+
+def Prog.uProg : List Asm := P.uBody
+
+-- the padding that makes the two programs the same length (the compressed one is
+-- shorter; the C.NOPs go before the final EBREAK)
+def Prog.cPad : Nat :=
+  Nat.sub (List.length (Asm.assemble Prog.uProg)) (List.length (Asm.assemble (Prog.cProg 0)))
+
+-- an illegal 16-bit encoding: C.FLD (001 in quadrant 0), which this machine has no FP for
+def Prog.cIllegal : List Asm := A.chalf 8192 :: A.ebreak :: .nil
+-- the reserved C.ADDI4SPN with a zero immediate
+def Prog.cIllegal0 : List Asm := A.chalf 0 :: A.ebreak :: .nil
+
+-- a 16-bit instruction in the last halfword of an n-byte memory (FINDINGS H12): the
+-- specification's `Rv.fetch` reads four bytes, so the upper halfword wraps to address 0
+-- (a 32-bit LUI here), which a 16-bit instruction must ignore. `cLast` jumps to a C.JR
+-- there and returns; `cLastBreak` stops on a C.EBREAK there (epc n - 2). The gap is
+-- filled with the illegal halfword 0, so a fall-through would trap.
+def P.zeros : Nat → List Asm
+  | .zero => .nil
+  | .succ k => A.chalf 0 :: P.zeros k
+def P.atTail (n : Nat) (head : List Asm) (last : Asm) : List Asm :=
+  List.append head (List.append
+    (P.zeros (Nat.sub (Nat.sub (Nat.div n 2) 1) (List.length (Asm.assemble head)))) (last :: .nil))
+def Prog.cLast (n : Nat) : List Asm :=
+  P.atTail n (P.port :: A.li 5 9 :: A.li 2 (Int.ofNat (Nat.sub n 2)) :: A.jalr 1 2 0 ::
+    A.caddi 5 7 :: P.out 5 :: A.ebreak :: .nil) (A.cjr 1)
+def Prog.cLastBreak (n : Nat) : List Asm :=
+  P.atTail n (A.li 5 9 :: A.li 2 (Int.ofNat (Nat.sub n 2)) :: A.jalr 0 2 0 :: A.ebreak :: .nil) A.cebreak
+
+-- the oracle's C fixture: no AUIPC (Sail/Spike would need a load base), no traps until
+-- the final EBREAK, and a 32-bit instruction (LUI) at a halfword boundary so the fetch
+-- of a 32-bit instruction across two words is exercised
+def Prog.cOracle : List Asm :=
+  A.li 2 256 :: A.cli 8 5 :: A.caddi 8 3 :: A.caddi4spn 9 16 ::
+  A.csw 8 0 9 :: A.clw 10 0 9 :: A.cadd 10 8 :: A.cmv 11 10 ::
+  A.cslli 11 2 :: A.csrli 11 1 :: A.csrai 11 2 :: A.candi 11 12 ::
+  A.csub 11 8 :: A.cxor 11 8 :: A.cor 11 10 :: A.cand 11 8 ::
+  A.lui 12 1 :: A.cbeqz 0 "os1" :: A.li 13 99 :: A.label "os1" ::
+  A.cbnez 8 "og1" :: A.li 13 99 :: A.label "og1" ::
+  A.cj "oc1" :: A.li 13 99 :: A.label "oc1" :: A.cnop ::
+  A.cswsp 10 0 :: A.clwsp 13 0 ::
+  A.cjal "osub" :: A.cj "oafter" ::
+  A.label "osub" :: A.cjr 1 :: A.label "oafter" ::
+  A.caddisp 16 :: A.cswsp 13 0 :: A.clwsp 13 0 :: A.ebreak :: .nil
+
 -- DDR (0x40000000): stores and loads of every size, then a routine copied into DDR and
 -- called there (fetches over the bus)
 def D.routine : List Nat := Asm.assemble (A.addi 5 5 7 :: A.slli 5 5 1 :: A.ret :: .nil)
+-- (the image is halfwords: two bytes per item, stored with `sh`)
 def D.copyWords : Nat → List Nat → List Asm
   | _, .nil => .nil
-  | k, .cons w ws => List.append (A.li 7 (Int.ofNat w) :: A.sw 7 (Int.ofNat (256 + 4 * k)) 1 :: .nil) (D.copyWords (Nat.succ k) ws)
+  | k, .cons h hs => List.append (A.li 7 (Int.ofNat h) :: A.sh 7 (Int.ofNat (256 + 2 * k)) 1 :: .nil) (D.copyWords (Nat.succ k) hs)
 def Prog.ddr : List Asm :=
   List.append (P.port :: A.lui 1 262144 :: A.li 2 (-2023406815) ::
     A.sw 2 0 1 :: A.lw 3 0 1 :: P.out 3 :: A.lbu 3 3 1 :: P.out 3 :: A.sb 2 5 1 :: A.sh 2 10 1 ::
@@ -314,11 +415,13 @@ def Prog.boot : List Asm :=
 
 -- a boot loader session: load `prog` (position-independent) at 0x40000000 and run it
 def Boot.le32 (v : Nat) : List Nat := Rv.bits v 0 8 :: Rv.bits v 8 8 :: Rv.bits v 16 8 :: Rv.bits v 24 8 :: .nil
+def Boot.le16 (v : Nat) : List Nat := Rv.bits v 0 8 :: Rv.bits v 8 8 :: .nil
+-- (the image is halfwords: two bytes each)
 def Boot.bytes : List Nat → List Nat
   | .nil => .nil
-  | .cons w ws => List.append (Boot.le32 w) (Boot.bytes ws)
+  | .cons h hs => List.append (Boot.le16 h) (Boot.bytes hs)
 def Boot.session (prog : List Nat) : List Nat :=
-  List.append (76 :: Boot.le32 1073741824) (List.append (Boot.le32 (4 * List.length prog))
+  List.append (76 :: Boot.le32 1073741824) (List.append (Boot.le32 (2 * List.length prog))
   (List.append (Boot.bytes prog) (71 :: Boot.le32 1073741824)))
 -- the program loaded: prints "ok" from DDR
 def Prog.hello : List Asm :=
@@ -333,11 +436,12 @@ def Hex.bytesGo : List Char → Option Nat → List Nat
   | .nil, _ => .nil
   | .cons c cs, .none => Hex.bytesGo cs (.some (Hex.digit c))
   | .cons c cs, .some h => .cons (16 * h + Hex.digit c) (Hex.bytesGo cs .none)
-def Hex.wordsGo : List Nat → Nat → Nat → List Nat
-  | .nil, k, acc => if Nat.beq k 0 then .nil else .cons acc .nil
-  | .cons b bs, k, acc => if Nat.beq k 3 then .cons (acc + b * 16777216) (Hex.wordsGo bs 0 0)
-    else Hex.wordsGo bs (Nat.succ k) (acc + b * Nat.pow 256 k)
-def Hex.words (s : String) : List Nat := Hex.wordsGo (Hex.bytesGo (String.chars s) .none) 0 0
+def Hex.halvesGo : List Nat → Option Nat → List Nat
+  | .nil, .none => .nil
+  | .nil, .some hi => .cons hi .nil
+  | .cons b bs, .none => Hex.halvesGo bs (.some b)
+  | .cons b bs, .some hi => .cons (hi + 256 * b) (Hex.halvesGo bs .none)
+def Hex.halves (s : String) : List Nat := Hex.halvesGo (Hex.bytesGo (String.chars s) .none) .none
 
 --------------------------------------------------------------------------------
 -- RV32A: LR/SC and the AMOs on the on-chip memory. The reservation cases: success,
