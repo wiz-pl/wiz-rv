@@ -14,7 +14,7 @@ itself**: `oracle/wiz/emit_pipe.wiz` emits `Rv.Pipe.pipeRvfiCore`, whose outputs
 so this script only ties the core's bus/I/O inputs and adds `rvfi_order` (a counter)
 and `rvfi_mode`/`rvfi_ixl` (constants).  There are no hierarchical memory references
 and no debug read ports: unlike the multi-cycle core, the pipeline's rvfi values are
-latched in R (`rr_ins`, `rr_pcw`, `rr_ldw`; FINDINGS.md, H12), and the two register
+latched in R (`rr_ins`, `rr_pcw`, `rr_ldw`; FINDINGS.md, H15), and the two register
 operands are read from the architectural register file at R inside the design.
 
 This script fails loudly if the emitted module's rvfi ports have drifted.

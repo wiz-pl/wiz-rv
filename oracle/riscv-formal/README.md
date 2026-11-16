@@ -172,7 +172,7 @@ references, so no debug read ports are needed.
 R (`ms.rfa[rs1]`, `ms.rfb[rs2]`). The three `rr_*` fields did not exist: R had no
 instruction word, no next-PC and no raw load word, which is why the previous
 retirement shim had to decode the ISA. They are now carried E → M → R
-(FINDINGS.md, H12).
+(FINDINGS.md, H15).
 
 The check cycle is **4**: an instruction fetched at cycle 1 is in E at 2, M at 3 and
 R (retiring) at 4. Every base-I class has its first beat at 4 (a taken branch

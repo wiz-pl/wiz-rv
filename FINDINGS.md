@@ -310,7 +310,7 @@ placed at 88.95 MHz with nextpnr's default seed and 108.17 MHz with `--seed 2`
 (`SEED=2 sh .scratch/bitn.sh`). So until rv-pipeline's timing work lands, a build has to
 be checked and maybe placed again; a failing "Max frequency" is not to be loaded.
 
-### H12. The pipeline's R stage had no instruction, next PC or raw load word (gap, closed by 3 registers)
+### H15. The pipeline's R stage had no instruction, next PC or raw load word (gap, closed by 3 registers)
 
 The first pipeline retirement shim (`oracle/rtl/rvfi_pipe.v.in`, branch
 `agent/rv-pipeline-oracle`) could not report a real rvfi port: `PpR` carried `pc`,
