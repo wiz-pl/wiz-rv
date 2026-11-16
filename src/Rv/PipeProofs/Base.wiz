@@ -13,10 +13,11 @@ import Rv.Asm
 -- hit), moved into the first cycle by a generic lemma (`Qp.ok`), as in
 -- src/Rv/Proofs.wiz.
 --
--- One instruction per file (proofs/PipeProofs/Xor.wiz …), each about 20 minutes of `wiz
--- check`: the `rfl` of the six observed values at the instruction's state is slow as a
--- whole (FINDINGS.md, H10); scripts/pipe-proofs.sh checks them all. Not part of the
--- library (`grail build` would take hours).
+-- One instruction per file (src/Rv/PipeProofs/Xor.wiz …), so `grail build` checks each
+-- in its own job (one process per claim keeps the memory per check bounded). The
+-- `Qp.Claim` files are the slow ones: the `rfl` of the six observed values at the
+-- instruction's state is slow as a whole (FINDINGS.md, H10; README.md here has the
+-- measured time and peak memory of each file). Outside grail: scripts/pipe-proofs.sh.
 
 def Qp.wb : Nat := 9
 def Qp.cfg : Cfg := Cfg.rv32e 11

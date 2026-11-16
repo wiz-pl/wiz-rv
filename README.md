@@ -73,8 +73,8 @@ self-modifying code behaves as the specification says.
 
 The ISA (src/Rv/Isa.wiz) and the bus to DDR are unchanged.
 
-Proofs (proofs/PipeProofs, `scripts/pipe-proofs.sh`; about 20 minutes each): from D,
-with the stages behind it empty, the next fetch address and, three cycles on, R's
+Proofs (src/Rv/PipeProofs, checked by `grail build`; its README.md has the time and
+memory of each file): from D, with the stages behind it empty, the next fetch address and, three cycles on, R's
 retiring instruction (its PC, rd and value) are the specification's. This is the full
 claim for XOR, OR, AND, LUI and AUIPC, and field by field without the glue for XORI,
 ORI and ANDI (FINDINGS.md, H10).

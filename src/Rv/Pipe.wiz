@@ -247,7 +247,7 @@ def Pp.tagOf {r : HwTy → Type} [Hw r] (wb : Nat) (a : r B32) : r (HwTy.bits (L
 
 -- the word out of the fetch memories for the instruction in D, and whether it is there
 -- (an I-cache hit, or on-chip). (Separate from the step so that a proof can take a
--- hypothesis about them: proofs/PipeProofs/Base.wiz.)
+-- hypothesis about them: src/Rv/PipeProofs/Base.wiz.)
 def Pp.dWord {r : HwTy → Type} [Hw r] (ab wb : Nat) (s : PpSt ab wb r) : r B32 :=
   let ω ms := s.ms;
   let onwi : r B32 := Hw.cat ms.qi3 (Hw.cat ms.qi2 (Hw.cat ms.qi1 ms.qi0));

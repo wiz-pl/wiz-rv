@@ -1,4 +1,4 @@
-import PipeProofs.Base
+import Rv.PipeProofs.Base
 -- XORI, field by field: the three cycles with D presenting the word as a hit (`Qp.G`,
 -- the step function `pipeStepW` with D's word and hit given) agree with the specification
 -- in each observed value. (The claim in the form of Xor.wiz, `Qp.ok` with one `rfl` of the

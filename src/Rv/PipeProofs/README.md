@@ -5,8 +5,9 @@ Kernel-checked single-instruction claims for the RV32E pipelined core
 core is after one cycle fetching the specification's next PC, and after three has the
 instruction in R with the specification's PC and value for `rd`. The PC, both copies of
 the register file, both copies of on-chip memory, and the bubbles' leftovers (`ea`,
-`eb`, `mres`, `rval`) are symbolic. `Base.wiz` has the statement and the glue;
-`scripts/pipe-proofs.sh` checks every file here (`wiz check -I src -I proofs`).
+`eb`, `mres`, `rval`) are symbolic. `Base.wiz` has the statement and the glue.
+They are part of the library, so `grail build` checks every file here, each in its own
+job; `scripts/pipe-proofs.sh` checks them one by one outside grail and times them.
 
 Two spellings of the claim:
 
@@ -48,9 +49,7 @@ Not tractable in the current observation (see FINDINGS.md H10):
 ## Running
 
 ```sh
-JOBS=2 WIZ=/path/to/wiz sh scripts/pipe-proofs.sh    # all instruction files
-WIZ=/path/to/wiz sh scripts/pipe-proofs.sh            # WIZ defaults to wiz
+grail build                       # the library, these files included
+sh scripts/pipe-proofs.sh         # one `wiz check` per file, with time and peak memory
+JOBS=2 WIZ=/path/to/wiz sh scripts/pipe-proofs.sh
 ```
-
-`Base.wiz` is skipped by the script (it is the shared statement); check it once with
-`wiz check -I src -I proofs proofs/PipeProofs/Base.wiz`.

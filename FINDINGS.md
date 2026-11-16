@@ -269,8 +269,8 @@ src/Rv/Proofs.wiz still checks. It is about the multi-cycle core, which is still
 tree (`doomTopHalf`, the iCEstick and Arty demos). None of its proofs apply to the
 pipelined core as they stand: they talk about phases.
 
-proofs/PipeProofs (Base.wiz and one file per instruction, checked by
-scripts/pipe-proofs.sh) restates them at retirement for the RV32E pipelined core, 2 KB.
+src/Rv/PipeProofs (Base.wiz and one file per instruction, checked by `grail build`)
+restates them at retirement for the RV32E pipelined core, 2 KB.
 The starting state has an instruction word in D, with E, M and R empty. Symbolic:
 the PC, every register (both copies of the register file), every byte of on-chip
 memory (both copies), and the data the bubbles leave behind (`ea`, `eb`, `mres`,
@@ -300,7 +300,7 @@ value. As in src/Rv/Proofs.wiz, what D presents is a hypothesis. That is why
 * The shifts need library lemmas that are now in the toolchain's lib/BitVecShift.wiz
   (`BitVec.shlStage`/`shrStage_toNat`, `Bits.low_shift`, `high_low`, `low_low_rev`,
   `and_zero_left`, …); the shamt-specific stage chain is proof-local in
-  proofs/PipeProofs/Slli.wiz, Srli.wiz. The pipeline's fill `Hw.and alt (bit 31 a)` is
+  src/Rv/PipeProofs/Slli.wiz, Srli.wiz. The pipeline's fill `Hw.and alt (bit 31 a)` is
   a stuck `Hw.and 0 b` (H2); a left shift ignores the fill, and SRLI's zero fill goes
   through `BitVec.and_zero_left`.
 * No `gate` rewrites were needed. The places where the pipeline ANDs a control bit
