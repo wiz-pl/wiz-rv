@@ -293,15 +293,6 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
   let ω rr := s.rr;
   let ω dv := s.dv;
   let ω bu := s.bus;
-  -- C: a 32-bit instruction at pc[1] = 1 needs one more fetch: the word at pc + 2.
-  -- (A 16-bit instruction's halfword has bits [1:0] != 11; `wD` is the halfword when
-  -- pc[1] = 1, so its low bits say which it is.) Only for a word D will issue: not while
-  -- D is empty, frozen, or holding the squashed word after a taken branch (`fe.rdr`),
-  -- whose halfword would otherwise set `h2` for the branch target's fetch.
-  -- (`gate` on `fe.al` first: with `al` 0 it is 0 for any word or hit; FINDINGS H2)
-  let h2need : r W1 := gate fe.al (gate (Hw.not fe.h2)
-    (Hw.and (Hw.and fe.v (Hw.and (isK fe.fz 0) (Hw.not fe.rdr)))
-      (Hw.and ihit (isK (Hw.slice 0 2 wD : r B2) 3))));
   ----------------------------------------------------------------- R
   let rTrap := Hw.not (isK rr.trap 0);
   let killMiss := Hw.or rr.imiss (gate rr.v (gate (Hw.not rTrap) rr.miss));
@@ -431,7 +422,11 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
   let lo2 : r B2 := Hw.slice 0 2 sum;
   let mis := Hw.mux (isK (Hw.slice 0 2 f3 : r B2) 2) (Hw.not (isK lo2 0))
     (Hw.mux (isK (Hw.slice 0 2 f3 : r B2) 1) (bitOf 0 sum) (Hw.lit 1 0));
-  let misJ := gate jump (bitOf 0 target);
+  -- (a misaligned target: bit 0, which no JAL, JALR or branch can set while the PC is even
+  -- (FINDINGS H12). Tested for every jump or branch, taken or not: the same value, as the
+  -- target's bit 0 is 0 either way, and the branch compare stays off `code` and `tvalE`,
+  -- whose multiplexers it otherwise drove: a critical path of doom_top)
+  let misJ := gate (Hw.or (Hw.or e.jal e.jalr) e.branch) (bitOf 0 target);
   -- an interrupt to take on the instruction in E (not a WFI, which completes first; not
   -- a divide already under way, whose divider state would be left running)
   let irqOn := Hw.and mip s.csr.mie;
@@ -491,6 +486,22 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
   -- does not hold E: E's instruction moves on and E takes a bubble. (`h2need` comes from
   -- the I-cache's tag compare; through `hold` it reached every E register's enable.)
   let hold := Hw.or stallM stallE;
+  -- C: a 32-bit instruction at pc[1] = 1 needs one more fetch: the word at pc + 2.
+  -- (A 16-bit instruction's halfword has bits [1:0] != 11; D's word is the halfword when
+  -- pc[1] = 1, so its low bits say which it is.) Only for a word D will issue: not while
+  -- D is empty, frozen, or holding the squashed word after a taken branch (`fe.rdr`),
+  -- whose halfword would otherwise set `h2` for the branch target's fetch; and not while
+  -- E is held (the fetch waits with D), so that the fetch memories' read enable stays
+  -- off this path. With `h2` 0 the word and hit D presents (`wD`, `ihit`) are those at
+  -- `fe.pc`, so they are taken from the fetch memories directly, without `Pp.dWord`'s
+  -- and `Pp.dHit`'s pc + 2 and second-word multiplexers (a critical path of doom_top).
+  -- (`gate` on `fe.al` first: with `al` 0 it is 0 for any word or hit; FINDINGS H2)
+  let raw1 := Hw.mux (Pp.isDdr fe.pc) (Pp.lineWord ms.icq fe.pc)
+    (Hw.cat ms.qi3 (Hw.cat ms.qi2 (Hw.cat ms.qi1 ms.qi0)));
+  let hit1 := Hw.or (Hw.not (Pp.isDdr fe.pc)) (Hw.eq ms.itq (Pp.tagOf wb fe.pc));
+  let h2need : r W1 := gate fe.al (gate (Hw.not fe.h2) (gate (Hw.not hold)
+    (Hw.and (Hw.and fe.v (Hw.and (isK fe.fz 0) (Hw.not fe.rdr)))
+      (Hw.and hit1 (isK (Hw.slice 16 2 raw1 : r B2) 3)))));
   let dHold := Hw.or hold h2need;
   let advE := Hw.and (Hw.not kill) (Hw.not hold);
   -- (not gated by the trap code: a jump that traps is killed in R, and stops the core)
@@ -558,7 +569,7 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
   -- the fetch address; while D is held the fetch memories' read registers keep their word
   -- (a read enable, not the old address again: `hold` reaches only the enables)
   let pcEn := Hw.or (isK fz 3) (Hw.or fe.rdr (Hw.not dHold));
-  let rdEn := Hw.or pcEn h2need;
+  let rdEn := Hw.or (isK fz 3) (Hw.or fe.rdr (Hw.not hold));
   let insLen : r B32 := Hw.mux d.c (Hw.lit 32 2) (Hw.lit 32 4);
   let nf := Hw.mux (isK fz 3) fe.rpc
     (Hw.mux fe.rdr fe.rtgt (Hw.mux h2need (Hw.add fe.pc (Hw.lit 32 2)) (Hw.add fe.pc insLen)));
