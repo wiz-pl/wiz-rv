@@ -6,3 +6,4 @@ result
 wad/
 src/Rv/PipeProofs/*.log
 src/Rv/PipeProofs/*.time
+wiz-toolchain.local

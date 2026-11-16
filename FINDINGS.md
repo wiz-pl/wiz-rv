@@ -6,9 +6,11 @@ project does instead. Severity: **bug** (wrong behaviour), **gap** (something a
 hardware project needs and had to build or work around), **slow** (with timings;
 rough: one run each on a shared machine), **papercut** (works, but costs time).
 
-Toolchain: wiz master 50cd3e7 (2026-11-12) + PR #166 (agent/cohesion-hw-mem, memories)
-+ PR #199 (agent/hdl-sim-perf, the fast simulator), merged locally (one trivial conflict
-in Tests/ElabFix.lean); see README.md, "Toolchain".
+Toolchain: the states below were recorded with wiz master 50cd3e7 (2026-11-12) + PR #166
+(agent/cohesion-hw-mem, memories) + PR #199 (agent/hdl-sim-perf, the fast simulator),
+merged locally (one trivial conflict in Tests/ElabFix.lean). Both PRs are in master now,
+and `wiz-toolchain` pins `master@071a033a…`, the first snapshot release with both; see
+README.md, "Toolchain".
 
 ## Language and elaborator
 
@@ -331,6 +333,31 @@ The merged doomTop placed at 100.12 MHz. A one-gate change (JB2 = the PWM's comp
 placed at 88.95 MHz with nextpnr's default seed and 108.17 MHz with `--seed 2`
 (`SEED=2 sh .scratch/bitn.sh`). So until rv-pipeline's timing work lands, a build has to
 be checked and maybe placed again; a failing "Max frequency" is not to be loaded.
+
+### H13. The CSR file made `src/Rv/Proofs.wiz` blow up past 8 GB (slow, fixed)
+
+With the CSRs (agent/golem-csr) `wiz check src/Rv/Proofs.wiz` went over heavy's 6 GB and
+then 8 GB caps (8.40 GB at 642 s user time), so `grail build` failed on it. On the commit before the CSRs the misaligned-load claim
+alone already ran for more than 200 s, under 400 MB. Bisected
+under `light`: the glue and eleven claims were small; the three `Pf.x1is2` claims
+(misaligned load, store, jump) reached 2 GB in 5 s, and `#reduce` put it on one field
+after the decode cycle: `trap`, `tval`, `mepc`, `mcause` and `mstatus`, not `mscratch`.
+Two causes, both fixed with no claim changed:
+
+* The trap controls were `Hw.and inE …` (`trapE`, `intr`, and from them `stopTrap`,
+  `enterTrap`, `goE`). `Hw.and` is `UIntN.land`, strict in both inputs (H2), so in the
+  decode cycle, with `inE` 0, the kernel still normalised the trap code. For a load or
+  store that code depends on `mis`, the low bits of `sum` over the leftover latches,
+  which are symbolic. Before the CSRs only `trap` and `tval` read it; trap entry
+  (`mepc`, `mcause`, `mstatus`, the vector) multiplied the paths. They are `gate`s now,
+  the same AND for synthesis.
+* The glue (`Pf.ok`, `Pf.trapOk`, and in src/Rv/TrapProofs `Pf.entryOk`, `Pf.irqOk` and
+  the CSRRW claim) went through `Eq.trans (Eq.congrArg G h) hE` with the implicit
+  arguments inferred. It now goes through `Pf.glueO`/`Pf.glueG` (η plus congruence) and
+  a one-cycle `Pf.readQ`, with every implicit argument given: rv-c's fix, its H12.
+
+After: Proofs.wiz checks in 24 s and 511 MB. Under `light` each file in
+src/Rv/TrapProofs takes 6 to 35 s and at most 870 MB.
 
 ## Compiler and run time
 
