@@ -1,0 +1,385 @@
+import Rv.Core
+import Rv.Uart
+import Rv.Oled
+import Rv.Doom
+import Rv.Golem.Bus
+import Rv.Golem.Intc
+import Rv.Golem.Map
+-- A four-hart golem: four multi-cycle RV32IM harts, one shared peripheral set (UART,
+-- cycle counter, interrupt/timer/mailbox block, framebuffer and OLED controller), one
+-- shared DDR behind wiz-ddr3's 8 KB write-back cache, controller and PHY.
+--
+-- This is the "multi-cycle 4-hart" cut of the area study
+-- (`wiz-notes/golem-multicore-area.md`): the private L1 is a per-hart parameter
+-- (`G4.Cfg.l1`), so four harts fit the A7-35T. The harts see a clock enable every
+-- other cycle (50 MHz effective at the 100 MHz board clock); the bus, the DDR cache,
+-- the controller and the shared peripherals run at the full rate.
+--
+--   hart 0 core -- BusA -- GBus.route --+
+--   hart 1 core -- BusA -- GBus.route --+-- GBus.arbN (4, round-robin) -- cache -- DDR3
+--   hart 2 core -- BusA -- GBus.route --+
+--   hart 3 core -- BusA -- GBus.route --+
+--
+--   shared: Intc (per-hart msip/mtimecmp/mailbox/boot entry, four PLIC contexts),
+--           UART, cycle counter, 96 x 64 framebuffer, OLED controller. No sound (JB
+--           is tied low) and no performance counters.
+--
+-- What this is *not*: there is no hardware coherence. The L1 is private and
+-- write-through; a line another hart wrote stays stale in it. Software shares data
+-- through the uncached aperture (the top 16 MB of DDR, `Core.uncBase`), whose every
+-- access is one bus request to the single shared cache; the mailbox and doorbells are
+-- MMIO and therefore uncached by construction. With the multi-cycle core there is no
+-- store buffer: a store completes its bus phase before the next instruction, so an
+-- uncached store followed by a flag store is observed in that order. (The pipelined
+-- core's store buffer is a different path; this SoC does not use it.) FENCE is decoded
+-- and is a one-cycle drain (`Ph.w`), which is all the ordering this core needs.
+--
+-- Boot ABI (the same as `Intc` and sw/golem.h): every hart starts at PC 0 in its own
+-- local RAM; the image reads `GMap.hartId` (MMIO offset 8) for its hart id (the same
+-- as the `mhartid` CSR, `coreStepHC h`) — hart 0 boots, harts 1..3 park on `msip(h)` and are
+-- released by the doorbell after reading `bootEntry(h)`. A hart's own `mip` is the
+-- read-only MMIO word `GMap.mip`; hart 0 releases each park hart through the doorbell
+-- and then a PLIC mailbox source, and the hart claims/completes that source in its own
+-- context before entering its entry point: the software form of the interrupt path,
+-- which the cores now also take as traps (docs/plic.md).
+
+def G4.harts : Nat := 4
+def G4.ab : Nat := 5
+def G4.wb : Nat := 12
+def G4.iw : Nat := 2
+def G4.fl : Nat := 18
+
+-- The harts and the shared part. `l1`: keep the hart's 16 KB L1 (true) or disable it
+-- (false: 4 RAMB36 per hart instead of 8, every DDR access one word).
+structure G4.Cfg where
+  l1 : List Bool
+
+def G4.cap : Nat := 4
+def G4.qos : List Nat := .cons 0 (.cons 0 (.cons 0 (.cons 0 .nil)))
+
+def G4.allL1 : G4.Cfg := G4.Cfg.mk (.cons .true (.cons .true (.cons .true (.cons .true .nil))))
+
+def G4.noL1 : G4.Cfg := G4.Cfg.mk (.cons .false (.cons .false (.cons .false (.cons .false .nil))))
+
+def G4.cacheOf (cfg : G4.Cfg) (i : Nat) : Bool := Hdl.nthD .true cfg.l1 i
+
+-- a hart's state: its core (with its own L1 state) and the full-rate bus adapter
+structure G4.HSt (wb : Nat) (r : HwTy → Type) where
+  cpu : r (CoreSt.code G4.ab wb)
+  bus : BusA r
+  deriving Bundle
+
+-- the shared peripherals, all at 100 MHz
+structure G4.Sh (fl : Nat) (r : HwTy → Type) where
+  intc : Intc.Ctl r
+  sync : Sync r
+  rx : Rx r
+  tx : UTx r
+  full : r W1
+  byte : r W8
+  cyc : r B64
+  pix : r (HwTy.mem 13 16)
+  col : r B16
+  fwe : r W1
+  fwa : r B13
+  fwd : r B16
+  oled : RCtl fl r
+  pre : r B2
+  txGo : r W1
+  txB : r W8
+  deriving Bundle
+
+def G4.Sh.init (fl : Nat) : G4.Sh fl HwTy.El :=
+  G4.Sh.mk Intc.init Sync.init Rx.init UTx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0)
+    (BitVec.ofNat 64 0) (fun (a : BitVec 13) => BitVec.ofNat 16 0) (BitVec.ofNat 16 0)
+    (BitVec.ofNat 1 0) (BitVec.ofNat 13 0) (BitVec.ofNat 16 0)
+    (RCtl.mk (RSeq.mk (BitVec.ofNat 7 0) (BitVec.ofNat 1 0) (BitVec.ofNat 21 0))
+      (RPins.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 1) (BitVec.ofNat 1 1) (BitVec.ofNat 1 0))
+      (RFrame.mk (BitVec.ofNat fl 0) (BitVec.ofNat 1 0) (BitVec.ofNat 11 Doom.oled.t0))
+      (RGen.mk (BitVec.ofNat 7 0) (BitVec.ofNat 6 0) (BitVec.ofNat 1 0) (BitVec.ofNat 8 0)) Spi.init)
+    (BitVec.ofNat 2 0) (BitVec.ofNat 1 0) (BitVec.ofNat 8 0)
+
+structure G4.St (wb : Nat) (fl : Nat) (r : HwTy → Type) where
+  sh : G4.Sh fl r
+  h0 : G4.HSt wb r
+  h1 : G4.HSt wb r
+  h2 : G4.HSt wb r
+  h3 : G4.HSt wb r
+  arb : GBus.NArb G4.harts G4.cap r
+  atom : GBus.Atom G4.harts r
+  beat : r (HwTy.bits 27)
+  deriving Bundle
+
+def G4.hart {wb fl : Nat} {r : HwTy → Type} (s : G4.St wb fl r) (i : Nat) : G4.HSt wb r :=
+  if Nat.beq i 0 then s.h0 else if Nat.beq i 1 then s.h1 else if Nat.beq i 2 then s.h2 else s.h3
+
+def G4.withHart {wb fl : Nat} {r : HwTy → Type} (s : G4.St wb fl r) (i : Nat) (h : G4.HSt wb r) : G4.St wb fl r :=
+  if Nat.beq i 0 then G4.St.mk s.sh h s.h1 s.h2 s.h3 s.arb s.atom s.beat
+  else if Nat.beq i 1 then G4.St.mk s.sh s.h0 h s.h2 s.h3 s.arb s.atom s.beat
+  else if Nat.beq i 2 then G4.St.mk s.sh s.h0 s.h1 h s.h3 s.arb s.atom s.beat
+  else G4.St.mk s.sh s.h0 s.h1 s.h2 h s.arb s.atom s.beat
+
+def G4.quietIn {r : HwTy → Type} [Hw r] : In r :=
+  In.mk (Hw.lit 1 1) (Hw.lit 32 4294967295) (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 32 0)
+    (Hw.lit 1 0) (Hw.lit 1 0) (Hw.lit 1 0)
+
+def G4.src {fl : Nat} {r : HwTy → Type} [Hw r] (sh : G4.Sh fl r) : r B7 :=
+  Intc.srcBits (Intc.Src.mk sh.full (Hw.lit 1 0))
+
+-- one hart's MMIO read (combinational): its hart id, the UART and timer, the DDR
+-- status, its own `mip` (MSIP/MTIP/MEIP until the CSR file exists), the shared
+-- interrupt/timer/mailbox block, and 0 for an unmapped register
+def G4.read {fl : Nat} {r : HwTy → Type} [Hw r] (sh : G4.Sh fl r) (ddr : r B2) (hart : Nat)
+    (a : r B32) : r B32 :=
+  let off : r B16 := GMap.mmioOff a;
+  let fbA := bitOf 24 a;
+  let uartA := Hw.and (isK off GMap.uart) (Hw.not fbA);
+  let ioff : r B16 := Hw.mux fbA (Hw.lit 16 0) off;
+  let status : r B32 := Hw.cat (Hw.lit 30 0) (Hw.cat sh.full (Hw.and (txIdle sh.tx) (Hw.not sh.txGo)));
+  Hw.mux uartA (Hw.mux sh.full (Hw.cat (Hw.lit 24 0) sh.byte) (Hw.lit 32 4294967295))
+    (Hw.mux (Hw.and (isK off GMap.hartId) (Hw.not fbA)) (Hw.lit 32 hart)
+    (Hw.mux (isK off GMap.uartStatus) status
+    (Hw.mux (isK off GMap.timerLo) (Hw.slice 0 32 sh.cyc)
+    (Hw.mux (isK off GMap.timerHi) (Hw.slice 32 32 sh.cyc)
+    (Hw.mux (isK off GMap.sound) (Hw.lit 32 4294967295)
+    (Hw.mux (isK off GMap.soundFree) (Hw.lit 32 0)
+    (Hw.mux (isK off GMap.ddrStatus) (Hw.cat (Hw.lit 30 0) ddr)
+    (Hw.mux (isK off GMap.mip) (Intc.mip sh.intc (G4.src sh) hart)
+    (Hw.mux fbA (Hw.lit 32 0) (Intc.read sh.intc (G4.src sh) ioff))))))))))
+
+-- a deterministic choice among the harts for the one shared MMIO port: the lowest hart
+-- id wins a conflict (an MMIO read and write in the same cycle take the write's offset)
+def G4.pick {r : HwTy → Type} [Hw r] (v0 v1 v2 v3 : r W1) : r (HwTy.bits G4.iw) :=
+  Hw.mux v0 (Hw.lit G4.iw 0) (Hw.mux v1 (Hw.lit G4.iw 1) (Hw.mux v2 (Hw.lit G4.iw 2) (Hw.lit G4.iw 3)))
+
+def G4.any {r : HwTy → Type} [Hw r] (v0 v1 v2 v3 : r W1) : r W1 :=
+  Hw.or v0 (Hw.or v1 (Hw.or v2 v3))
+
+def G4.at {r : HwTy → Type} [Hw r] (ix : r (HwTy.bits G4.iw)) (v0 v1 v2 v3 : r B32) : r B32 :=
+  Hw.mux (isK ix 0) v0 (Hw.mux (isK ix 1) v1 (Hw.mux (isK ix 2) v2 v3))
+
+-- the four-master arbitration step: the next arbiter state, the request the shared DDR
+-- sees, and one answer per hart (`respFor` is zero for a hart that was not granted)
+structure G4.LinkOut (r : HwTy → Type) where
+  arb : GBus.NArb G4.harts G4.cap r
+  atom : GBus.Atom G4.harts r
+  r0 : CacheResp r
+  r1 : CacheResp r
+  r2 : CacheResp r
+  r3 : CacheResp r
+  sel : CacheReq r
+  deriving Bundle
+
+-- the arbiter with the shared-point atomic engine in front of it. While an atomic is
+-- in flight only its owner's phase request is offered, and `arbNH`'s hold keeps every
+-- other master off the bus until the last write. Every hart's answer is the arbiter's,
+-- except the atomic owner's, which is the engine's (zero until the operation ends).
+def G4.linkStep {r : HwTy → Type} [Hw r]
+    (s : GBus.NArb G4.harts G4.cap r) (at : GBus.Atom G4.harts r)
+    (q0 q1 q2 q3 : CacheReq r) (resp : CacheResp r) : r G4.LinkOut.code :=
+  let busy := Hw.not (isK at.st 0);
+  let ph := GBus.atomPhase G4.harts at;
+  let qs : List (CacheReq r) := .cons q0 (.cons q1 (.cons q2 (.cons q3 .nil)));
+  let a := GBus.arbNH G4.harts G4.cap G4.qos s qs resp busy at.h ph;
+  let na := GBus.NArb.unpack G4.harts G4.cap (Hw.fst a);
+  let mask := Hw.snd (Hw.snd a);
+  let ω sel := CacheReq.unpack (Hw.fst (Hw.snd a));
+  let ao := GBus.AtomOut.unpack G4.harts (GBus.atomStep G4.harts at sel na.owner resp);
+  let pick := fun (i : Nat) =>
+    Hw.mux (Hw.and ao.use (isK na.owner i)) (CacheResp.pack ao.resp)
+      (CacheResp.pack (GBus.respFor mask i resp));
+  G4.LinkOut.pack (G4.LinkOut.mk na ao.next
+    (CacheResp.unpack (pick 0)) (CacheResp.unpack (pick 1))
+    (CacheResp.unpack (pick 2)) (CacheResp.unpack (pick 3))
+    (GBus.reqMux ao.use ao.req sel))
+
+-- one cycle: the four cores (with a quiet answer) give their MMIO decodes and bus
+-- requests; one shared MMIO port is chosen; the arbiter picks one DDR request; the
+-- caller's `resp` is the shared DDR's answer; each core then sees its own answer.
+def G4.step (cfg : G4.Cfg) (wb : Nat) {r : HwTy → Type} [Hw r] (s : G4.St wb G4.fl r) (en rst : r W1)
+    (ddr : r B2) (resp : CacheResp r) (uart_rx : r W1) :
+    r (HwTy.prod (G4.St.code wb G4.fl) CacheReq.code) :=
+  let sh := s.sh;
+  let ω k0 := CoreSt.unpack G4.ab wb (G4.hart s 0).cpu;
+  let ω k1 := CoreSt.unpack G4.ab wb (G4.hart s 1).cpu;
+  let ω k2 := CoreSt.unpack G4.ab wb (G4.hart s 2).cpu;
+  let ω k3 := CoreSt.unpack G4.ab wb (G4.hart s 3).cpu;
+  -- the request/MMIO address side (a quiet answer: a store's write is formed again with
+  -- the real `txReady` below, so a UART store that is waiting does not write twice)
+  let q0 := Out.unpack (Hw.snd (coreStepHC 0 G4.ab wb .true (G4.cacheOf cfg 0) k0 G4.quietIn));
+  let q1 := Out.unpack (Hw.snd (coreStepHC 1 G4.ab wb .true (G4.cacheOf cfg 1) k1 G4.quietIn));
+  let q2 := Out.unpack (Hw.snd (coreStepHC 2 G4.ab wb .true (G4.cacheOf cfg 2) k2 G4.quietIn));
+  let q3 := Out.unpack (Hw.snd (coreStepHC 3 G4.ab wb .true (G4.cacheOf cfg 3) k3 G4.quietIn));
+  let c0 := CacheReq.unpack (Hw.fst (Hw.snd (GBus.route (G4.hart s 0).bus q0.valid q0.pend q0.we q0.addr q0.wdata q0.wstrb q0.aop q0.af5 (GBus.noResp (r := r)))));
+  let c1 := CacheReq.unpack (Hw.fst (Hw.snd (GBus.route (G4.hart s 1).bus q1.valid q1.pend q1.we q1.addr q1.wdata q1.wstrb q1.aop q1.af5 (GBus.noResp (r := r)))));
+  let c2 := CacheReq.unpack (Hw.fst (Hw.snd (GBus.route (G4.hart s 2).bus q2.valid q2.pend q2.we q2.addr q2.wdata q2.wstrb q2.aop q2.af5 (GBus.noResp (r := r)))));
+  let c3 := CacheReq.unpack (Hw.fst (Hw.snd (GBus.route (G4.hart s 3).bus q3.valid q3.pend q3.we q3.addr q3.wdata q3.wstrb q3.aop q3.af5 (GBus.noResp (r := r)))));
+  let lk := G4.LinkOut.unpack (G4.linkStep s.arb s.atom c0 c1 c2 c3 resp);
+  -- each core with its MMIO value and its own DDR answer
+  let b0 := GBus.route (G4.hart s 0).bus q0.valid q0.pend q0.we q0.addr q0.wdata q0.wstrb q0.aop q0.af5 lk.r0;
+  let b1 := GBus.route (G4.hart s 1).bus q1.valid q1.pend q1.we q1.addr q1.wdata q1.wstrb q1.aop q1.af5 lk.r1;
+  let b2 := GBus.route (G4.hart s 2).bus q2.valid q2.pend q2.we q2.addr q2.wdata q2.wstrb q2.aop q2.af5 lk.r2;
+  let b3 := GBus.route (G4.hart s 3).bus q3.valid q3.pend q3.we q3.addr q3.wdata q3.wstrb q3.aop q3.af5 lk.r3;
+  let t0 := GBus.Resp.unpack (Hw.snd (Hw.snd b0));
+  let t1 := GBus.Resp.unpack (Hw.snd (Hw.snd b1));
+  let t2 := GBus.Resp.unpack (Hw.snd (Hw.snd b2));
+  let t3 := GBus.Resp.unpack (Hw.snd (Hw.snd b3));
+  let inp := fun (i : Nat) (q : Out r) (t : GBus.Resp r) =>
+    let mip := Intc.mip sh.intc (G4.src sh) i;
+    In.mk (Hw.and (txIdle sh.tx) (Hw.not sh.txGo)) (G4.read sh ddr i q.ioa) t.ready t.rvalid t.rdata
+      (Intc.irqM mip) (Intc.irqT mip) (Intc.irqE mip);
+  let n0 := coreStepHC 0 G4.ab wb .true (G4.cacheOf cfg 0) k0 (inp 0 q0 t0);
+  let n1 := coreStepHC 1 G4.ab wb .true (G4.cacheOf cfg 1) k1 (inp 1 q1 t1);
+  let n2 := coreStepHC 2 G4.ab wb .true (G4.cacheOf cfg 2) k2 (inp 2 q2 t2);
+  let n3 := coreStepHC 3 G4.ab wb .true (G4.cacheOf cfg 3) k3 (inp 3 q3 t3);
+  let o0 := Out.unpack (Hw.snd n0);
+  let o1 := Out.unpack (Hw.snd n1);
+  let o2 := Out.unpack (Hw.snd n2);
+  let o3 := Out.unpack (Hw.snd n3);
+  -- the one MMIO read and write this cycle (enabled cycles only; the lowest hart wins)
+  let rd0 := Hw.and en o0.rd;
+  let rd1 := Hw.and en o1.rd;
+  let rd2 := Hw.and en o2.rd;
+  let rd3 := Hw.and en o3.rd;
+  let wr0 := Hw.and en o0.wr;
+  let wr1 := Hw.and en o1.wr;
+  let wr2 := Hw.and en o2.wr;
+  let wr3 := Hw.and en o3.wr;
+  let rix := G4.pick rd0 rd1 rd2 rd3;
+  let wix := G4.pick wr0 wr1 wr2 wr3;
+  let rdAny := G4.any rd0 rd1 rd2 rd3;
+  let wrAny := G4.any wr0 wr1 wr2 wr3;
+  let rioa := G4.at rix o0.ioa o1.ioa o2.ioa o3.ioa;
+  let wioa := G4.at wix o0.ioa o1.ioa o2.ioa o3.ioa;
+  let wiod := G4.at wix o0.iod o1.iod o2.iod o3.iod;
+  let rfbA := bitOf 24 rioa;
+  let wfbA := bitOf 24 wioa;
+  let rioff : r B16 := GMap.mmioOff rioa;
+  let wioff : r B16 := GMap.mmioOff wioa;
+  let uartRd := Hw.and rdAny (Hw.and (Hw.not rfbA) (isK rioff GMap.uart));
+  let uartWr := Hw.and wrAny (Hw.and (Hw.not wfbA) (isK wioff GMap.uart));
+  let rr := rxStep (Doom.baudK .true) sh.rx sh.sync.ff2;
+  let ω got := Byte.unpack (Hw.snd rr);
+  let fw := Hw.and wrAny wfbA;
+  let ω ol := sh.oled;
+  let y13 : r (HwTy.bits 13) := Hw.cat (Hw.lit 7 0) ol.gen.y;
+  let pidx : r (HwTy.bits 13) := Hw.add (Hw.add (Hw.shl y13 6) (Hw.shl y13 5)) (Hw.cat (Hw.lit 6 0) ol.gen.x);
+  let oledNext := rctlStep Doom.oled RProg.tree ol sh.col;
+  let enOled := isK sh.pre 0;
+  -- the shared controller sees one bus; a read and a write in the same cycle take the
+  -- write's register (an undefined conflict for software anyway)
+  let ioff : r B16 := Hw.mux wrAny wioff rioff;
+  let intcNext := Intc.step sh.intc (Hw.lit 1 1) (G4.src sh)
+    (Intc.Bus.mk (Hw.and rdAny (Hw.and (Hw.not wrAny) (Hw.not rfbA)))
+      (Hw.and wrAny (Hw.not wfbA)) ioff wiod);
+  let h0 := G4.HSt.mk (CoreSt.held G4.ab wb rst en (Hw.fst n0) (G4.hart s 0).cpu)
+    (BusA.unpack (Hw.mux rst (BusA.pack (BusA.zero (r := r))) (Hw.fst b0)));
+  let h1 := G4.HSt.mk (CoreSt.held G4.ab wb rst en (Hw.fst n1) (G4.hart s 1).cpu)
+    (BusA.unpack (Hw.mux rst (BusA.pack (BusA.zero (r := r))) (Hw.fst b1)));
+  let h2 := G4.HSt.mk (CoreSt.held G4.ab wb rst en (Hw.fst n2) (G4.hart s 2).cpu)
+    (BusA.unpack (Hw.mux rst (BusA.pack (BusA.zero (r := r))) (Hw.fst b2)));
+  let h3 := G4.HSt.mk (CoreSt.held G4.ab wb rst en (Hw.fst n3) (G4.hart s 3).cpu)
+    (BusA.unpack (Hw.mux rst (BusA.pack (BusA.zero (r := r))) (Hw.fst b3)));
+  let shN := G4.Sh.mk (Intc.Ctl.unpack intcNext)
+    (Sync.unpack (syncStep sh.sync uart_rx))
+    (Rx.unpack (Hw.fst rr))
+    (UTx.unpack (txStep (Doom.baudK .true) sh.tx sh.txGo sh.txB))
+    (Hw.mux got.valid hi (Hw.mux uartRd lo sh.full))
+    (Hw.mux got.valid got.data sh.byte)
+    (inc sh.cyc)
+    (Hw.memWrite sh.pix sh.fwe sh.fwa sh.fwd)
+    (Hw.memRead sh.pix pidx)
+    fw (Hw.slice 1 13 wioa) (Hw.slice 0 16 wiod)
+    (RCtl.unpack G4.fl (Hw.mux enOled oledNext (RCtl.pack G4.fl ol)))
+    (inc sh.pre)
+    uartWr (Hw.mux uartWr (Hw.slice 0 8 wiod) sh.txB);
+  Hw.pair (G4.St.pack wb G4.fl (G4.St.mk shN h0 h1 h2 h3
+    lk.arb lk.atom (inc s.beat)))
+    (CacheReq.pack lk.sel)
+
+def G4.initSt (wb : Nat) (prog : List Nat) : HwTy.El (G4.St.code wb G4.fl) :=
+  let h := G4.HSt.mk (Bundle.toEl (CoreSt.bundle G4.ab wb) (CoreSt.init G4.ab wb prog)) BusA.init;
+  Bundle.toEl (G4.St.bundle wb G4.fl) (G4.St.mk (G4.Sh.init G4.fl) h h h h
+    (GBus.nArbInit G4.harts G4.cap) (GBus.atomInit G4.harts) (BitVec.ofNat 27 0))
+
+-- the shared pins: the UART line, the OLED's Pmod pins, the LEDs and the sound pin
+structure G4.Out (r : HwTy → Type) where
+  uart_tx : r W1
+  led : r B4
+  ja : r W8
+  jb : r W8
+  deriving Bundle
+
+def G4.out {wb : Nat} {r : HwTy → Type} [Hw r] (s : G4.St wb G4.fl r) (calDone calFail : r W1) : G4.Out r :=
+  let ω ol := s.sh.oled;
+  G4.Out.mk s.sh.tx.line
+    (Hw.cat (Hw.slice 26 1 s.beat) (Hw.cat (Hw.slice 25 1 s.beat) (Hw.cat calFail calDone)))
+    (Hw.cat ol.pins.pmoden (Hw.cat ol.pins.vccen (Hw.cat ol.pins.res (Hw.cat ol.pins.dc
+      (Hw.cat ol.spi.sclk (Hw.cat (Hw.lit 1 0) (Hw.cat ol.spi.mosi ol.pins.cs)))))))
+    (Hw.lit 8 0)
+
+--------------------------------------------------------------------------------
+-- The simulation top: the same four harts and shared block with a behavioural DDR
+-- (`GBus.ramStep`, 16 KB) instead of wiz-ddr3's cache and controller, and a debug port that
+-- exposes the traps, PCs, the private counters and the done flag. A compiled run is
+-- possible with `Circuit.simFast` but its netlist construction is over the 60 s test
+-- budget; the committed 4-hart ring test uses the real `Intc` (`golem_four_ring`).
+
+structure G4.SimIn (r : HwTy → Type) where
+  rst : r W1
+  uart_rx : r W1
+  deriving Bundle
+
+structure G4.SimOut (r : HwTy → Type) where
+  uart_tx : r W1
+  ja : r W8
+  jb : r W8
+  pcs : r (HwTy.bits 128)
+  traps : r (HwTy.bits 12)
+  counters : r (HwTy.bits 128)
+  done : r B32
+  deriving Bundle
+
+structure G4.SimSt (wb : Nat) (r : HwTy → Type) where
+  top : r (G4.St.code wb G4.fl)
+  ram : GBus.Ram 12 r
+  half : r W1
+  deriving Bundle
+
+-- the word index of a byte address in the behavioural DDR (2^12 words = 16 KB: the
+-- uncached aperture aliases into it; the ring uses only the low words)
+def G4.wi (byte : Nat) : Nat := Nat.div (Nat.mod byte 268435456) 4
+
+def G4.simStep (cfg : G4.Cfg) (wb : Nat) {r : HwTy → Type} [Hw r] (s : G4.SimSt wb r) (x : G4.SimIn r) :
+    r (HwTy.prod (G4.SimSt.code wb) G4.SimOut.code) :=
+  let b := s;
+  let ω ts := G4.St.unpack wb G4.fl b.top;
+  let a0 := G4.step cfg wb ts b.half x.rst (Hw.lit 2 1) (GBus.noResp (r := r)) x.uart_rx;
+  let ω sel := CacheReq.unpack (Hw.snd a0);
+  let dr := GBus.ramStep 12 b.ram sel;
+  let ω ramN := GBus.Ram.unpack 12 (Hw.fst dr);
+  let ω resp := CacheResp.unpack (Hw.snd dr);
+  let a := G4.step cfg wb ts b.half x.rst (Hw.lit 2 1) resp x.uart_rx;
+  let ω tsN := G4.St.unpack wb G4.fl (Hw.fst a);
+  let ω c0 := CoreSt.unpack G4.ab wb tsN.h0.cpu;
+  let ω c1 := CoreSt.unpack G4.ab wb tsN.h1.cpu;
+  let ω c2 := CoreSt.unpack G4.ab wb tsN.h2.cpu;
+  let ω c3 := CoreSt.unpack G4.ab wb tsN.h3.cpu;
+  let cnt := fun (h : Nat) => Hw.memRead ramN.m (Hw.lit 12 (Nat.mod (G4.wi (Core.uncBase + 256 * h)) 4096));
+  let ω ol := tsN.sh.oled;
+  let o := G4.SimOut.pack (G4.SimOut.mk tsN.sh.tx.line
+    (Hw.cat ol.pins.pmoden (Hw.cat ol.pins.vccen (Hw.cat ol.pins.res (Hw.cat ol.pins.dc
+      (Hw.cat ol.spi.sclk (Hw.cat (Hw.lit 1 0) (Hw.cat ol.spi.mosi ol.pins.cs)))))))
+    (Hw.lit 8 0)
+    (Hw.cat c0.pc (Hw.cat c1.pc (Hw.cat c2.pc c3.pc)))
+    (Hw.cat (Hw.slice 0 3 c0.trap) (Hw.cat (Hw.slice 0 3 c1.trap)
+      (Hw.cat (Hw.slice 0 3 c2.trap) (Hw.slice 0 3 c3.trap))))
+    (Hw.cat (cnt 0) (Hw.cat (cnt 1) (Hw.cat (cnt 2) (cnt 3))))
+    (Hw.memRead ramN.m (Hw.lit 12 (Nat.mod (G4.wi (Core.uncBase + 2048)) 4096))));
+  Hw.pair (G4.SimSt.pack wb (G4.SimSt.mk (Hw.fst a) (GBus.Ram.unpack 12 (Hw.fst dr)) (Hw.not b.half))) o
+
+def G4.sim (wb : Nat) (cfg : G4.Cfg) (prog : List Nat) : Circuit G4.SimIn.code G4.SimOut.code :=
+  Circuit.mk (G4.SimSt.code wb)
+    (Bundle.toEl (G4.SimSt.bundle wb) (G4.SimSt.mk (G4.initSt wb prog) (GBus.ramInit 12)
+      (BitVec.ofNat 1 0)))
+    (fun s x => G4.simStep cfg wb (G4.SimSt.unpack wb s) (G4.SimIn.unpack x))

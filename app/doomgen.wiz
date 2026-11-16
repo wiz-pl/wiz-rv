@@ -1,3 +1,4 @@
+import Rv.DPipe
 import Rv.DoomTop
 import Rv.Progs
 import Ddr3.Tb

@@ -15,9 +15,12 @@ def showBytes : List Nat → String
   | .nil => ""
   | .cons x xs => Nat.repr x ++ " " ++ showBytes xs
 
-def report (name : String) (p : List Asm) (steps : Nat) : IO Unit :=
-  let s := Rv.run (Cfg.rv32e 12) steps (Arch.start (Cfg.rv32e 12) (Asm.assemble p));
+def reportCfg (name : String) (c : Cfg) (p : List Asm) (steps : Nat) : IO Unit :=
+  let s := Rv.run c steps (Arch.start c (Asm.assemble p));
   IO.println (name ++ ": trap " ++ Nat.repr s.trap ++ ", pc " ++ Nat.repr s.pc.toNat ++ ", x1 " ++ Nat.repr (Rv.reg s 1).toNat ++ ", x15 " ++ Nat.repr (Rv.reg s 15).toNat ++ ", out " ++ showBytes (List.reverse s.out))
+def report (name : String) (p : List Asm) (steps : Nat) : IO Unit := reportCfg name (Cfg.rv32e 12) p steps
+
+def cfgA : Cfg := Cfg.rv32ia 12
 
 -- the trap state (cause, tval, epc) after the run: the specification's `mcause`/
 -- `mtval`/`mepc` triple
@@ -68,6 +71,10 @@ def twinOk : Bool := natsEq (stateVec (Cfg.rv32e 12) (run2 (Prog.cProg pad))) (s
 
 def main : IO Unit := do
   report "sum" Prog.sum 100;
+  report "csr" Prog.csr 100;
+  reportCfg "atomics" cfgA Prog.atomics 200;
+  reportCfg "atomics ddr" cfgA Prog.atomicsDdr 100;
+  reportCfg "atomics resv" cfgA Prog.atomicsResv 30;
   reportTrap "trapLoad" Prog.trapLoad 50;
   reportTrap "trapStore" Prog.trapStore 50;
   report "jumpHalf" Prog.jumpHalf 50;

@@ -87,6 +87,74 @@ def Prog.sort : List Asm :=
 
 -- traps: a misaligned load, a misaligned store, a misaligned jump, an illegal
 -- instruction (all zeros), ECALL; and x16 (illegal on RV32E only)
+-- the machine CSRs: write, read back, set and clear bits, the immediate forms
+def Prog.csr : List Asm :=
+  A.li 5 1 :: A.csrrw 6 Csr.aMscratch 5 :: A.csrrs 7 Csr.aMscratch 0 ::
+  A.li 8 8 :: A.csrrw 0 Csr.aMstatus 8 :: A.csrrs 9 Csr.aMstatus 0 ::
+  A.li 10 128 :: A.csrrw 0 Csr.aMie 10 :: A.csrrs 11 Csr.aMie 0 ::
+  A.li 12 16 :: A.csrrs 0 Csr.aMscratch 12 :: A.csrrs 13 Csr.aMscratch 0 ::
+  A.li 14 8 :: A.csrrc 0 Csr.aMstatus 14 :: A.csrrs 15 Csr.aMstatus 0 ::
+  A.ebreak :: .nil
+
+-- traps and interrupts with handlers (docs/csr.md): mtvec in vectored mode (base 4,
+-- bit 0 set), so an exception goes to 4 and interrupt `c` to 4 + 4c. ECALL is handled
+-- and returned past (mepc + 4); the timer interrupt (MTIP, from `Prog.irqAt`) is taken
+-- in a counting loop and masked by its handler; WFI with MIE off waits for MEIP and
+-- continues; setting MIE then takes the external interrupt at once; finally mtvec = 0
+-- and EBREAK halts. x3 ECALL's mcause, x9 the ECALL count, x10/x11 MTI's mcause/mepc,
+-- x8 mip after the WFI, x13 MEI's mcause, x14 7 once the MEI handler has returned.
+-- Output: 11 (ECALL's mcause), 1, 7 and 128 (MTI's mcause, low and high byte), 11 (MEI),
+-- 7, 8 (mip >> 8: MEIP and MTIP pending).
+def Prog.irq : List Asm :=
+  A.jal 5 "main" ::                                     -- x5 = 4, the vector base
+  A.j "exc" :: A.nop :: A.nop ::                        -- 4: exceptions
+  A.j "msi" :: A.nop :: A.nop :: A.nop ::               -- 16: MSI (cause 3)
+  A.j "mti" :: A.nop :: A.nop :: A.nop ::               -- 32: MTI (cause 7)
+  A.j "mei" ::                                          -- 48: MEI (cause 11)
+  A.label "exc" :: A.csrrs 3 Csr.aMcause 0 :: A.csrrs 4 Csr.aMepc 0 :: A.addi 4 4 4 ::
+    A.csrrw 0 Csr.aMepc 4 :: A.addi 9 9 1 :: A.mret ::
+  A.label "mti" :: A.csrrs 10 Csr.aMcause 0 :: A.csrrs 11 Csr.aMepc 0 :: A.li 6 128 ::
+    A.csrrc 0 Csr.aMie 6 :: A.li 2 1 :: A.mret ::
+  A.label "msi" :: A.li 12 1 :: A.li 6 8 :: A.csrrc 0 Csr.aMie 6 :: A.mret ::
+  A.label "mei" :: A.csrrs 13 Csr.aMcause 0 :: A.li 6 2048 :: A.csrrc 0 Csr.aMie 6 :: A.mret ::
+  A.label "main" :: A.ori 5 5 1 :: A.csrrw 0 Csr.aMtvec 5 ::
+  A.ecall ::
+  A.li 6 128 :: A.csrrs 0 Csr.aMie 6 :: A.csrrsi 0 Csr.aMstatus 8 ::
+  A.label "loop" :: A.addi 1 1 1 :: A.beqz 2 "loop" ::
+  A.csrrci 0 Csr.aMstatus 8 :: A.li 6 2048 :: A.csrrs 0 Csr.aMie 6 ::
+  A.wfi :: A.csrrs 8 Csr.aMip 0 ::
+  A.csrrsi 0 Csr.aMstatus 8 :: A.addi 14 0 7 ::
+  A.li 15 2147483648 :: A.sb 3 0 15 :: A.sb 9 0 15 :: A.sb 10 0 15 :: A.srli 10 10 24 ::
+  A.sb 10 0 15 :: A.sb 13 0 15 :: A.sb 14 0 15 :: A.srli 8 8 8 :: A.sb 8 0 15 ::
+  A.csrrw 0 Csr.aMtvec 0 :: A.ebreak :: .nil
+
+-- `Prog.irq`'s interrupt inputs: MTIP from cycle 60, MEIP from cycle 300 (both stay
+-- high; the handlers mask them in mie)
+def Prog.irqAt (c : Nat) : Nat :=
+  Nat.add (if Nat.lt c 60 then 0 else 128) (if Nat.lt c 300 then 0 else 2048)
+
+-- interrupts at arbitrary points of a program with loads, stores and taken branches:
+-- the timer input pulses (`Prog.pulseAt`), the handler (direct mode, at 4) counts in
+-- x13 and returns. Output: the sum's two low bytes (16 words of 3i, plus byte 1 of
+-- each), then the interrupt count's low byte (timing-dependent: each core's own).
+def Prog.irqStress : List Asm :=
+  A.jal 5 "main" ::
+  A.addi 13 13 1 :: A.csrrs 12 Csr.aMepc 0 :: A.mret ::
+  A.label "main" :: A.csrrw 0 Csr.aMtvec 5 :: A.li 6 128 :: A.csrrs 0 Csr.aMie 6 ::
+  A.csrrsi 0 Csr.aMstatus 8 ::
+  A.li 1 0 :: A.li 2 16 :: A.li 3 256 ::
+  A.label "fill" :: A.slli 4 1 1 :: A.add 4 4 1 :: A.sw 4 0 3 :: A.addi 3 3 4 :: A.addi 1 1 1 ::
+    A.bne 1 2 "fill" ::
+  A.li 1 0 :: A.li 3 256 :: A.li 7 0 ::
+  A.label "sum" :: A.lw 4 0 3 :: A.add 7 7 4 :: A.lb 8 1 3 :: A.add 7 7 8 :: A.addi 3 3 4 ::
+    A.addi 1 1 1 :: A.bne 1 2 "sum" ::
+  A.csrrci 0 Csr.aMstatus 8 ::
+  A.li 15 2147483648 :: A.sb 7 0 15 :: A.srli 7 7 8 :: A.sb 7 0 15 :: A.sb 13 0 15 ::
+  A.csrrw 0 Csr.aMtvec 0 :: A.ebreak :: .nil
+
+-- MTIP for 2 cycles in every 23
+def Prog.pulseAt (c : Nat) : Nat := if Nat.lt (Nat.mod c 23) 2 then 128 else 0
+
 def Prog.trapLoad : List Asm := A.li 1 2 :: A.lw 2 0 1 :: A.ebreak :: .nil
 def Prog.trapStore : List Asm := A.li 1 1 :: A.sh 2 0 1 :: A.ebreak :: .nil
 -- with C a jump to a halfword boundary is legal: this one lands on the C.ADDI at 2
@@ -357,6 +425,65 @@ def Hex.halvesGo : List Nat → Option Nat → List Nat
   | .cons b bs, .none => Hex.halvesGo bs (.some b)
   | .cons b bs, .some hi => .cons (hi + 256 * b) (Hex.halvesGo bs .none)
 def Hex.halves (s : String) : List Nat := Hex.halvesGo (Hex.bytesGo (String.chars s) .none) .none
+
+--------------------------------------------------------------------------------
+-- RV32A: LR/SC and the AMOs on the on-chip memory. The reservation cases: success,
+-- failure without a reservation, failure after a store to the reserved word, failure
+-- after an LR to another address (which replaces the reservation), and failure after
+-- a store to another word (which keeps it). FENCE and FENCE.I leave the reservation.
+
+def Prog.atomics : List Asm :=
+  P.port :: A.li 1 512 :: A.li 2 5 :: A.sw 2 0 1 ::
+  A.lrw 3 1 :: P.out 3 ::                       -- 5
+  A.addi 4 3 3 :: A.scw 5 4 1 :: P.out 5 ::      -- 0: success
+  A.lw 6 0 1 :: P.out 6 ::                       -- 8
+  A.scw 7 2 1 :: P.out 7 ::                      -- 1: no reservation
+  A.lw 8 0 1 :: P.out 8 ::                       -- 8: not written
+  A.lrw 9 1 :: A.sw 2 0 1 :: A.scw 10 4 1 :: P.out 10 ::   -- 1: a store to the word
+  A.lrw 11 1 :: A.fence :: A.scw 12 4 1 :: P.out 12 ::     -- 0: fence keeps it
+  A.lw 13 0 1 :: P.out 13 ::                     -- 8
+  A.lrw 3 1 :: A.addi 16 1 4 :: A.scw 14 2 16 :: P.out 14 :: -- 1: another address
+  A.scw 17 2 1 :: P.out 17 ::                    -- 1: a failed SC clears it
+  A.li 18 10 :: A.amoaddw 19 18 1 :: P.out 19 ::  -- old 8, memory 18
+  A.lw 20 0 1 :: P.out 20 ::                     -- 18
+  A.amoswapw 21 18 1 :: P.out 21 ::              -- old 18, memory 10
+  A.lw 22 0 1 :: P.out 22 ::                     -- 10
+  A.li 23 3 :: A.amoxorw 24 23 1 :: P.out 24 ::  -- old 10, memory 9
+  A.amoorw 25 23 1 :: P.out 25 ::                -- old 9, memory 11
+  A.amoandw 26 23 1 :: P.out 26 ::               -- old 11, memory 3
+  A.li 27 (-1) :: A.amominw 28 27 1 :: P.out 28 :: -- old 3, memory -1
+  A.li 29 2 :: A.amomaxw 30 29 1 :: P.out 30 ::  -- old -1, memory 2
+  A.amominuw 31 27 1 :: P.out 31 ::              -- old 2, memory 2
+  A.amomaxuw 3 27 1 :: P.out 3 ::                -- old 2, memory -1
+  A.lw 4 0 1 :: P.out 4 ::                       -- -1
+  A.fenceI :: A.ebreak :: .nil
+
+-- the same through DDR (the bus, the L1): LR, SC, AMOADD, AMOSWAP
+def Prog.atomicsDdr : List Asm :=
+  P.port :: A.li 1 1325400064 :: A.li 2 7 :: A.sw 2 0 1 ::
+  A.lrw 3 1 :: P.out 3 ::                        -- 7
+  A.addi 4 3 1 :: A.scw 5 4 1 :: P.out 5 ::       -- 0
+  A.lw 6 0 1 :: P.out 6 ::                        -- 8
+  A.li 7 3 :: A.amoaddw 8 7 1 :: P.out 8 ::       -- old 8, memory 11
+  A.lw 9 0 1 :: P.out 9 ::                        -- 11
+  A.amoswapw 10 7 1 :: P.out 10 ::                -- old 11, memory 3
+  A.lw 11 0 1 :: P.out 11 ::                      -- 3
+  A.scw 12 2 1 :: P.out 12 ::                     -- 1: no reservation
+  A.ebreak :: .nil
+
+-- an AMO to the reserved word clears the reservation
+def Prog.atomicsResv : List Asm :=
+  P.port :: A.li 1 512 :: A.li 2 5 :: A.sw 2 0 1 ::
+  A.lrw 3 1 :: A.li 4 1 :: A.amoaddw 5 4 1 :: A.scw 6 4 1 :: P.out 6 :: -- 1
+  A.ebreak :: .nil
+
+-- misaligned atomic accesses trap: LR.W with the load code, SC.W and the AMOs with
+-- the store code. An atomic access to the I/O port's address (bit 31) is illegal.
+def Prog.aTrapLr : List Asm := A.li 1 2 :: A.lrw 2 1 :: A.ebreak :: .nil
+def Prog.aTrapSc : List Asm := A.li 1 2 :: A.scw 2 3 1 :: A.ebreak :: .nil
+def Prog.aTrapAmo : List Asm := A.li 1 2 :: A.amoaddw 2 3 1 :: A.ebreak :: .nil
+def Prog.aTrapIo : List Asm := A.li 1 2147483648 :: A.lrw 2 1 :: A.ebreak :: .nil
+def Prog.aTrapF5 : List Asm := A.li 1 0 :: Asm.amo 5 2 1 3 :: A.ebreak :: .nil
 
 -- the L1 with stores to lines it holds: load (the line comes in), store every size,
 -- load back, and a line with every word written (DDR)
