@@ -420,9 +420,14 @@ is back in the library:
   cycle, only its read data compared), with every implicit argument of `Eq.trans` and
   `Eq.congrArg` given. The whole file checks in seconds.
 
-One claim changed: `Pf.jump_trap` (JALR to x1 = 2 traps with cause 4) is false with C,
-since 2 is a legal target. It is now `Pf.jump_half`: the same JALR leaves the core at
-the specification's PC, 2. The other thirteen claims are as they were.
+One claim changed: `Pf.jump_trap` said that JALR to x1 = 2 traps with cause 4
+(misaligned jump), tval 2 and epc at the JALR. Without C a target must be a multiple of
+4, so 2 trapped. With C (`IALIGN` = 16) a target need only be a multiple of 2: 2 is the
+address of a halfword instruction, `Rv.jump` and the core's `misJ` test bit 0 only, and
+the JALR jumps there with no trap. No encoding can make cause 4 now (JALR clears bit 0;
+JAL and branch offsets are even), so there is no misaligned-jump claim left to prove.
+It is now `Pf.jump_half`: the same JALR leaves the core at the specification's PC, 2,
+with x0 still 0. The other thirteen claims are as they were.
 
 The pipeline's second-fetch request (`h2need`) was first computed from D's word
 whatever D held. In the cycle after a taken branch D holds the squashed word (`fe.rdr`),
