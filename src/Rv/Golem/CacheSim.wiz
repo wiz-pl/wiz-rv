@@ -9,6 +9,10 @@ import Rv.CacheRtl
 -- (writing it back first in write-back mode). The cache's backside is the controller's
 -- native 128-bit line port.
 --
+-- The bus request's atomic fields (`aop`/`af5`, LR/SC/AMO since the atomics) are routed as
+-- in `golemSim`, but the cache has no atomic path: `CReq` drops them, so an atomic through
+-- this circuit acts as a plain load or store. The test program has none.
+--
 -- The test `tests/golem_cache.wiz` runs a small program through this circuit and checks
 -- the words it wrote to the on-chip RAM: DDR[0] = 0x12345678 read back after a store
 -- that evicted its line, and DDR[16] = 0x0abcdef1 in the evicting line.
@@ -44,9 +48,9 @@ def Golem.cacheStepOut (cfg : RgbCfg) (n : Nat) (wb alloc : Bool) {r : HwTy → 
   let ω bs := s.bus;
   let m0 := Mini.step cfg n s.cpu (MIn.mk i.uart_rx lo lo (Hw.lit 32 0) (Hw.lit 2 1) (Hw.lit 4 0));
   let ω o0 := MOut.unpack (Hw.snd m0);
-  let r0 := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb (GBus.noResp (r := r));
+  let r0 := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb o0.aop o0.af5 (GBus.noResp (r := r));
   let ω q := CacheReq.unpack (Hw.fst (Hw.snd r0));
-  let host := CacheReq.mk i.ld_valid (Hw.slice 0 28 i.ld_addr) i.ld_we i.ld_wdata i.ld_wstrb;
+  let host := CacheReq.mk i.ld_valid (Hw.slice 0 28 i.ld_addr) i.ld_we i.ld_wdata i.ld_wstrb (Hw.lit 2 0) (Hw.lit 5 0);
   let ar0 := GBus.arb s.arb q host (GBus.noResp (r := r));
   let ω sel := CacheReq.unpack (Hw.fst (Hw.snd ar0));
   let cq := CReq.mk sel.valid sel.addr sel.we sel.wdata sel.wstrb;
@@ -57,7 +61,7 @@ def Golem.cacheStepOut (cfg : RgbCfg) (n : Nat) (wb alloc : Bool) {r : HwTy → 
   let ar := GBus.arb s.arb q host (CacheResp.mk cresp.ready cresp.rvalid cresp.rdata);
   let ω coreResp := CacheResp.unpack (Hw.fst (Hw.snd (Hw.snd ar)));
   let ω hostResp := CacheResp.unpack (Hw.snd (Hw.snd (Hw.snd ar)));
-  let br := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb coreResp;
+  let br := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb o0.aop o0.af5 coreResp;
   let ω toCore := GBus.Resp.unpack (Hw.snd (Hw.snd br));
   let m1 := Mini.step cfg n s.cpu (MIn.mk i.uart_rx toCore.ready toCore.rvalid toCore.rdata (Hw.lit 2 1) (Hw.lit 4 0));
   let ω o := MOut.unpack (Hw.snd m1);
