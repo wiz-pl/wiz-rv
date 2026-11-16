@@ -108,6 +108,22 @@ def GBoard.pins : List XdcPin := List.append Board.pins GBoard.extraPins
 def GBoard.xdc : String :=
   Board.xdc ++ Hdl.concat (Hdl.map Xdc.pinLine GBoard.extraPins)
 
+-- The same constraints with a different period on the board clock. The four-hart
+-- build uses 20 ns: its harts are enabled every other cycle, so the hart/sys target
+-- is 20 ns (50 MHz effective), not the 10 ns of the single-hart pipelined build. The
+-- DDR3 PHY's 400 MHz domain is separate and not derived by the openXC7 timing report
+-- (`ck_CLKOUT0_g` is the only clock it checks), so it keeps its own sign-off.
+def GBoard.xdcFor (period : String) : String :=
+  Hdl.concat (Hdl.map (fun (l : String) =>
+    match String.contains l "create_clock -period" with
+    | .true => "create_clock -period " <+> period <+> " [get_ports {clk}]\n"
+    | .false => l ++ "\n") (String.splitOn GBoard.xdc "\n"))
+
+def GBoard.xdc20 : String :=
+  "# golem_four: harts enabled every other cycle at 50 MHz effective (20 ns target).\n"
+  <+> "# The DDR3 PHY's 400 MHz domain is not derived from this constraint.\n"
+  <+> GBoard.xdcFor "20.000"
+
 -- the pin table as `Hdl.Xdc` sees it: Arty's bus resources plus the DDR3 pads as
 -- one-bit ports (the netlist flattens `Pads.t`/`Pads.io` the same way)
 def GBoard.asOne (p : XdcPin) : XPin := XPin.one p.port p.pin

@@ -27,8 +27,10 @@ tests/*.wiz          grail tests
 
 RV32I (32 registers) or RV32E (16), the unprivileged base ISA v2.1 without CSRs:
 ECALL, EBREAK, an illegal instruction, a misaligned load, store or jump target stop the
-machine with a trap code (`src/Rv/Isa.wiz` has the list) instead of trapping; FENCE is a
-no-op. Memory is 2^n bytes from address 0 (addresses wrap); the program image is its
+machine instead of trapping into a handler. The stopped machine records the RISC-V trap
+state: the cause (`mcause`; `src/Rv/Isa.wiz` has the list), `tval` (`mtval`: the
+faulting address, or the instruction word for an illegal instruction; 0 for
+ECALL/EBREAK) and `epc` (`mepc`: the PC of the trapping instruction). FENCE is a no-op. Memory is 2^n bytes from address 0 (addresses wrap); the program image is its
 initial contents and execution starts at 0. A store to an address with bit 31 set
 writes its low byte to the output port instead.
 
@@ -53,9 +55,9 @@ Xilinx part) and a 32-cycle restoring divider.
   read asynchronously, with a bypass of R's write.
 * **E**: the ALU and the barrel shifter. Branches are predicted not taken and resolved
   here; a taken branch or jump is registered and redirects the fetch a cycle later, so
-  it costs 2 cycles. Also here: the traps, and the four 16 × 16 partial products of the
-  multiplier (4 DSP48E1). The divider is iterative (34 cycles; E waits). The D-side
-  memories are read at the address.
+  it costs 2 cycles. Also here: the traps (cause, tval and epc are latched/held at H),
+  and the four 16 × 16 partial products of the multiplier (4 DSP48E1). The divider is
+  iterative (34 cycles; E waits). The D-side memories are read at the address.
 * **M**: the load data comes from the on-chip RAM's data copy, the D-cache (16 KB,
   write-through, no allocation on a store) or I/O. Also here: the store merge and the
   product's sum.
@@ -127,21 +129,53 @@ It ran on the user's Arty A7-35T on 2026-11-12 (loaded by artix-target): the 711
 above, byte for byte, then the echo.
 
 Lockstep (`tests/lockstep.wiz`): the core and the specification agree, instruction by
-instruction (PC and every register at each instruction boundary, all memory and the
-output at the end), on programs exercising every RV32I instruction, the traps, RV32E's
-register limit, and (RV32IM) every M instruction on the edge cases.
+instruction (PC, the trap state (cause, tval) and every register at each instruction
+boundary; cause, tval and epc, all memory and the output at the end), on programs
+exercising every RV32I instruction, the traps, RV32E's register limit, and (RV32IM)
+every M instruction on the edge cases.
 
-Proofs (`src/Rv/Proofs.wiz`, kernel-checked): from the decode phase, two cycles of the
+Proofs (`src/Rv/Proofs.wiz` and `src/Rv/TrapProofs/`, kernel-checked by `grail build`; the
+trap-entry, interrupt, MRET, WFI and CSR claims are docs/csr.md's theorem): from the decode phase, two cycles of the
 RV32E core give the specification's PC and rd for XOR, OR, AND, XORI, ORI, ANDI, LUI and
 AUIPC, for every PC, register file, memory (holding the instruction at PC) and every
-value of the core's other registers. FINDINGS.md, H2, says why not the others.
+value of the core's other registers. The trap-state claims (`Pf.TrapClaimAt`) give the
+specification's cause, tval and epc for ECALL, EBREAK, an illegal instruction, and a
+misaligned load, store and jump (the address ones from a concrete x1, because the
+address adder is not bridged for a symbolic operand yet). FINDINGS.md, H2, says why not
+the other instructions.
+
+## Independent oracle
+
+`oracle/` is verification infrastructure, not part of the core. It compares the
+executable specification (`Rv.Isa`), the multi-cycle core, an independent Python RV32I
+reference, `sail-riscv` and Spike on one architectural trace per instruction (PC, trap
+cause, all 32 registers and the data memory), on ALU, branch, load/store, shift and
+mixed fixtures. The Wiz sides also emit the rest of the trap state (`tval`, `epc`) on a
+`T` line; six `trap_*` fixtures stop the machine on each trap cause and compare it
+between `isa`, `core` and `py` (Sail/Spike enter a handler and are reported as skips,
+not passes). The recorded run (sail-riscv 0.12, Spike 1.1.1-dev) has 31 passing
+comparisons, 0 failures and 2 documented skips (Spike cannot load at 0, so the two
+AUIPC fixtures are Sail/Python-only); the trap set adds 33 `isa`/`core`/`py`
+comparisons, all passing.
+
+The same directory has an `rvfi` (RISC-V Formal Interface) wrapper for the emitted
+core. It is generated from the flat Verilog by `oracle/scripts/mkrvfi.py`, linted with
+Icarus, and its rvfi beats are simulated and compared with the Python reference on all
+five fixtures. The riscv-formal checks were then run against the pinned revision
+`c992aa61fdfe0846c5ed90324c596202a1c69b76` (2026-07-16, yosys 0.70+post, sby 0.70,
+boolector 3.2.4, Icarus 13.0): **37/37 `insn_*_ch0` checks pass** (every base-I
+instruction), `causal_mem_ch0` passes on the mixed load/store program, and the
+`reg`/`pc_fwd`/`pc_bwd`/`causal`/`unique`/`liveness` consistency checks pass on the
+load program. No assertion failed. See [oracle/README.md](oracle/README.md) and
+[oracle/riscv-formal/README.md](oracle/riscv-formal/README.md).
 
 ## Toolchain
 
-The HDL memories are Wiz PR #166 and the fast netlist simulator PR #199, both unmerged
-when this was written: the toolchain here is wiz master 50cd3e7 with both branches
-merged locally (`wiz-toolchain` names it). `flake.nix` gives yosys, nextpnr-ice40,
-icestorm and Icarus Verilog.
+The HDL memories (PR #166) and the fast netlist simulator (PR #199) were unmerged when
+this was written, so the original toolchain was wiz master 50cd3e7 with both branches
+merged locally. They are in master now: `wiz-toolchain` pins `master@071a033a…`, the
+first snapshot release that has both, instead of a local-merge description. `flake.nix`
+gives yosys, nextpnr-ice40, icestorm and Icarus Verilog.
 
 ```sh
 grail build          # check the library, compile the driver
@@ -176,12 +210,15 @@ grail test golem     # or: wiz check tests/golem.wiz -I src -I ../wiz-ddr3/src �
 ### golem on the Arty A7-35T
 
 `src/Rv/Golem/Board.wiz` is the board configuration and `src/Rv/GolemBoard.wiz` its
-two circuits: `Ddr3.Board`'s DDR3, clock, UART
+circuits: `Ddr3.Board`'s DDR3, clock, UART
 and LED constraints plus JA (PmodOLEDrgb), JB (sound) and BTN; the PLL wrapper (100 MHz
 input, 800 MHz VCO, 100 MHz `sys`, 400 MHz `sys4x`, 400 MHz `sys4xDqs` at 90°, 200 MHz
 `ref200`); and the reset domains. `golem` runs the pipelined core at 100 MHz;
 `golemMc` keeps the 100 MHz board clock and enables the multi-cycle core every other
-cycle (50 MHz effective). The default boot image is `Prog.boot`, the UART loader that
+cycle (50 MHz effective). `golem_four` is the 4-hart AMP cut of
+[DESIGN.md](DESIGN.md#four-harts): four multi-cycle harts, one shared UART/OLED/timer/
+mailbox and DDR, behind the N-master arbiter (`--variant four`; `four_nol1` disables
+each hart's L1). The default boot image is `Prog.boot`, the UART loader that
 prints `wiz-rv boot` and `DDR ok`/`DDR fail` and accepts `rvload` records; `--boot rom`
 selects the self-contained `GProg` bring-up ROM. LD0/LD1 are calibration done/failed
 and MMIO `0x8000_0040` reports the same.
@@ -190,9 +227,10 @@ and MMIO `0x8000_0040` reports the same.
 grail build
 scripts/golem-board.sh board      # the pin/clock/reset check (also `golem board`)
 scripts/golem-board.sh gen        # build/golem.v and build/golem.xdc
+scripts/golem-board.sh gen --variant four  # build/golem_four.v (four harts, 20 ns XDC)
 scripts/golem-board.sh synth      # yosys only (dry-run path if it is missing)
 scripts/golem-board.sh bit        # nextpnr-xilinx + fasm2frames + xc7frames2bit
-scripts/golem-board.sh timing     # the 100 MHz report; `bit` fails below 100 MHz
+scripts/golem-board.sh timing     # 100 MHz for golem/golemMc, 50 MHz for the four-hart builds
 ```
 
 `bit` writes `build/a35t/golem.bit` (and `golem.timing`, `golem.report`). The hardware
@@ -230,7 +268,9 @@ decay envelope, an octave up for the piezo, channel 15 as noise; `mustest` in
 sw/iss renders a lump to WAV on the host), newlib's system calls
 (the console on the UART, the WAD as the one file). `rvload PORT doom.bin doom1.wad`
 (app/rvload.wiz) sends both through the boot loader and starts Doom. The shareware
-`doom1.wad` is not in the repository (wad/ is ignored).
+`doom1.wad` is not in the repository (wad/ is ignored). sw/README.md has the memory
+map, the boot protocol, the entry convention and the builds (`make -C sw`); the boot
+flow runs end to end in the executable lockstep (bench/boot.wiz).
 
 On the board (2026-11-12, with wiz-ddr3 f99ab70): the boot loader printed "wiz-rv boot",
 "DDR ok"; rvload loaded doom.bin and the WAD into DDR and Doom started (its whole

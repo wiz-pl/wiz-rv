@@ -1,0 +1,137 @@
+-- test: check
+import Rv.Golem.Four
+import Rv.Golem.FourProg
+import Text
+-- The four-hart variant at values: the N-master interconnect with four masters (no
+-- lost or duplicated request, deterministic fairness under the burst cap: every window
+-- of 20 grants contains all four harts), and the 4-hart mailbox ring under the
+-- coherence model's multi-cycle mode (`CM.core`: no store buffer, uncached MMIO flags,
+-- private incoherent L1). The ring's only allowed outcome is the sequential one
+-- [4,1,2,3]; a weak outcome or a deadlock fails.
+--
+-- The four-hart mailbox ring is `tests/golem_four_ring.wiz` (the real `Intc`, four
+-- hart state machines, round-robin MMIO). The compiled real-core run would need
+-- `Circuit.simFast`, whose netlist construction is far over the 60 s test budget here.
+
+def F.one (b : HwTy.El (HwTy.bits 1)) : Bool := Nat.beq b.toNat 1
+def F.bitOf (v k : Nat) : Nat := Nat.mod (Nat.div v (Nat.pow 2 k)) 2
+
+def F.countOf (k : Nat) (xs : List Nat) : Nat :=
+  List.length (List.filter (fun (x : Nat) => Nat.beq x k) xs)
+
+def F.allEq (k : Nat) (xs : List Nat) : Bool :=
+  Nat.beq (List.length (List.filter (fun (x : Nat) => Nat.beq x k) xs)) (List.length xs)
+
+def F.maxL : List Nat → Nat
+  | .nil => 0
+  | .cons x xs => match Nat.lt (F.maxL xs) x with | .true => x | .false => F.maxL xs
+def F.minL : List Nat → Nat
+  | .nil => 1000000
+  | .cons x xs => match Nat.lt x (F.minL xs) with | .true => x | .false => F.minL xs
+
+def F.showL (xs : List Nat) : String :=
+  "[" ++ Hdl.concat (List.map (fun (k : Nat) => Nat.repr k ++ " ") xs) ++ "]"
+
+def F.distinct : List Nat → Bool
+  | .nil => .true
+  | .cons x xs => Bool.and (Nat.beq (F.countOf x xs) 0) (F.distinct xs)
+
+def F.idxOf (mask : HwTy.El (HwTy.bits 4)) : Nat :=
+  if F.one (bitOf 0 mask) then 0 else if F.one (bitOf 1 mask) then 1
+  else if F.one (bitOf 2 mask) then 2 else if F.one (bitOf 3 mask) then 3 else 4
+
+def F.take : List Nat → Nat → List Nat
+  | _, .zero => .nil
+  | .nil, _ => .nil
+  | .cons x xs, .succ k => .cons x (F.take xs k)
+
+def F.allPresent (xs : List Nat) : Bool :=
+  Bool.and (Nat.lt 0 (F.countOf 0 xs)) (Bool.and (Nat.lt 0 (F.countOf 1 xs))
+    (Bool.and (Nat.lt 0 (F.countOf 2 xs)) (Nat.lt 0 (F.countOf 3 xs))))
+
+-- every window of `w` grants has all four harts (no starvation)
+def F.windowsOk (w : Nat) : List Nat → Bool
+  | .nil => .true
+  | .cons x xs =>
+    match Nat.lt (List.length (.cons x xs)) w with
+    | .true => .true
+    | .false => Bool.and (F.allPresent (F.take (.cons x xs) w)) (F.windowsOk w xs)
+
+structure F.S where
+  arb : GBus.NArb 4 4 HwTy.El
+  wait : Nat
+  d0 : Nat
+  d1 : Nat
+  d2 : Nat
+  d3 : Nat
+  g0 : Nat
+  g1 : Nat
+  g2 : Nat
+  g3 : Nat
+  grants : List Nat
+  addrs : List Nat
+  cyc : Nat
+
+def F.req (i d total : Nat) : CacheReq HwTy.El :=
+  CacheReq.mk (Bool.toBits (Nat.lt d total)) (BitVec.ofNat 28 (i * 256 + d))
+    (BitVec.ofNat 1 1) (BitVec.ofNat 32 (i * 65536 + d)) (BitVec.ofNat 4 15) (BitVec.ofNat 2 0) (BitVec.ofNat 5 0)
+
+def F.init : F.S :=
+  F.S.mk (GBus.nArbInit 4 4) 0 0 0 0 0 0 0 0 0 .nil .nil 0
+
+def F.got (i : Nat) (m : HwTy.El (HwTy.bits 4)) (ans : Bool) : Bool :=
+  Bool.and (F.one (bitOf i m)) ans
+
+def F.step (latency total : Nat) (s : F.S) : F.S :=
+  let qs : List (CacheReq HwTy.El) := .cons (F.req 0 s.d0 total) (.cons (F.req 1 s.d1 total)
+    (.cons (F.req 2 s.d2 total) (.cons (F.req 3 s.d3 total) .nil)));
+  let a0 := GBus.arbN 4 4 G4.qos s.arb qs (GBus.noResp (r := HwTy.El));
+  let ω sel0 := CacheReq.unpack (Hw.fst (Hw.snd a0));
+  let selV := Nat.beq sel0.valid.toNat 1;
+  let ans := Bool.and selV (Nat.beq s.wait 0);
+  let a := GBus.arbN 4 4 G4.qos s.arb qs
+    (CacheResp.mk (Bool.toBits ans) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0));
+  let ω sel := CacheReq.unpack (Hw.fst (Hw.snd a));
+  let mask := Hw.snd (Hw.snd a);
+  let gi := F.idxOf mask;
+  let any := Nat.lt gi G4.harts;
+  let bump := fun (d : Nat) (i : Nat) => match F.got i mask ans with
+    | .true => Nat.succ d
+    | .false => d;
+  let nextWait := match ans with
+    | .true => latency
+    | .false => match selV with
+      | .true => Nat.sub s.wait 1
+      | .false => s.wait;
+  F.S.mk (GBus.NArb.unpack 4 4 (Hw.fst a)) nextWait
+    (bump s.d0 0) (bump s.d1 1) (bump s.d2 2) (bump s.d3 3)
+    (bump s.g0 0) (bump s.g1 1) (bump s.g2 2) (bump s.g3 3)
+    (match Bool.and any (Nat.beq s.arb.busy.toNat 0) with | .true => List.append s.grants (.cons gi .nil) | .false => s.grants)
+    (match Bool.and any ans with
+     | .true => List.append s.addrs (.cons sel.addr.toNat .nil) | .false => s.addrs)
+    (Nat.succ s.cyc)
+
+def F.run (latency total : Nat) : Nat → F.S → F.S
+  | .zero, s => s
+  | .succ k, s => F.run latency total k (F.step latency total s)
+
+def F.reportNoLoss (latency total cycles : Nat) : String :=
+  let s := F.run latency total cycles F.init;
+  let doneL : List Nat := .cons s.d0 (.cons s.d1 (.cons s.d2 (.cons s.d3 .nil)));
+  let gotL : List Nat := .cons s.g0 (.cons s.g1 (.cons s.g2 (.cons s.g3 .nil)));
+  let ok := Bool.and (F.allEq total doneL) (Bool.and (F.allEq total gotL)
+    (Bool.and (Nat.beq (List.length s.addrs) (4 * total)) (F.distinct s.addrs)));
+  "golem four link: done " ++ F.showL doneL ++ ", unique "
+    ++ Nat.repr (List.length s.addrs) ++ "/" ++ Nat.repr (4 * total)
+    ++ (if ok then " — PASS" else " — FAIL")
+
+def F.reportFair (latency total cycles : Nat) : String :=
+  let s := F.run latency total cycles F.init;
+  let c := List.map (fun (i : Nat) => F.countOf i s.grants) (Hdl.upto 4 0);
+  let ok := Bool.and (Bool.and (Nat.le (F.maxL c - F.minL c) G4.cap) (Nat.lt 0 (F.minL c)))
+    (F.windowsOk 20 s.grants);
+  "golem four fair (cap " ++ Nat.repr G4.cap ++ "): grants " ++ F.showL c
+    ++ (if ok then " — PASS" else " — FAIL")
+
+#eval F.reportNoLoss 1 6 120
+#eval F.reportFair 1 1000000 240

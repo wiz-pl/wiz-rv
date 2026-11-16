@@ -1,6 +1,7 @@
 import Hdl.Core
 import Rv.Uart
 import Rv.Golem.Map
+import Ddr3.Util
 
 ------------------------------------------------------------------------------------
 -- The bus adapter, at the full rate, between the core (at half rate: it sees the bus
@@ -18,6 +19,8 @@ structure BusA (r : HwTy → Type) where
   rwe : r W1
   rwd : r B32
   rst : r B4
+  raop : r B2
+  raf5 : r B5
   gotR : r W1
   gotV : r W1
   data : r B32
@@ -30,6 +33,8 @@ structure CacheReq (r : HwTy → Type) where
   we : r W1
   wdata : r B32
   wstrb : r B4
+  aop : r B2     -- 0: an ordinary request; 1 LR, 2 SC, 3 AMO (the uncached aperture)
+  af5 : r B5     -- the AMO's funct5
   deriving Bundle
 structure CacheResp (r : HwTy → Type) where
   ready : r W1
@@ -41,7 +46,8 @@ structure CacheResp (r : HwTy → Type) where
 -- request to the cache, the answer to the core (ready, rvalid, rdata); the last two
 -- depend only on the adapter's state
 def busStep {r : HwTy → Type} [Hw r] (s : BusA r) (valid pend we : r W1) (addr wdata : r B32) (wstrb : r B4)
-    (c : CacheResp r) : r (HwTy.prod BusA.code (HwTy.prod CacheReq.code CacheResp.code)) :=
+    (aop : r B2) (af5 : r B5) (c : CacheResp r) :
+    r (HwTy.prod BusA.code (HwTy.prod CacheReq.code CacheResp.code)) :=
   let take := gate valid (Hw.and (Hw.not s.acc) (Hw.not s.rv));
   let taken := Hw.and s.rv c.ready;
   Hw.pair
@@ -49,15 +55,21 @@ def busStep {r : HwTy → Type} [Hw r] (s : BusA r) (valid pend we : r W1) (addr
       (gate pend (Hw.or s.acc take))
       (Hw.mux take (Hw.lit 1 1) (Hw.mux taken (Hw.lit 1 0) s.rv))
       (Hw.mux take addr s.ra) (Hw.mux take we s.rwe) (Hw.mux take wdata s.rwd) (Hw.mux take wstrb s.rst)
+      (Hw.mux take aop s.raop) (Hw.mux take af5 s.raf5)
       (gate pend (Hw.or s.gotR taken))
       (gate pend (Hw.or s.gotV c.rvalid))
       (Hw.mux c.rvalid c.rdata s.data)))
     (Hw.pair
-      (CacheReq.pack (CacheReq.mk s.rv (Hw.slice 0 28 s.ra) s.rwe s.rwd s.rst))
+      (CacheReq.pack (CacheReq.mk s.rv (Hw.slice 0 28 s.ra) s.rwe s.rwd s.rst s.raop s.raf5))
       (CacheResp.pack (CacheResp.mk s.gotR s.gotV s.data)))
 
 def BusA.init : BusA HwTy.El := BusA.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0)
-  (BitVec.ofNat 32 0) (BitVec.ofNat 4 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0)
+  (BitVec.ofNat 32 0) (BitVec.ofNat 4 0) (BitVec.ofNat 2 0) (BitVec.ofNat 5 0)
+  (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0)
+
+-- the same state at any wire type (the reset value in a design, not just in a test)
+def BusA.zero {r : HwTy → Type} [Hw r] : BusA r := BusA.mk lo lo (Hw.lit 32 0) lo
+  (Hw.lit 32 0) (Hw.lit 4 0) (Hw.lit 2 0) (Hw.lit 5 0) lo lo (Hw.lit 32 0)
 
 -- The golem bus: one request/one answer at a time, as wiz-ddr3's native port
 -- (`CacheReq`/`CacheResp`, below) and the DDR cache use it. Three pieces:
@@ -68,6 +80,11 @@ def BusA.init : BusA HwTy.El := BusA.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (B
 --   `GBus.arb`    two masters (the core and a host loader) onto that port: the first
 --                 request wins, the owner keeps the bus until its answer, so the core
 --                 (which holds its request until `ready`) is never starved mid-word.
+--   `GBus.arbN`   the N-master interconnect (Phase 0/1, decisions M4/M5): the same
+--                 contract with round-robin arbitration, per-master QoS and a burst
+--                 cap. `GBus.arb` is the frozen two-master fast path used by the
+--                 single-hart SoC; `golem_four` (src/Rv/Golem/Four.wiz) and
+--                 tests/golem_four.wiz run this one.
 --   `GBus.ramStep` a behavioural DDR for simulation: words with byte masks, answering
 --                 two cycles after the request (the cache and the controller are
 --                 replaced by it in `golemSim`; `golemSimDdr` has the real ones).
@@ -92,7 +109,7 @@ def GBus.zero {r : HwTy → Type} [Hw r] : GBus.Resp r :=
 -- it: the adapter's state, the request to the cache (valid only for DDR), and the
 -- answer into the core. `ddr` is the cache's answer (from `GBus.arb`).
 def GBus.route {r : HwTy → Type} [Hw r] (s : BusA r) (valid pend we : r W1)
-    (addr wdata : r B32) (wstrb : r B4) (ddr : CacheResp r) :
+    (addr wdata : r B32) (wstrb : r B4) (aop : r B2) (af5 : r B5) (ddr : CacheResp r) :
     r (HwTy.prod BusA.code (HwTy.prod CacheReq.code GBus.Resp.code)) :=
   -- the address the adapter copied (0 until a request has been taken)
   let dec := GMap.isDdr s.ra;
@@ -101,9 +118,9 @@ def GBus.route {r : HwTy → Type} [Hw r] (s : BusA r) (valid pend we : r W1)
   -- (with 0) for a read; the adapter latches it as if the slave had answered
   let ans := CacheResp.mk (Hw.or ddr.ready unmapped)
     (Hw.or ddr.rvalid (Hw.and unmapped (Hw.not s.rwe))) ddr.rdata;
-  let br := busStep s valid pend we addr wdata wstrb ans;
+  let br := busStep s valid pend we addr wdata wstrb aop af5 ans;
   let ω q := CacheReq.unpack (Hw.fst (Hw.snd br));
-  let q2 := CacheReq.mk (Hw.and q.valid dec) q.addr q.we q.wdata q.wstrb;
+  let q2 := CacheReq.mk (Hw.and q.valid dec) q.addr q.we q.wdata q.wstrb q.aop q.af5;
   let ω a := CacheResp.unpack (Hw.snd (Hw.snd br));
   Hw.pair (Hw.fst br)
     (Hw.pair (CacheReq.pack q2) (GBus.Resp.pack (GBus.Resp.mk a.ready a.rvalid a.rdata unmapped)))
@@ -139,6 +156,444 @@ def GBus.arb {r : HwTy → Type} [Hw r] (s : GBus.Arb r) (c h : CacheReq r) (res
       (Hw.mux s.busy s.owner g)))
     (Hw.pair sel
       (Hw.pair (Hw.mux g zeroC respC) (Hw.mux g respC zeroC)))
+--------------------------------------------------------------------------------
+-- N masters: the same contract as `GBus.arb` (one request and one answer at a time,
+-- the owner keeps the bus until its answer, a master that drops `valid` mid-request
+-- ends it) with round-robin arbitration, a per-master QoS level and a burst cap.
+--
+-- Configuration is elaboration-time:
+--   n    the number of masters (masters are the list `qs`, in order)
+--   cap  how many consecutive requests one master may be granted before another
+--        master with a request is considered; 0 disables the cap (pure round-robin)
+--   qos  one level per master; only the highest level with an eligible request
+--        competes, and within a level the masters take turns (equal levels are pure
+--        round-robin). A level is a static priority, the turns make it fair.
+--
+-- The state is busy, the owner's index, the owner's remaining burst credit and the
+-- round-robin pointer (the first index to consider next). The contract is exactly
+-- `GBus.arb`'s: `sel` is the one request the slave sees, the returned mask says which
+-- master owns the answer this cycle, and every other master sees `GBus.noResp`. A
+-- request is therefore never lost (the owner holds it until `ready`/`rvalid`) and
+-- never duplicated (the mask is one-hot, or zero when no master asks).
+--
+-- `GBus.arb` above stays the two-master fast path the single-hart SoC uses
+-- (`Golem.step`); its behavior is unchanged. `tests/golem_four.wiz` checks the
+-- four-master no-loss and no-starvation properties of `GBus.arbN`.
+
+-- the index width for n masters: at least one bit, otherwise ceil(log2 n)
+def GBus.ixw (n : Nat) : Nat :=
+  match Nat.le n 1 with
+  | .true => 1
+  | .false => Hdl.clog2 n
+
+structure GBus.NArb (n cap : Nat) (r : HwTy → Type) where
+  busy : r W1
+  owner : r (HwTy.bits (GBus.ixw n))
+  rem : r (HwTy.bits 8)      -- the owner's remaining burst credit
+  rr : r (HwTy.bits (GBus.ixw n))
+  deriving Bundle
+
+def GBus.nArbInit (n cap : Nat) : GBus.NArb n cap HwTy.El :=
+  GBus.NArb.mk (BitVec.ofNat 1 0) (BitVec.ofNat (GBus.ixw n) 0)
+    (BitVec.ofNat 8 cap) (BitVec.ofNat (GBus.ixw n) 0)
+
+-- the zero request, and the answer a master that does not own the bus sees
+def GBus.zeroReq {r : HwTy → Type} [Hw r] : CacheReq r :=
+  CacheReq.mk lo (Hw.lit 28 0) lo (Hw.lit 32 0) (Hw.lit 4 0) (Hw.lit 2 0) (Hw.lit 5 0)
+
+def GBus.respFor {r : HwTy → Type} [Hw r] {ω n : Nat}
+    (mask : r (HwTy.bits n)) (k : Nat) (resp : CacheResp r) : CacheResp r :=
+  CacheResp.unpack (Hw.mux (bitOf k mask) (CacheResp.pack resp)
+    (CacheResp.pack (GBus.noResp (r := r))))
+
+-- the highest QoS level in a configuration
+def GBus.maxQos : List Nat → Nat
+  | .nil => 0
+  | .cons q qs => match Nat.lt (GBus.maxQos qs) q with
+    | .true => q
+    | .false => GBus.maxQos qs
+
+-- [k, k-1, …, 0], the levels to try from the highest down
+def GBus.downFrom : Nat → List Nat
+  | .zero => .cons 0 .nil
+  | .succ k => .cons (Nat.succ k) (GBus.downFrom k)
+
+-- `or` over the n masters of a per-master predicate
+def GBus.anyAtGo {r : HwTy → Type} [Hw r] : Nat → (Nat → r W1) → r W1
+  | .zero, _ => lo
+  | .succ k, f => Hw.or (f k) (GBus.anyAtGo k f)
+def GBus.anyAt {r : HwTy → Type} [Hw r] (n : Nat) (f : Nat → r W1) : r W1 :=
+  GBus.anyAtGo n f
+
+-- the highest level (from the configuration's maximum down) with an eligible request;
+-- level 0 if none, which only happens when no master asks
+def GBus.topLevelGo {r : HwTy → Type} [Hw r] (qw : Nat) : List Nat → (Nat → r W1) → r (HwTy.bits qw)
+  | .nil, _ => Hw.lit qw 0
+  | .cons l ls, f => Hw.mux (f l) (Hw.lit qw l) (GBus.topLevelGo qw ls f)
+def GBus.topLevel {r : HwTy → Type} [Hw r] (qw maxQ : Nat) (f : Nat → r W1) : r (HwTy.bits qw) :=
+  GBus.topLevelGo qw (GBus.downFrom maxQ) f
+
+-- `(rr + d) mod n` in the index width: the natural wrap for a power of two, a
+-- subtract otherwise (the sum is computed one bit wider so that it cannot wrap first)
+def GBus.addMod {r : HwTy → Type} [Hw r] (iw n d : Nat) (rr : r (HwTy.bits iw)) : r (HwTy.bits iw) :=
+  match Nat.beq (Nat.pow 2 iw) n with
+  | .true => Hw.add rr (Hw.lit iw d)
+  | .false =>
+      let wide : r (HwTy.bits (Nat.add 1 iw)) :=
+        Hw.add (Hw.cat (Hw.lit 1 0 : r W1) rr) (Hw.lit (Nat.add 1 iw) d);
+      let red := Hw.mux (Hw.ult wide (Hw.lit (Nat.add 1 iw) n)) wide
+        (Hw.sub wide (Hw.lit (Nat.add 1 iw) n));
+      Hw.slice 0 iw red
+
+-- the request, valid bit and QoS level at a signal index
+def GBus.atVal {r : HwTy → Type} [Hw r] (iw n : Nat) (ix : r (HwTy.bits iw))
+    (vs : List (r W1)) : r W1 :=
+  U.select ix (fun (k : Nat) => Hdl.nthD lo vs k) n
+def GBus.atQos {r : HwTy → Type} [Hw r] (iw qw n : Nat) (ix : r (HwTy.bits iw))
+    (qos : List Nat) : r (HwTy.bits qw) :=
+  U.select ix (fun (k : Nat) => Hw.lit qw (Hdl.nthD 0 qos k)) n
+def GBus.atReq {r : HwTy → Type} [Hw r] (iw n : Nat) (ix : r (HwTy.bits iw))
+    (qs : List (CacheReq r)) : CacheReq r :=
+  CacheReq.unpack (U.select ix
+    (fun (k : Nat) => CacheReq.pack (Hdl.nthD (GBus.zeroReq (r := r)) qs k)) n)
+
+-- the burst cap for a static master index: a master other than the current owner may
+-- always start; the owner may continue while it has credit (or when the cap is off)
+def GBus.capOk {r : HwTy → Type} [Hw r] (n cap : Nat) (s : GBus.NArb n cap r)
+    (k : Nat) : r W1 :=
+  match Nat.beq cap 0 with
+  | .true => hi
+  | .false =>
+      Hw.or (Hw.not (Hw.eq (Hw.lit (GBus.ixw n) k) s.owner))
+        (Hw.not (Hw.eq s.rem (Hw.lit 8 0)))
+
+-- the same, for a master index that is a signal (the round-robin scan)
+def GBus.capOkIdx {r : HwTy → Type} [Hw r] (n cap : Nat) (s : GBus.NArb n cap r)
+    (ix : r (HwTy.bits (GBus.ixw n))) : r W1 :=
+  match Nat.beq cap 0 with
+  | .true => hi
+  | .false =>
+      Hw.or (Hw.not (Hw.eq ix s.owner)) (Hw.not (Hw.eq s.rem (Hw.lit 8 0)))
+
+-- `g + 1`, wrapped to `n`
+def GBus.nextIdx {r : HwTy → Type} [Hw r] (iw n : Nat) (g : r (HwTy.bits iw)) : r (HwTy.bits iw) :=
+  let s := Hw.add g (Hw.lit iw 1);
+  match Nat.beq (Nat.pow 2 iw) n with
+  | .true => s
+  | .false => Hw.mux (Hw.eq s (Hw.lit iw n)) (Hw.lit iw 0) s
+
+-- the first candidate, in round-robin order from `rr`, whose predicate is high:
+-- `scanGo k` considers the first k offsets, with offset 0 outermost (highest priority)
+def GBus.scanGo {r : HwTy → Type} [Hw r] (iw n : Nat) (rr : r (HwTy.bits iw))
+    (cand : Nat → r W1) : Nat → r (HwTy.bits iw)
+  | .zero => Hw.lit iw 0
+  | .succ k =>
+      let d := Nat.sub n (Nat.succ k);
+      let ix := GBus.addMod iw n d rr;
+      Hw.mux (cand d) ix (GBus.scanGo iw n rr cand k)
+def GBus.scan {r : HwTy → Type} [Hw r] (iw n : Nat) (rr : r (HwTy.bits iw))
+    (cand : Nat → r W1) (k : Nat) : r (HwTy.bits iw) :=
+  GBus.scanGo iw n rr cand k
+
+-- the next arbiter state, the request the slave sees, and a one-hot grant mask (one
+-- bit per master, the owner of this cycle's answer; zero when nobody asks)
+def GBus.arbN (n cap : Nat) (qos : List Nat) {r : HwTy → Type} [Hw r]
+    (s : GBus.NArb n cap r) (qs : List (CacheReq r)) (resp : CacheResp r) :
+    r (HwTy.prod (GBus.NArb.code n cap) (HwTy.prod CacheReq.code (HwTy.bits n))) :=
+  let qw := 8;
+  let vs := List.map (fun (q : CacheReq r) => q.valid) qs;
+  let maxQ := GBus.maxQos qos;
+  -- strict eligibility (a request that the burst cap lets in) and loose (any request);
+  -- the strict set decides when it is non-empty, the loose one is the fallback that
+  -- keeps the bus busy when only the current owner may ask
+  let strict := fun (k : Nat) => Hw.and (Hdl.nthD lo vs k) (GBus.capOk n cap s k);
+  let loose := fun (k : Nat) => Hdl.nthD lo vs k;
+  let isLev := fun (k l : Nat) => match Nat.beq (Hdl.nthD 0 qos k) l with
+    | .true => hi
+    | .false => lo;
+  let levAny := fun (elig : Nat → r W1) (l : Nat) =>
+    GBus.anyAt n (fun (k : Nat) => Hw.and (elig k) (isLev k l));
+  let chosenS := GBus.topLevel qw maxQ (levAny strict);
+  let chosenL := GBus.topLevel qw maxQ (levAny loose);
+  let hasS := GBus.anyAt n strict;
+  let hasAny := GBus.anyAt n loose;
+  let chosen := Hw.mux hasS chosenS chosenL;
+  -- the round-robin scan, in index order rr, rr+1, …: the first eligible master at
+  -- the chosen level wins (so ties at reset go to master 0, the core)
+  let cand := fun (d : Nat) =>
+    let ix := GBus.addMod (GBus.ixw n) n d s.rr;
+    let v := GBus.atVal (GBus.ixw n) n ix vs;
+    let lv := GBus.atQos (GBus.ixw n) qw n ix qos;
+    let ok := GBus.capOkIdx n cap s ix;
+    let elig := Hw.mux hasS (Hw.and v ok) v;
+    Hw.and elig (Hw.eq lv chosen);
+  let gRR := GBus.scan (GBus.ixw n) n s.rr cand n;
+  -- a burst: while the cap is on and the owner still has credit and is at the
+  -- winning level, it continues; otherwise the round-robin scan decides
+  let ownerV := GBus.atVal (GBus.ixw n) n s.owner vs;
+  let ownerQ := GBus.atQos (GBus.ixw n) qw n s.owner qos;
+  let cont := match Nat.beq cap 0 with
+    | .true => lo
+    | .false => Hw.and (Hw.and (Hw.not s.busy) ownerV)
+        (Hw.and (Hw.eq ownerQ chosen) (GBus.capOkIdx n cap s s.owner));
+  let g := Hw.mux s.busy s.owner (Hw.mux cont s.owner gRR);
+  let gV := Hw.mux s.busy ownerV (Hw.mux cont hi hasAny);
+  let sel := GBus.atReq (GBus.ixw n) n g qs;
+  let mask := Hw.mux gV (Hw.shlBy (Hw.lit n 1 : r (HwTy.bits n)) g) (Hw.lit n 0);
+  -- the answer ends the request; so does the owner dropping `valid` mid-request
+  let done := Hw.or (Hw.or resp.ready resp.rvalid) (Hw.and s.busy (Hw.not gV));
+  let started := Hw.and gV (Hw.not s.busy);
+  let nextRem := Hw.mux started
+    (Hw.mux (Hw.eq g s.owner) (U.down s.rem) (Hw.lit 8 (Nat.sub cap 1))) s.rem;
+  Hw.pair
+    (GBus.NArb.pack n cap (GBus.NArb.mk
+      (Hw.mux done lo (Hw.mux s.busy hi gV))
+      (Hw.mux s.busy s.owner g)
+      nextRem
+      (Hw.mux started (GBus.nextIdx (GBus.ixw n) n g) s.rr)))
+    (Hw.pair (CacheReq.pack sel) mask)
+
+-- `arbN` with an atomic hold: while `hold` is high the current owner (or `lockIx`, when
+-- the bus is not busy yet) keeps the bus and `done` is suppressed, so the one selected
+-- master holds the line from its read through its write. This is the bus-level
+-- request/grant primitive the LR/SC/AMO engine needs; a normal arbiter cycle passes
+-- `hold = 0` (which is exactly `arbN`).
+def GBus.arbNH (n cap : Nat) (qos : List Nat) {r : HwTy → Type} [Hw r]
+    (s : GBus.NArb n cap r) (qs : List (CacheReq r)) (resp : CacheResp r)
+    (hold : r W1) (lockIx : r (HwTy.bits (GBus.ixw n))) (lockReq : CacheReq r) :
+    r (HwTy.prod (GBus.NArb.code n cap) (HwTy.prod CacheReq.code (HwTy.bits n))) :=
+  let qw := 8;
+  let vs := List.map (fun (q : CacheReq r) => q.valid) qs;
+  let maxQ := GBus.maxQos qos;
+  let strict := fun (k : Nat) => Hw.and (Hdl.nthD lo vs k) (GBus.capOk n cap s k);
+  let loose := fun (k : Nat) => Hdl.nthD lo vs k;
+  let isLev := fun (k l : Nat) => match Nat.beq (Hdl.nthD 0 qos k) l with
+    | .true => hi
+    | .false => lo;
+  let levAny := fun (elig : Nat → r W1) (l : Nat) =>
+    GBus.anyAt n (fun (k : Nat) => Hw.and (elig k) (isLev k l));
+  let chosenS := GBus.topLevel qw maxQ (levAny strict);
+  let chosenL := GBus.topLevel qw maxQ (levAny loose);
+  let hasS := GBus.anyAt n strict;
+  let hasAny := GBus.anyAt n loose;
+  let chosen := Hw.mux hasS chosenS chosenL;
+  let cand := fun (d : Nat) =>
+    let ix := GBus.addMod (GBus.ixw n) n d s.rr;
+    let v := GBus.atVal (GBus.ixw n) n ix vs;
+    let lv := GBus.atQos (GBus.ixw n) qw n ix qos;
+    let ok := GBus.capOkIdx n cap s ix;
+    let elig := Hw.mux hasS (Hw.and v ok) v;
+    Hw.and elig (Hw.eq lv chosen);
+  let gRR := GBus.scan (GBus.ixw n) n s.rr cand n;
+  let ownerV := GBus.atVal (GBus.ixw n) n s.owner vs;
+  let ownerQ := GBus.atQos (GBus.ixw n) qw n s.owner qos;
+  let cont := match Nat.beq cap 0 with
+    | .true => lo
+    | .false => Hw.and (Hw.and (Hw.not s.busy) ownerV)
+        (Hw.and (Hw.eq ownerQ chosen) (GBus.capOkIdx n cap s s.owner));
+  let g := Hw.mux s.busy s.owner (Hw.mux hold lockIx (Hw.mux cont s.owner gRR));
+  let gV := Hw.mux hold hi (Hw.mux s.busy ownerV (Hw.mux cont hi hasAny));
+  let selNorm := GBus.atReq (GBus.ixw n) n g qs;
+  let sel := CacheReq.unpack (Hw.mux hold (CacheReq.pack lockReq) (CacheReq.pack selNorm));
+  let mask := Hw.mux gV (Hw.shlBy (Hw.lit n 1 : r (HwTy.bits n)) g) (Hw.lit n 0);
+  let done := Hw.mux hold lo (Hw.or (Hw.or resp.ready resp.rvalid) (Hw.and s.busy (Hw.not gV)));
+  let started := Hw.and gV (Hw.not s.busy);
+  let nextRem := Hw.mux started
+    (Hw.mux (Hw.eq g s.owner) (U.down s.rem) (Hw.lit 8 (Nat.sub cap 1))) s.rem;
+  Hw.pair
+    (GBus.NArb.pack n cap (GBus.NArb.mk
+      (Hw.mux done lo (Hw.mux s.busy hi gV))
+      (Hw.mux s.busy s.owner g)
+      nextRem
+      (Hw.mux started (GBus.nextIdx (GBus.ixw n) n g) s.rr)))
+    (Hw.pair (CacheReq.pack sel) mask)
+--------------------------------------------------------------------------------
+-- Atomics at the shared point.
+--
+-- With one shared DDR cache and no snooping, an atomic cannot be split into a bus
+-- read and a bus write that a hart performs: another master can interleave. The
+-- `GBus.Atom` engine therefore sits between the arbiters and the cache. It (a) holds
+-- the bus owner for the whole operation (`GBus.arbNH`'s `hold`), so no other master is
+-- granted between the read and the write, (b) performs the AMO's read-modify-write
+-- itself with `GBus.amoVal`, and (c) keeps the LR/SC reservations in the same shared
+-- point, where it sees every write from every hart.
+--
+-- Reservation granularity is the 16-byte line (`addr[27:4]`, the cache's line): any
+-- write to that line from any hart clears every reservation on it. A reservation is
+-- never evicted from a private L1 because atomics are only accepted on the uncached
+-- aperture (or in a hart's private on-chip RAM, where the core does them locally); the
+-- shared cache's write-back to DDR is behind the serialisation point and does not
+-- change the logical word.
+--
+-- Cost, at the cache's one-request-at-a-time rate: LR = one read; SC = one write when
+-- the reservation is live, one read (then a failure) when it is not; AMO = one read
+-- plus one write. The bus is held from the start through the last write, so other
+-- masters wait those extra cycles (the `hold` path). A normal write is unchanged and
+-- only checks/clears a matching reservation combinationally.
+
+-- the AMO's result (the core's `amoVal`, repeated here so the bus does not import it)
+def GBus.amoVal {r : HwTy → Type} [Hw r] (f5 : r B5) (a b : r B32) : r B32 :=
+  let ult := Hw.ult a b;
+  let slt := Hw.mux (Hw.xor (bitOf 31 a) (bitOf 31 b)) (bitOf 31 a) ult;
+  Hw.mux (isK f5 0) (Hw.add a b) (Hw.mux (isK f5 1) b (Hw.mux (isK f5 4) (Hw.xor a b)
+    (Hw.mux (isK f5 8) (Hw.or a b) (Hw.mux (isK f5 12) (Hw.and a b)
+    (Hw.mux (isK f5 16) (Hw.mux slt a b) (Hw.mux (isK f5 20) (Hw.mux slt b a)
+    (Hw.mux (isK f5 24) (Hw.mux ult a b) (Hw.mux (isK f5 28) (Hw.mux ult b a) a))))))))
+
+-- the per-hart reservations: one valid bit and the reserved line per hart (four slots)
+structure GBus.Res (r : HwTy → Type) where
+  v : r B4
+  a0 : r (HwTy.bits 24)
+  a1 : r (HwTy.bits 24)
+  a2 : r (HwTy.bits 24)
+  a3 : r (HwTy.bits 24)
+  deriving Bundle
+
+def GBus.resZero {r : HwTy → Type} [Hw r] : GBus.Res r :=
+  GBus.Res.mk (Hw.lit 4 0) (Hw.lit 24 0) (Hw.lit 24 0) (Hw.lit 24 0) (Hw.lit 24 0)
+
+def GBus.resInit : GBus.Res HwTy.El := GBus.Res.mk (BitVec.ofNat 4 0) (BitVec.ofNat 24 0) (BitVec.ofNat 24 0) (BitVec.ofNat 24 0) (BitVec.ofNat 24 0)
+
+-- the line of a 28-bit byte offset (the cache's 16-byte line)
+def GBus.lineOf {r : HwTy → Type} [Hw r] (a : r (HwTy.bits 28)) : r (HwTy.bits 24) :=
+  Hw.slice 4 24 a
+
+def GBus.resAddr {r : HwTy → Type} [Hw r] (s : GBus.Res r) (i : r B2) : r (HwTy.bits 24) :=
+  Hw.mux (isK i 0) s.a0 (Hw.mux (isK i 1) s.a1 (Hw.mux (isK i 2) s.a2 s.a3))
+
+def GBus.resSome {r : HwTy → Type} [Hw r] (s : GBus.Res r) (i : r B2) : r W1 :=
+  Hw.mux (isK i 0) (bitOf 0 s.v) (Hw.mux (isK i 1) (bitOf 1 s.v)
+    (Hw.mux (isK i 2) (bitOf 2 s.v) (bitOf 3 s.v)))
+
+def GBus.resHit {r : HwTy → Type} [Hw r] (s : GBus.Res r) (i : r B2) (line : r (HwTy.bits 24)) : r W1 :=
+  Hw.and (GBus.resSome s i) (Hw.eq (GBus.resAddr s i) line)
+
+-- the index of a hart in the four reservation slots (n is 2 or 4 here; the extra
+-- slots are simply unused for n = 2)
+def GBus.ix2 {r : HwTy → Type} [Hw r] (n : Nat) (h : r (HwTy.bits (GBus.ixw n))) : r B2 :=
+  Hw.slice 0 2 (Hw.cat (Hw.lit 1 0) h)
+
+-- set hart `i`'s reservation to `line`
+def GBus.resSet {r : HwTy → Type} [Hw r] (s : GBus.Res r) (i : r B2) (line : r (HwTy.bits 24)) : GBus.Res r :=
+  let b := Hw.shlBy (Hw.lit 4 1 : r B4) i;
+  GBus.Res.mk (Hw.or s.v b)
+    (Hw.mux (isK i 0) line s.a0) (Hw.mux (isK i 1) line s.a1)
+    (Hw.mux (isK i 2) line s.a2) (Hw.mux (isK i 3) line s.a3)
+
+-- clear hart `i`'s reservation
+def GBus.resClearHart {r : HwTy → Type} [Hw r] (s : GBus.Res r) (i : r B2) : GBus.Res r :=
+  let b := Hw.shlBy (Hw.lit 4 1 : r B4) i;
+  GBus.Res.mk (Hw.and s.v (Hw.not b)) s.a0 s.a1 s.a2 s.a3
+
+-- clear every reservation on `line`
+def GBus.resClearLine {r : HwTy → Type} [Hw r] (s : GBus.Res r) (line : r (HwTy.bits 24)) : GBus.Res r :=
+  let keep := fun (a : r (HwTy.bits 24)) => Hw.not (Hw.eq a line);
+  let v0 := Hw.and (bitOf 0 s.v) (keep s.a0);
+  let v1 := Hw.and (bitOf 1 s.v) (keep s.a1);
+  let v2 := Hw.and (bitOf 2 s.v) (keep s.a2);
+  let v3 := Hw.and (bitOf 3 s.v) (keep s.a3);
+  GBus.Res.mk (Hw.cat v3 (Hw.cat v2 (Hw.cat v1 v0))) s.a0 s.a1 s.a2 s.a3
+
+def GBus.reqMux {r : HwTy → Type} [Hw r] (c : r W1) (a b : CacheReq r) : CacheReq r :=
+  CacheReq.unpack (Hw.mux c (CacheReq.pack a) (CacheReq.pack b))
+
+def GBus.resMux {r : HwTy → Type} [Hw r] (c : r W1) (a b : GBus.Res r) : GBus.Res r :=
+  GBus.Res.unpack (Hw.mux c (GBus.Res.pack a) (GBus.Res.pack b))
+
+structure GBus.Atom (n : Nat) (r : HwTy → Type) where
+  res : GBus.Res r
+  st : r B2       -- 0 idle, 1 read phase, 2 write phase
+  h : r (HwTy.bits (GBus.ixw n))
+  op : r B2       -- 1 LR, 2 SC, 3 AMO
+  f5 : r B5
+  a : r (HwTy.bits 28)
+  wd : r B32      -- SC's store value; the AMO's rs2, then its new word
+  old : r B32     -- the AMO's read word (returned to the hart)
+  ok : r W1       -- SC: the reservation was live at the start
+  deriving Bundle
+
+def GBus.atomZero {r : HwTy → Type} [Hw r] (n : Nat) : GBus.Atom n r :=
+  GBus.Atom.mk (GBus.resZero (r := r)) (Hw.lit 2 0) (Hw.lit (GBus.ixw n) 0)
+    (Hw.lit 2 0) (Hw.lit 5 0) (Hw.lit 28 0) (Hw.lit 32 0) (Hw.lit 32 0) (Hw.lit 1 0)
+
+def GBus.atomInit (n : Nat) : GBus.Atom n HwTy.El :=
+  GBus.Atom.mk (GBus.resInit) (BitVec.ofNat 2 0) (BitVec.ofNat (GBus.ixw n) 0)
+    (BitVec.ofNat 2 0) (BitVec.ofNat 5 0) (BitVec.ofNat 28 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0)
+
+-- the request the engine puts on the bus for its current phase
+def GBus.atomPhase {r : HwTy → Type} [Hw r] (n : Nat) (s : GBus.Atom n r) : CacheReq r :=
+  let wr := isK s.st 2;
+  CacheReq.mk (Hw.not (isK s.st 0)) s.a wr s.wd (Hw.lit 4 15) (Hw.lit 2 0) (Hw.lit 5 0)
+
+structure GBus.AtomOut (n : Nat) (r : HwTy → Type) where
+  next : GBus.Atom n r
+  req : CacheReq r
+  use : r W1      -- use `req` instead of the arbiter's selected request
+  hold : r W1     -- keep the arbiter owner (it was busy)
+  h : r (HwTy.bits (GBus.ixw n))
+  resp : CacheResp r
+  done : r W1
+  deriving Bundle
+
+-- one cycle of the engine: the arbiter's selected request (which is the phase request
+-- while it is busy), the selected hart and the cache's answer in; the next state, the
+-- request to put on the bus, and the answer to the owning hart out
+def GBus.atomStep (n : Nat) {r : HwTy → Type} [Hw r] (s : GBus.Atom n r)
+    (sel : CacheReq r) (g : r (HwTy.bits (GBus.ixw n))) (resp : CacheResp r) : r (GBus.AtomOut.code n) :=
+  let idle := isK s.st 0;
+  let readP := isK s.st 1;
+  let writeP := isK s.st 2;
+  let g2 : r B2 := GBus.ix2 n g;
+  let h2 : r B2 := GBus.ix2 n s.h;
+  let line := GBus.lineOf sel.addr;
+  let start := Hw.and idle (Hw.and sel.valid (Hw.not (isK sel.aop 0)));
+  let scHit := GBus.resHit s.res g2 (GBus.lineOf sel.addr);
+  let startLr := Hw.and start (isK sel.aop 1);
+  let startSc := Hw.and start (isK sel.aop 2);
+  let startAmo := Hw.and start (isK sel.aop 3);
+  let normalWrite := Hw.and idle (Hw.and sel.valid (Hw.and sel.we (isK sel.aop 0)));
+  -- the request for this cycle
+  let startRead := Hw.or startLr (Hw.or startAmo (Hw.and startSc (Hw.not scHit)));
+  let startWrite := Hw.and startSc scHit;
+  let req := Hw.mux (Hw.or readP writeP) (CacheReq.pack (GBus.atomPhase n s))
+    (Hw.mux (Hw.or startRead startWrite)
+      (CacheReq.pack (CacheReq.mk hi sel.addr startWrite
+        (Hw.mux startWrite sel.wdata (Hw.lit 32 0)) (Hw.lit 4 15) (Hw.lit 2 0) (Hw.lit 5 0)))
+      (CacheReq.pack (GBus.zeroReq (r := r))));
+  let use := Hw.or (Hw.or readP writeP) (Hw.or startRead startWrite);
+  let hold := Hw.or readP writeP;
+  -- completions
+  let lrDone := Hw.and readP (Hw.and (isK s.op 1) resp.rvalid);
+  let scFail := Hw.and readP (Hw.and (isK s.op 2) (Hw.and (Hw.not s.ok) resp.rvalid));
+  let amoRead := Hw.and readP (Hw.and (isK s.op 3) resp.rvalid);
+  let scDone := Hw.and writeP (Hw.and (isK s.op 2) (Hw.and s.ok resp.ready));
+  let amoDone := Hw.and writeP (Hw.and (isK s.op 3) resp.ready);
+  let done := Hw.or (Hw.or lrDone scFail) (Hw.or scDone amoDone);
+  let dval := Hw.mux lrDone resp.rdata (Hw.mux scFail (Hw.lit 32 1) (Hw.mux scDone (Hw.lit 32 0) s.old));
+  -- the write phase's new word
+  let newWord := GBus.amoVal s.f5 s.old s.wd;
+  -- the next state
+  let res1 := GBus.resMux normalWrite (GBus.resClearLine s.res (GBus.lineOf sel.addr)) s.res;
+  let res2 := GBus.resMux lrDone (GBus.resSet res1 h2 (GBus.lineOf s.a))
+    (GBus.resMux scFail (GBus.resClearHart res1 h2)
+    (GBus.resMux (Hw.or scDone amoDone) (GBus.resClearLine res1 (GBus.lineOf s.a)) res1));
+  let st1 := Hw.mux start (Hw.mux startWrite (Hw.lit 2 2) (Hw.lit 2 1)) s.st;
+  let st2 := Hw.mux lrDone (Hw.lit 2 0)
+    (Hw.mux scFail (Hw.lit 2 0)
+    (Hw.mux amoRead (Hw.lit 2 2)
+    (Hw.mux (Hw.or scDone amoDone) (Hw.lit 2 0) st1)));
+  let next := GBus.Atom.mk res2 st2
+    (Hw.mux start g s.h)
+    (Hw.mux start sel.aop s.op)
+    (Hw.mux start sel.af5 s.f5)
+    (Hw.mux start sel.addr s.a)
+    (Hw.mux amoRead newWord (Hw.mux start (Hw.mux startLr (Hw.lit 32 0) sel.wdata) s.wd))
+    (Hw.mux amoRead resp.rdata s.old)
+    (Hw.mux start (Hw.mux startSc scHit (Hw.lit 1 0)) s.ok);
+  GBus.AtomOut.pack n (GBus.AtomOut.mk next
+    (CacheReq.unpack req) use hold (Hw.mux start g s.h)
+    (CacheResp.mk done done dval) done)
+
 --------------------------------------------------------------------------------
 -- A behavioural DDR for simulation. Words of 32 bits with byte masks, `wait` counts
 -- the cycles since the request: an answer on the second one. The address is the
