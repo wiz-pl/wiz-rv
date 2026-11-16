@@ -22,7 +22,7 @@ structure At.Fx where
   steps : Nat
   mbase : Nat
   mcount : Nat
-  words : List Nat
+  words : List Nat     -- the image, in halfwords
 
 def At.keep (l : String) : Bool :=
   Bool.and (Bool.not (String.isEmpty (String.trim l)))
@@ -46,6 +46,17 @@ def At.hexGo : Nat → List Char → Nat
   | acc, .cons c cs => At.hexGo (Nat.add (Nat.mul acc 16) (At.hv c)) cs
 def At.hex (s : String) : Nat := At.hexGo 0 (String.chars (String.trim s))
 
+-- the image is halfwords (since the C extension), as the oracle's `Fx.halves` has it: an
+-- 8-digit line is a 32-bit instruction or word (two halfwords, low first), a 4-digit
+-- line is one halfword
+def At.halves1 (s : String) : List Nat :=
+  let n := At.hex s;
+  if Nat.le (List.length (String.chars (String.trim s))) 4 then .cons n .nil
+  else .cons (Nat.mod n 65536) (.cons (Nat.mod (Nat.div n 65536) 65536) .nil)
+def At.halves : List String → List Nat
+  | .nil => .nil
+  | .cons s ss => List.append (At.halves1 s) (At.halves ss)
+
 def At.ofLines : List String → Option At.Fx
   | .nil => .none
   | .cons name rest =>
@@ -57,7 +68,7 @@ def At.ofLines : List String → Option At.Fx
          | .some s => String.trim s
          | .none => "rv32i";
        .some (At.Fx.mk (String.trim name) cfg (At.tok 1 toks) (At.tok 2 toks) (At.tok 3 toks)
-         (At.tok 4 toks) (List.map At.hex ws)))
+         (At.tok 4 toks) (At.halves ws)))
 
 structure At.Res (ab wb : Nat) where
   steps : Nat
