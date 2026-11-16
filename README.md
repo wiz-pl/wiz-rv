@@ -183,6 +183,17 @@ grail test           # the specification tests and the lockstep simulations
 .grail/bin/rv all    # Verilog, synthesis, place and route
 ```
 
+Build memory, measured at 408a249 (wiz master@071a033a, each command under `heavy` with
+`-j 1`, peak resident set size from `time -v`):
+
+* `grail build lib ddr3` (every module under src, the proofs in src/Rv/Proofs.wiz and
+  src/Rv/TrapProofs included): 870 MB peak, 342 s of user time.
+* `grail build golem` (the golem executable, once the library is checked): 581 MB.
+* The full `grail build` (`-j 1`) went over a 6 GB cap at 408a249. Grail's output was
+  lost with the kill, so the job is not identified. The library and golem fit, so it
+  is probably one of the other executables (doomgen, rv, pgen, rvload, bin2wiz). The
+  memory the full build needs is not yet known.
+
 ## golem, the SoC
 
 `src/Rv/Golem.wiz` is the first top level that puts the pieces together: the pipelined

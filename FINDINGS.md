@@ -404,6 +404,16 @@ with a job that timed out: `grail test long --update` printed `✓ tests/long.wi
 (updated)` and recorded "error: timed out after 1800.000 s (its process group was
 killed), and printed nothing" as the expected output.
 
+### R2. wiz-rv master's `wiz-toolchain` pin could not be installed (bug, fixed by the merge of #3)
+
+Before 48c603b, master's `wiz-toolchain` read `agent/cohesion-hw-mem+agent/hdl-sim-perf@master-50cd3e7
+(local merge, see README)`: a description of a local merge, not a toolchain tower can
+install. `tower` tried to download a release snapshot for it, the URL was rejected,
+and `grail build` exited 1 before doing anything (seen on a4149a5). agent/golem-csr
+carried the pin `master@071a033a…` (the first snapshot with both branches the
+description named), and master has had it since #3 was merged. The pipe-proofs PR moves
+it to `master@677b6496…`.
+
 ## Assembler, in passing
 
 `Int.subNatNat m n` is `m - n`. (This project's own bug: branch offsets came out
