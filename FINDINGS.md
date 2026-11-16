@@ -314,8 +314,8 @@ be checked and maybe placed again; a failing "Max frequency" is not to be loaded
 ### H13. The CSR file made `src/Rv/Proofs.wiz` blow up past 8 GB (slow, fixed)
 
 With the CSRs (agent/golem-csr) `wiz check src/Rv/Proofs.wiz` went over heavy's 6 GB and
-then 8 GB caps (8.40 GB at 642 s user time), so `grail build` failed on it; before the
-CSRs it fitted, though the misaligned-access claims already took minutes. Bisected
+then 8 GB caps (8.40 GB at 642 s user time), so `grail build` failed on it. On the commit before the CSRs the misaligned-load claim
+alone already ran for more than 200 s, under 400 MB. Bisected
 under `light`: the glue and eleven claims were small; the three `Pf.x1is2` claims
 (misaligned load, store, jump) reached 2 GB in 5 s, and `#reduce` put it on one field
 after the decode cycle: `trap`, `tval`, `mepc`, `mcause` and `mstatus`, not `mscratch`.
