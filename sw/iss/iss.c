@@ -27,7 +27,8 @@
 static uint8_t bram[16384];
 static uint8_t *ddr;
 static const uint32_t DDR_SIZE = 256u << 20;
-static uint16_t oled[96 * 64];
+static uint16_t oled[2][96 * 64];   /* the framebuffer's two banks (src/Rv/OledFb.wiz) */
+static uint32_t fb_show;             /* the bank software asked to show (here at once) */
 static uint32_t x[32], pc;
 static uint64_t cycles, instret;
 static const char *frames;
@@ -69,7 +70,7 @@ static int key_at(uint32_t ms) {   /* the key typed at this time, if any (once) 
   return -1;
 }
 
-static void dump_frame(void) {
+static void dump_frame(int bank) {
   if (!frames) return;
   char name[512];
   snprintf(name, sizeof name, "%s/frame%05d.ppm", frames, nframe++);
@@ -77,7 +78,7 @@ static void dump_frame(void) {
   if (!f) return;
   fprintf(f, "P6\n96 64\n255\n");
   for (int i = 0; i < 96 * 64; i++) {
-    uint16_t p = oled[i];
+    uint16_t p = oled[bank][i];
     fputc(((p >> 11) & 31) << 3, f); fputc(((p >> 5) & 63) << 2, f); fputc((p & 31) << 3, f);
   }
   fclose(f);
@@ -126,6 +127,7 @@ static uint32_t io_read(uint32_t a) {
   case 0x78: return fb_sum;
   case 0x7c: return (uint32_t)underruns;
   case 0x80: return 0;     /* the OLED controller's pins and program counter */
+  case 0x84: return 0xDB000000u | fb_show * 3;   /* the banks: shown = asked for */
   default: return 0;
   }
 }
@@ -134,9 +136,9 @@ static void io_write(uint32_t a, uint32_t v, int size) {
   if ((a >> 24) == 0x81) {
     fbw_total++;
     { int k; for (k = 0; k < fbw_n && fbw_pc[k] != pc; k++) {} if (k == fbw_n && fbw_n < 16) fbw_pc[fbw_n++] = pc; }
-    uint32_t i = (a & 0xffffff) >> 1;
+    uint32_t i = ((a & 0xffffff) >> 1) & 8191, bank = ((a & 0xffffff) >> 14) & 1;
     if (i < 96 * 64 && size == 2) {
-      oled[i] = (uint16_t)v;
+      oled[bank][i] = (uint16_t)v;
       fb_sum = (fb_sum * 16777619u) ^ (uint16_t)v ^ i;
       if (i == 96 * 64 - 1) {              /* the last pixel: a frame is done */
         frames_done++;
@@ -147,9 +149,11 @@ static void io_write(uint32_t a, uint32_t v, int size) {
                 df ? 50e6 / (double)df : 0.0,
                 (unsigned long long)(instret - frames_prev_instr));
         frames_prev_instr = instret; frames_prev_cycles = cycles;
-        dump_frame();
+        dump_frame((int)bank);
       }
     }
+  } else if ((a & 0xff) == 0x84) {
+    fb_show = v & 1;
   } else if ((a & 0xff) == 0x30) {
     snd_written++;
     if (wav) { fputc(v & 0xff, wav); wav_n++; }
