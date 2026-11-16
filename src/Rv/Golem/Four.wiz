@@ -206,10 +206,10 @@ def G4.step (cfg : G4.Cfg) (wb : Nat) {r : HwTy → Type} [Hw r] (s : G4.St wb G
   let ω k3 := CoreSt.unpack G4.ab wb (G4.hart s 3).cpu;
   -- the request/MMIO address side (a quiet answer: a store's write is formed again with
   -- the real `txReady` below, so a UART store that is waiting does not write twice)
-  let q0 := Out.unpack (Hw.snd (coreStepC G4.ab wb .true (G4.cacheOf cfg 0) k0 G4.quietIn));
-  let q1 := Out.unpack (Hw.snd (coreStepC G4.ab wb .true (G4.cacheOf cfg 1) k1 G4.quietIn));
-  let q2 := Out.unpack (Hw.snd (coreStepC G4.ab wb .true (G4.cacheOf cfg 2) k2 G4.quietIn));
-  let q3 := Out.unpack (Hw.snd (coreStepC G4.ab wb .true (G4.cacheOf cfg 3) k3 G4.quietIn));
+  let q0 := Out.unpack (Hw.snd (coreStepHC 0 G4.ab wb .true (G4.cacheOf cfg 0) k0 G4.quietIn));
+  let q1 := Out.unpack (Hw.snd (coreStepHC 1 G4.ab wb .true (G4.cacheOf cfg 1) k1 G4.quietIn));
+  let q2 := Out.unpack (Hw.snd (coreStepHC 2 G4.ab wb .true (G4.cacheOf cfg 2) k2 G4.quietIn));
+  let q3 := Out.unpack (Hw.snd (coreStepHC 3 G4.ab wb .true (G4.cacheOf cfg 3) k3 G4.quietIn));
   let c0 := CacheReq.unpack (Hw.fst (Hw.snd (GBus.route (G4.hart s 0).bus q0.valid q0.pend q0.we q0.addr q0.wdata q0.wstrb q0.aop q0.af5 (GBus.noResp (r := r)))));
   let c1 := CacheReq.unpack (Hw.fst (Hw.snd (GBus.route (G4.hart s 1).bus q1.valid q1.pend q1.we q1.addr q1.wdata q1.wstrb q1.aop q1.af5 (GBus.noResp (r := r)))));
   let c2 := CacheReq.unpack (Hw.fst (Hw.snd (GBus.route (G4.hart s 2).bus q2.valid q2.pend q2.we q2.addr q2.wdata q2.wstrb q2.aop q2.af5 (GBus.noResp (r := r)))));
@@ -228,10 +228,10 @@ def G4.step (cfg : G4.Cfg) (wb : Nat) {r : HwTy → Type} [Hw r] (s : G4.St wb G
     let mip := Intc.mip sh.intc (G4.src sh) i;
     In.mk (Hw.and (txIdle sh.tx) (Hw.not sh.txGo)) (G4.read sh ddr i q.ioa) t.ready t.rvalid t.rdata
       (Intc.irqM mip) (Intc.irqT mip) (Intc.irqE mip);
-  let n0 := coreStepC G4.ab wb .true (G4.cacheOf cfg 0) k0 (inp 0 q0 t0);
-  let n1 := coreStepC G4.ab wb .true (G4.cacheOf cfg 1) k1 (inp 1 q1 t1);
-  let n2 := coreStepC G4.ab wb .true (G4.cacheOf cfg 2) k2 (inp 2 q2 t2);
-  let n3 := coreStepC G4.ab wb .true (G4.cacheOf cfg 3) k3 (inp 3 q3 t3);
+  let n0 := coreStepHC 0 G4.ab wb .true (G4.cacheOf cfg 0) k0 (inp 0 q0 t0);
+  let n1 := coreStepHC 1 G4.ab wb .true (G4.cacheOf cfg 1) k1 (inp 1 q1 t1);
+  let n2 := coreStepHC 2 G4.ab wb .true (G4.cacheOf cfg 2) k2 (inp 2 q2 t2);
+  let n3 := coreStepHC 3 G4.ab wb .true (G4.cacheOf cfg 3) k3 (inp 3 q3 t3);
   let o0 := Out.unpack (Hw.snd n0);
   let o1 := Out.unpack (Hw.snd n1);
   let o2 := Out.unpack (Hw.snd n2);

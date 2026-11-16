@@ -5,11 +5,12 @@ import Int
 -- instruction sets, version 2.1) as a pure step function on an architectural state.
 --
 -- The machine: a PC, the registers, a byte-addressed memory of 2^mbits bytes (the
--- address is taken modulo its size), and a trap state. There is no privileged
--- architecture: an instruction that would trap (ecall, ebreak, an illegal instruction,
--- a misaligned access or jump target) stops the machine instead, with the PC on that
--- instruction and the trap state recorded (`cause`, `tval`, `epc`, the RISC-V
--- `mcause`/`mtval`/`mepc` triple). A stopped machine stays as it is.
+-- address is taken modulo its size), a trap state, and the machine-mode CSRs (Zicsr,
+-- trap entry, MRET, WFI and the three M-mode interrupts: docs/csr.md). An exception
+-- jumps to the handler at `mtvec`; while `mtvec` is 0 (no handler) it stops the
+-- machine instead, with the PC on that instruction and the trap state recorded
+-- (`cause`, `tval`, `epc`, the RISC-V `mcause`/`mtval`/`mepc` triple). A stopped
+-- machine stays as it is.
 --
 -- The trap state:
 --   cause  the trap code below (`trap`; 0 while running);
@@ -53,10 +54,25 @@ def Trap.illegal : Nat := 3
 def Trap.jump : Nat := 4    -- a jump or branch to an address that is not a multiple of 4
 def Trap.load : Nat := 5    -- a misaligned load
 def Trap.store : Nat := 6   -- a misaligned store
+-- (internal to the pipelined core: an interrupt on its way from E to R, the cause in
+-- tval. Never a halted cause, never in `Arch.trap`.)
+def Trap.irq : Nat := 7
+
+-- the standard `mcause` exception code of each trap code (privileged spec, table 3.6):
+-- ECALL from M 11, EBREAK 3, illegal 2, instruction-address misaligned 0, load-address
+-- misaligned 4, store/AMO-address misaligned 6. (`trap` itself keeps the internal
+-- 3-bit code, which the boards show on their LEDs.)
+def Trap.mcause (t : Nat) : Nat :=
+  if Nat.beq t Trap.ecall then 11 else if Nat.beq t Trap.ebreak then 3
+  else if Nat.beq t Trap.illegal then 2 else if Nat.beq t Trap.jump then 0
+  else if Nat.beq t Trap.load then 4 else 6
 
 -- The machine-mode CSRs (the subset the SoC needs). `mepc` and `mtval` are `epc`
--- and `tval` in `Arch`; `mip` is the `irq` input, read-only. `mstatus` keeps MIE
--- (bit 3), MPIE (bit 7) and MPP (bits 11 … 12, always M).
+-- and `tval` in `Arch`; `mip` is the `irq` input, read-only. The WARL fields
+-- (docs/csr.md): `mstatus` keeps MIE (bit 3) and MPIE (bit 7), and MPP (bits 11 … 12)
+-- reads 3 (M is the only mode); `mie` keeps MSIE/MTIE/MEIE (bits 3, 7, 11); `mtvec`
+-- keeps BASE (bits 31 … 2) and MODE bit 0 (0 direct, 1 vectored; bit 1 reads 0, so
+-- the reserved modes cannot be written); `mepc` bits 1 … 0 read 0 (IALIGN 32).
 structure Csr where
   mstatus : BitVec 32
   mie : BitVec 32
@@ -65,7 +81,7 @@ structure Csr where
   mcause : BitVec 32
 
 def Csr.init : Csr :=
-  Csr.mk (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0)
+  Csr.mk (BitVec.ofNat 32 6144) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0)
     (BitVec.ofNat 32 0) (BitVec.ofNat 32 0)
 
 -- the CSR numbers (the machine-mode subset; the low two bits of an address are the
@@ -78,6 +94,15 @@ def Csr.aMepc : Nat := 833         -- 0x341
 def Csr.aMcause : Nat := 834       -- 0x342
 def Csr.aMtval : Nat := 835        -- 0x343
 def Csr.aMip : Nat := 836          -- 0x344
+-- the read-only machine information registers and misa (all read 0 but mhartid,
+-- which is 0 in this single-hart specification; a core of a multi-hart SoC reads its
+-- own number), and misa (WARL, reads 0: "not implemented", writes ignored)
+def Csr.aMisa : Nat := 769         -- 0x301
+def Csr.aMvendorid : Nat := 3857   -- 0xf11
+def Csr.aMarchid : Nat := 3858     -- 0xf12
+def Csr.aMimpid : Nat := 3859      -- 0xf13
+def Csr.aMhartid : Nat := 3860     -- 0xf14
+def Csr.aMconfigptr : Nat := 3861  -- 0xf15
 
 -- `mstatus`'s fields and the `mip`/`mie` bits
 def Csr.mieBit : Nat := 3
@@ -91,6 +116,13 @@ def Csr.msiCause : Nat := 3
 def Csr.mtiCause : Nat := 7
 def Csr.meiCause : Nat := 11
 def Csr.intrBit : Nat := 2147483648   -- 0x8000_0000, an interrupt cause
+
+-- the WARL masks: what a CSR write keeps (`mstatus` also has MPP forced to 3)
+def Csr.mstatusW : Nat := 136          -- 0x88: MIE, MPIE
+def Csr.mppM : Nat := 6144             -- 0x1800: MPP = M
+def Csr.mieW : Nat := 2184             -- 0x888: MSIE, MTIE, MEIE
+def Csr.mtvecW : Nat := 4294967293     -- ~0x2: BASE and MODE bit 0
+def Csr.mepcW : Nat := 4294967292      -- ~0x3
 
 structure Arch where
   pc : BitVec 32
@@ -137,9 +169,12 @@ def Rv.mipOf (s : Arch) : BitVec 32 := BitVec.and s.irq (Rv.w32 2184)   -- 0x888
 def Rv.csrExists (a : Nat) : Bool :=
   Bool.or (Nat.beq a Csr.aMstatus) (Bool.or (Nat.beq a Csr.aMie) (Bool.or (Nat.beq a Csr.aMtvec)
     (Bool.or (Nat.beq a Csr.aMscratch) (Bool.or (Nat.beq a Csr.aMepc) (Bool.or (Nat.beq a Csr.aMcause)
-      (Bool.or (Nat.beq a Csr.aMtval) (Nat.beq a Csr.aMip)))))))
+      (Bool.or (Nat.beq a Csr.aMtval) (Bool.or (Nat.beq a Csr.aMip)
+        (Bool.or (Nat.beq a Csr.aMisa) (Bool.and (Nat.le Csr.aMvendorid a) (Nat.le a Csr.aMconfigptr))))))))))
 
-def Rv.csrWritable (a : Nat) : Bool := Bool.not (Nat.beq a Csr.aMip)
+-- a write traps only to a read-only CSR (address bits 11 … 10 both set: the
+-- 0xf11 … 0xf15 block); `mip` and `misa` take writes and keep none of the value
+def Rv.csrWritable (a : Nat) : Bool := Bool.not (Nat.beq (Nat.div a 1024) 3)
 
 def Rv.csrRead (s : Arch) (a : Nat) : BitVec 32 :=
   if Nat.beq a Csr.aMstatus then s.csr.mstatus
@@ -152,15 +187,20 @@ def Rv.csrRead (s : Arch) (a : Nat) : BitVec 32 :=
   else if Nat.beq a Csr.aMip then Rv.mipOf s
   else Rv.w32 0
 
+-- the interrupt inputs (`mip`'s pending bits), as a test bench drives them
+def Rv.setIrq (s : Arch) (v : BitVec 32) : Arch :=
+  Arch.mk s.pc s.regs s.mem s.trap s.tval s.epc s.csr v s.out s.inp s.res
+
 def Rv.withCsr (s : Arch) (c : Csr) : Arch :=
   Arch.mk s.pc s.regs s.mem s.trap s.tval s.epc c s.irq s.out s.inp s.res
 
+-- (the WARL masks are applied here: a write keeps only the implemented bits)
 def Rv.csrWrite (s : Arch) (a : Nat) (v : BitVec 32) : Arch :=
-  if Nat.beq a Csr.aMstatus then Rv.withCsr s (Csr.mk v s.csr.mie s.csr.mtvec s.csr.mscratch s.csr.mcause)
-  else if Nat.beq a Csr.aMie then Rv.withCsr s (Csr.mk s.csr.mstatus v s.csr.mtvec s.csr.mscratch s.csr.mcause)
-  else if Nat.beq a Csr.aMtvec then Rv.withCsr s (Csr.mk s.csr.mstatus s.csr.mie v s.csr.mscratch s.csr.mcause)
+  if Nat.beq a Csr.aMstatus then Rv.withCsr s (Csr.mk (BitVec.or (BitVec.and v (Rv.w32 Csr.mstatusW)) (Rv.w32 Csr.mppM)) s.csr.mie s.csr.mtvec s.csr.mscratch s.csr.mcause)
+  else if Nat.beq a Csr.aMie then Rv.withCsr s (Csr.mk s.csr.mstatus (BitVec.and v (Rv.w32 Csr.mieW)) s.csr.mtvec s.csr.mscratch s.csr.mcause)
+  else if Nat.beq a Csr.aMtvec then Rv.withCsr s (Csr.mk s.csr.mstatus s.csr.mie (BitVec.and v (Rv.w32 Csr.mtvecW)) s.csr.mscratch s.csr.mcause)
   else if Nat.beq a Csr.aMscratch then Rv.withCsr s (Csr.mk s.csr.mstatus s.csr.mie s.csr.mtvec v s.csr.mcause)
-  else if Nat.beq a Csr.aMepc then Arch.mk s.pc s.regs s.mem s.trap s.tval v s.csr s.irq s.out s.inp s.res
+  else if Nat.beq a Csr.aMepc then Arch.mk s.pc s.regs s.mem s.trap s.tval (BitVec.and v (Rv.w32 Csr.mepcW)) s.csr s.irq s.out s.inp s.res
   else if Nat.beq a Csr.aMcause then Rv.withCsr s (Csr.mk s.csr.mstatus s.csr.mie s.csr.mtvec s.csr.mscratch v)
   else if Nat.beq a Csr.aMtval then Arch.mk s.pc s.regs s.mem s.trap v s.epc s.csr s.irq s.out s.inp s.res
   else s
@@ -178,18 +218,24 @@ def Rv.irqCause (s : Arch) : Nat :=
   else if Rv.bit on.toNat Csr.msipBit then Csr.msiCause
   else if Rv.bit on.toNat Csr.mtipBit then Csr.mtiCause else 0
 
--- `mcause`: an interrupt has bit 31 set
+-- `mcause`: an interrupt has bit 31 set and its code; an exception the standard code
+-- of the trap (`Trap.mcause`)
 def Rv.trapCause (cause : Nat) (intr : Bool) : Nat :=
-  if intr then cause + Csr.intrBit else cause
+  if intr then cause + Csr.intrBit else Trap.mcause cause
+
+-- where a trap goes: BASE, or BASE + 4 × cause for an interrupt in vectored mode
+def Rv.vector (s : Arch) (cause : Nat) (intr : Bool) : BitVec 32 :=
+  let ω base := BitVec.and s.csr.mtvec (Rv.w32 4294967292);
+  if Bool.and intr (Rv.bit s.csr.mtvec.toNat 0) then BitVec.add base (Rv.w32 (4 * cause)) else base
 
 -- trap entry: mepc = pc, mcause = cause (bit 31 for an interrupt), mtval = fault,
--- MPIE = MIE, MIE = 0, MPP = M, pc = mtvec (direct mode)
+-- MPIE = MIE, MIE = 0, MPP = M, pc = the vector
 def Rv.enterTrap (s : Arch) (cause : Nat) (fault : BitVec 32) (intr : Bool) : Arch :=
   let ms := s.csr.mstatus;
   let oldMie := Rv.bit ms.toNat Csr.mieBit;
   let ms1 := Rv.setBit (Rv.setBit (Rv.setBit ms Csr.mieBit .false) Csr.mpieBit oldMie) Csr.mpp0Bit .true;
   let ms2 := Rv.setBit ms1 Csr.mpp1Bit .true;
-  Arch.mk (BitVec.and s.csr.mtvec (Rv.w32 4294967292)) s.regs s.mem 0 fault s.pc
+  Arch.mk (Rv.vector s cause intr) s.regs s.mem 0 fault s.pc
     (Csr.mk ms2 s.csr.mie s.csr.mtvec s.csr.mscratch (Rv.w32 (Rv.trapCause cause intr)))
     s.irq s.out s.inp s.res
 
@@ -268,12 +314,15 @@ def Rv.write (s : Arch) (rd : Nat) (v : BitVec 32) (pc : BitVec 32) : Arch :=
 -- not move: a stopped machine stays as it is). `mcause` records the cause too.
 def Rv.stop (s : Arch) (t : Nat) (v : BitVec 32) : Arch :=
   Arch.mk s.pc s.regs s.mem t v s.pc
-    (Csr.mk s.csr.mstatus s.csr.mie s.csr.mtvec s.csr.mscratch (Rv.w32 t))
+    (Csr.mk s.csr.mstatus s.csr.mie s.csr.mtvec s.csr.mscratch (Rv.w32 (Trap.mcause t)))
     s.irq s.out s.inp s.res
 
--- an exception traps to `mtvec` when a handler is installed (mtvec != 0); a zero
--- vector keeps the pre-CSR behaviour of stopping (the boot ROM and the test programs
--- use EBREAK as a halt, and a zero vector means "no handler")
+-- an exception traps to `mtvec` when a handler is installed (mtvec != 0). The one
+-- deviation from the privileged spec (docs/csr.md, "Halting"): while mtvec reads 0 an
+-- exception halts the hart instead of jumping to address 0, recording mcause/mepc/
+-- mtval as the trap would. Every test program, the boot ROMs, the oracle fixtures and
+-- the proofs end with EBREAK on that rule. Interrupts are not affected: they always
+-- go to the vector.
 def Rv.exception (s : Arch) (t : Nat) (v : BitVec 32) : Arch :=
   if Nat.beq s.csr.mtvec.toNat 0 then Rv.stop s t v else Rv.enterTrap s t v .false
 
@@ -417,6 +466,15 @@ def Rv.extend (f3 : Nat) (v : Nat) : BitVec 32 :=
 
 def Rv.illegal (s : Arch) (w : Nat) : Arch := Rv.exception s Trap.illegal (Rv.w32 w)
 
+-- WFI (docs/csr.md): the hart stalls (the step leaves the state as it is) while no
+-- enabled interrupt is pending (`mip & mie` is zero, whatever `mstatus.MIE`), then it
+-- completes as a NOP. With nothing enabled in `mie` it stalls for ever, as the spec
+-- allows.
+def Rv.wfiWord : Nat := 273678451
+def Rv.wfi (s : Arch) : Arch :=
+  if Nat.beq (BitVec.and (Rv.mipOf s) s.csr.mie).toNat 0 then s
+  else Rv.write s 0 (Rv.w32 0) (Rv.next s)
+
 def Rv.exec (c : Cfg) (s : Arch) (w : Nat) : Arch :=
   let ω op := Ins.opcode w;
   let ω rd := Ins.rd w;
@@ -503,18 +561,21 @@ def Rv.exec (c : Cfg) (s : Arch) (w : Nat) : Arch :=
     (if Nat.beq w 115 then Rv.exception s Trap.ecall (Rv.w32 0)
      else if Nat.beq w 1048691 then Rv.exception s Trap.ebreak (Rv.w32 0)
      else if Nat.beq w 807403635 then Rv.mret s      -- 0x30200073
-     else if Nat.beq w 273678451 then Rv.write s 0 (Rv.w32 0) (Rv.next s)   -- wfi (a hint)
+     else if Nat.beq w 273678451 then Rv.wfi s      -- 0x10500073
      else if Bool.and csrKind csrOk then csrDone
      else Rv.illegal s w)
   else Rv.illegal s w
 
--- the architectural step: a pending, enabled interrupt is taken between instructions
+-- the architectural step: a pending, enabled interrupt is taken between instructions,
+-- always at the vector (mtvec = 0 included). A WFI is not interrupted: it completes
+-- (as a NOP) once `mip & mie` is not zero, and the interrupt, if `mstatus.MIE` allows
+-- it, is taken before the next instruction, so mepc is the WFI's PC + 4.
 def Rv.step (c : Cfg) (s : Arch) : Arch :=
   if Nat.beq s.trap 0 then
-    (if Rv.takeIrq s then
-       (if Nat.beq s.csr.mtvec.toNat 0 then Rv.stop s (Rv.trapCause (Rv.irqCause s) .true) (Rv.w32 0)
-        else Rv.enterTrap s (Rv.irqCause s) (Rv.w32 0) .true)
-     else Rv.exec c s (Rv.fetch c s))
+    (let ω w := Rv.fetch c s;
+     if Bool.and (Rv.takeIrq s) (Bool.not (Nat.beq w Rv.wfiWord))
+     then Rv.enterTrap s (Rv.irqCause s) (Rv.w32 0) .true
+     else Rv.exec c s w)
   else s
 
 def Rv.run (c : Cfg) : Nat → Arch → Arch

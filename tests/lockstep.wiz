@@ -23,6 +23,13 @@ def reportM (ab : Nat) (mx : Bool) (p : List Asm) (fuel : Nat) : String :=
       | .nil => "agrees"
       | ps => "DISAGREES" ++ lines ps)) (Ls.run ab 8 mx (Asm.assemble p) fuel)
 def report (ab : Nat) (p : List Asm) (fuel : Nat) : String := reportM ab .false p fuel
+-- with the interrupt inputs driven by `irq` (cycle → mip bits)
+def reportIrq (ab : Nat) (p : List Asm) (irq : Nat → Nat) (fuel : Nat) : String :=
+  (fun (r : Ls.Result) => Nat.repr r.instrs ++ " instructions, " ++ Nat.repr r.cycles ++ " cycles, trap "
+    ++ Nat.repr r.trap ++ ", out " ++ showBytes r.out
+    ++ (match r.problems with
+      | .nil => "agrees"
+      | ps => "DISAGREES" ++ lines ps)) (Ls.runIrq ab 8 .false (Asm.assemble p) irq fuel)
 -- with the A extension in the specification
 def reportA (ab : Nat) (mx : Bool) (p : List Asm) (fuel : Nat) : String :=
   (fun (r : Ls.Result) => Nat.repr r.instrs ++ " instructions, " ++ Nat.repr r.cycles ++ " cycles, trap "
@@ -47,6 +54,19 @@ def trapsE : List String :=
   .cons (report 4 Prog.trapLoad 50) (.cons (report 4 Prog.trapStore 50) (.cons (report 4 Prog.trapJump 50)
   (.cons (report 4 Prog.trapIllegal 50) (.cons (report 4 Prog.trapEcall 50) (.cons (report 4 Prog.x16 50) .nil)))))
 #eval trapsE
+-- Zicsr: write, read back, set and clear bits, the immediate forms, the WARL masks
+-- (docs/csr.md)
+def csrE : String := report 4 Prog.csr 400
+#eval csrE
+-- traps and interrupts with handlers (vectored mtvec): ECALL handled and returned past,
+-- the timer interrupt in a loop, WFI waiting for MEIP with MIE off, the external
+-- interrupt once MIE is set; then interrupts at arbitrary points of a load/store/branch
+-- loop (the timer input pulses). The specification is given the interrupts the core
+-- took (src/Rv/Lockstep.wiz) and must agree on every one.
+def irqE : String := reportIrq 4 Prog.irq Prog.irqAt 1500
+#eval irqE
+def irqStressE : String := reportIrq 4 Prog.irqStress Prog.pulseAt 3000
+#eval irqStressE
 -- RV32I: x16 is a register
 def ddrE : String := report 4 Prog.ddr 600
 #eval ddrE

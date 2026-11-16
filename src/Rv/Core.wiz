@@ -85,16 +85,17 @@ structure CsrFile (r : HwTy → Type) where
   mcause : r B32
   deriving Bundle
 
+-- (`mstatus` resets to MPP = M, 0x1800: the field is read-only 3 on an M-only hart)
 def CsrFile.init : CsrFile HwTy.El :=
-  CsrFile.mk (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0)
+  CsrFile.mk (BitVec.ofNat 32 Csr.mppM) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0)
     (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0)
 
 def CsrFile.zero {r : HwTy → Type} [Hw r] : CsrFile r :=
-  CsrFile.mk (Hw.lit 32 0) (Hw.lit 32 0) (Hw.lit 32 0) (Hw.lit 32 0) (Hw.lit 32 0) (Hw.lit 32 0)
+  CsrFile.mk (Hw.lit 32 Csr.mppM) (Hw.lit 32 0) (Hw.lit 32 0) (Hw.lit 32 0) (Hw.lit 32 0) (Hw.lit 32 0)
 
--- the reset: every CSR zero
+-- the reset: every CSR zero, except mstatus.MPP (3)
 def CsrFile.reset {r : HwTy → Type} [Hw r] (rst : r W1) (c : CsrFile r) : CsrFile r :=
-  CsrFile.mk (Hw.mux rst (Hw.lit 32 0) c.mstatus) (Hw.mux rst (Hw.lit 32 0) c.mie)
+  CsrFile.mk (Hw.mux rst (Hw.lit 32 Csr.mppM) c.mstatus) (Hw.mux rst (Hw.lit 32 0) c.mie)
     (Hw.mux rst (Hw.lit 32 0) c.mtvec) (Hw.mux rst (Hw.lit 32 0) c.mscratch)
     (Hw.mux rst (Hw.lit 32 0) c.mepc) (Hw.mux rst (Hw.lit 32 0) c.mcause)
 
@@ -230,12 +231,51 @@ def isK {r : HwTy → Type} [Hw r] {ω n : Nat} (x : r (HwTy.bits n)) (k : Nat) 
 
 -- the CSR numbers (the machine-mode subset; the ISA's `Csr.a*` has the same values)
 def coreCsrExists {r : HwTy → Type} [Hw r] (a : r B12) : r W1 :=
-  Hw.or (isK a Csr.aMstatus) (Hw.or (isK a Csr.aMie) (Hw.or (isK a Csr.aMtvec)
-    (Hw.or (isK a Csr.aMscratch) (Hw.or (isK a Csr.aMepc) (Hw.or (isK a Csr.aMcause)
-      (Hw.or (isK a Csr.aMtval) (isK a Csr.aMip)))))))
-def coreCsrWritable {r : HwTy → Type} [Hw r] (a : r B12) : r W1 := Hw.not (isK a Csr.aMip)
+  let info := Hw.and (Hw.not (Hw.ult a (Hw.lit 12 Csr.aMvendorid))) (Hw.ult a (Hw.lit 12 (Csr.aMconfigptr + 1)));
+  Hw.or (Hw.or (Hw.or (isK a Csr.aMstatus) (isK a Csr.aMie)) (Hw.or (isK a Csr.aMtvec) (isK a Csr.aMscratch)))
+    (Hw.or (Hw.or (Hw.or (isK a Csr.aMepc) (isK a Csr.aMcause)) (Hw.or (isK a Csr.aMtval) (isK a Csr.aMip)))
+      (Hw.or (isK a Csr.aMisa) info))
+-- (as `Rv.csrWritable`: the 0xc00 … 0xfff block is read-only)
+def coreCsrWritable {r : HwTy → Type} [Hw r] (a : r B12) : r W1 :=
+  Hw.not (isK (Hw.slice 10 2 a : r B2) 3)
 
-def coreCsrRead {r : HwTy → Type} [Hw r] (c : CsrFile r) (tval mip : r B32) (a : r B12) : r B32 :=
+-- a CSR write's value, through the WARL masks of `Rv.csrWrite`
+def coreCsrWarl {r : HwTy → Type} [Hw r] (a : r B12) (v : r B32) : r B32 :=
+  Hw.mux (isK a Csr.aMstatus) (Hw.or (Hw.and v (Hw.lit 32 Csr.mstatusW)) (Hw.lit 32 Csr.mppM))
+    (Hw.mux (isK a Csr.aMie) (Hw.and v (Hw.lit 32 Csr.mieW))
+    (Hw.mux (isK a Csr.aMtvec) (Hw.and v (Hw.lit 32 Csr.mtvecW))
+    (Hw.mux (isK a Csr.aMepc) (Hw.and v (Hw.lit 32 Csr.mepcW)) v)))
+
+-- `mcause` of an exception: the standard code of the 3-bit trap code (`Trap.mcause`)
+def coreTrapMcause {r : HwTy → Type} [Hw r] (t : r B3) : r B32 :=
+  Hw.mux (isK t Trap.ecall) (Hw.lit 32 11) (Hw.mux (isK t Trap.ebreak) (Hw.lit 32 3)
+    (Hw.mux (isK t Trap.illegal) (Hw.lit 32 2) (Hw.mux (isK t Trap.jump) (Hw.lit 32 0)
+    (Hw.mux (isK t Trap.load) (Hw.lit 32 4) (Hw.lit 32 6)))))
+
+-- `mstatus` after trap entry (MPIE = MIE, MIE = 0, MPP = M) and after MRET (MIE = MPIE,
+-- MPIE = 1, MPP = M)
+def coreTrapMstatus {r : HwTy → Type} [Hw r] (ms : r B32) : r B32 :=
+  let noMie := Hw.and ms (Hw.lit 32 4294967287);
+  Hw.or (Hw.mux (bitOf Csr.mieBit ms) (Hw.or noMie (Hw.lit 32 128)) (Hw.and noMie (Hw.lit 32 4294967167)))
+    (Hw.lit 32 Csr.mppM)
+def coreRetMstatus {r : HwTy → Type} [Hw r] (ms : r B32) : r B32 :=
+  Hw.or (Hw.or (Hw.mux (bitOf Csr.mpieBit ms) (Hw.or ms (Hw.lit 32 8)) (Hw.and ms (Hw.lit 32 4294967287)))
+    (Hw.lit 32 128)) (Hw.lit 32 Csr.mppM)
+
+-- the interrupt to take from `mip & mie`: MEI, then MSI, then MTI (`Rv.irqCause`)
+def coreIrqCode {r : HwTy → Type} [Hw r] (on : r B32) : r B4 :=
+  Hw.mux (bitOf Csr.meipBit on) (Hw.lit 4 Csr.meiCause)
+    (Hw.mux (bitOf Csr.msipBit on) (Hw.lit 4 Csr.msiCause) (Hw.lit 4 Csr.mtiCause))
+
+-- the trap's target (`Rv.vector`): BASE, or BASE + 4 × cause for an interrupt when
+-- mtvec.MODE is 1 (vectored)
+def coreVector {r : HwTy → Type} [Hw r] (mtvec : r B32) (intr : r W1) (code : r B4) : r B32 :=
+  let base := Hw.and mtvec (Hw.lit 32 4294967292);
+  Hw.mux (Hw.and intr (bitOf 0 mtvec)) (Hw.add base (Hw.cat (Hw.lit 26 0) (Hw.cat code (Hw.lit 2 0)))) base
+
+-- (`hart` is `mhartid`: 0 on the single-hart machines, the hart's number in golem's
+-- four-hart SoC; the other information registers and misa read 0)
+def coreCsrRead {r : HwTy → Type} [Hw r] (hart : Nat) (c : CsrFile r) (tval mip : r B32) (a : r B12) : r B32 :=
   Hw.mux (isK a Csr.aMstatus) c.mstatus
     (Hw.mux (isK a Csr.aMie) c.mie
     (Hw.mux (isK a Csr.aMtvec) c.mtvec
@@ -243,7 +283,8 @@ def coreCsrRead {r : HwTy → Type} [Hw r] (c : CsrFile r) (tval mip : r B32) (a
     (Hw.mux (isK a Csr.aMepc) c.mepc
     (Hw.mux (isK a Csr.aMcause) c.mcause
     (Hw.mux (isK a Csr.aMtval) tval
-    (Hw.mux (isK a Csr.aMip) mip (Hw.lit 32 0))))))))
+    (Hw.mux (isK a Csr.aMip) mip
+    (Hw.mux (isK a Csr.aMhartid) (Hw.lit 32 hart) (Hw.lit 32 0)))))))))
 -- `c and x` for a control signal `c` (one that the instruction alone determines) and a
 -- data-dependent `x`, as a multiplexer: at values with `c` known it reduces whatever `x`
 -- is, which the single-instruction proofs need (`Hw.and 0 x` is stuck for a symbolic
@@ -389,7 +430,7 @@ def decode {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (w : r B32) : Dec r
 -- `cache` enables the private L1. With `cache = false` every DDR access is one word
 -- on the bus (no tag, no line fill) and the L1's memories are never written, so yosys
 -- removes them: the hart is then 4 RAMB36 (16 KB of local RAM) instead of 8.
-def coreStepC {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx cache : Bool) (s : CoreSt ab wb r) (x : In r) :
+def coreStepHC {r : HwTy → Type} [Hw r] (hart ab wb : Nat) (mx cache : Bool) (s : CoreSt ab wb r) (x : In r) :
     r (HwTy.prod (CoreSt.code ab wb) Out.code) :=
   let ph := s.ph;
   let inF := isK ph Ph.f;
@@ -460,7 +501,7 @@ def coreStepC {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx cache : Bool) (s : Co
   let npc := Hw.mux jump target pcInc;
   -- CSRs: read the addressed register, and the new value a CSR instruction writes
   let mip := In.mip x;
-  let csrOld := coreCsrRead s.csr s.tval mip d.csrAddr;
+  let csrOld := coreCsrRead hart s.csr s.tval mip d.csrAddr;
   let csrSrc := Hw.mux (Hw.or (isK d.f3 1) (Hw.or (isK d.f3 2) (isK d.f3 3)))
     a (Hw.cat (Hw.lit 27 0) d.r1);
   let csrNew := Hw.mux (Hw.or (isK d.f3 1) (isK d.f3 5)) csrSrc
@@ -487,50 +528,45 @@ def coreStepC {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx cache : Bool) (s : Co
     (Hw.mux misJ target (Hw.mux (Hw.or misL (Hw.and misA d.lr)) sum
     (Hw.mux (Hw.or misS (Hw.and misA (Hw.not d.lr))) sum (Hw.lit 32 0))))));
   let trapE := Hw.and inE (Hw.not (isK code 0));
-  -- an interrupt is taken between instructions: MIE, a pending enabled bit, and a
-  -- handler (a zero mtvec is "no handler", as for an exception)
+  -- an interrupt is taken between instructions, in E before the instruction there:
+  -- MIE and a pending enabled bit. It always goes to the vector (a zero mtvec
+  -- included); only an exception halts while mtvec is 0 (docs/csr.md). A WFI is not
+  -- interrupted: it waits in E until `mip & mie` is not zero, completes, and the
+  -- interrupt is taken on the next instruction (as `Rv.step`).
   let handled := Hw.not (isK s.csr.mtvec 0);
   let irqOn := Hw.and mip s.csr.mie;
-  let irqCode : r B4 := Hw.mux (bitOf Csr.meipBit irqOn) (Hw.lit 4 Csr.meiCause)
-    (Hw.mux (bitOf Csr.msipBit irqOn) (Hw.lit 4 Csr.msiCause) (Hw.lit 4 Csr.mtiCause));
-  let intr := Hw.and inE (Hw.and handled
+  let irqCode := coreIrqCode irqOn;
+  let intr := Hw.and inE (Hw.and (Hw.not d.wfi)
     (Hw.and (bitOf Csr.mieBit s.csr.mstatus) (Hw.not (isK irqOn 0))));
   let takeTrap := Hw.or trapE intr;
-  let enterTrap := Hw.and takeTrap handled;
   let stopTrap := Hw.and trapE (Hw.not handled);
-  -- a store to the output port waits in E while the output is busy
+  let enterTrap := Hw.and takeTrap (Hw.not stopTrap);
+  -- a store to the output port waits in E while the output is busy; a WFI while no
+  -- enabled interrupt is pending
   let io := bitOf 31 sum;
-  let wait := gate (gate d.store io) (Hw.not x.txReady);
+  let wait := Hw.or (gate (gate d.store io) (Hw.not x.txReady)) (gate d.wfi (isK irqOn 0));
   let goE := gate inE (gate (isK code 0) (Hw.and (Hw.not wait) (Hw.not intr)));
   let retireM := Hw.and d.mret goE;
   let csrWe := Hw.and d.csr (Hw.and goE d.csrWrite);
-  -- `mcause`: an interrupt has bit 31 set
-  let excCause : r B32 := Hw.cat (Hw.lit 29 0) code;
+  let csrW := coreCsrWarl d.csrAddr csrNew;
+  -- `mcause`: an interrupt has bit 31 set; an exception the standard code
   let intCause : r B32 := Hw.or (Hw.lit 32 Csr.intrBit) (Hw.cat (Hw.lit 28 0) irqCode);
-  let trapCauseV := Hw.mux intr intCause excCause;
-  -- trap entry and mret update mstatus (MIE, MPIE, MPP = M)
-  let ms := s.csr.mstatus;
-  let oldMie := bitOf Csr.mieBit ms;
-  let msNoMie := Hw.and ms (Hw.lit 32 4294967287);
-  let msPie := Hw.mux oldMie (Hw.or msNoMie (Hw.lit 32 128))
-    (Hw.and msNoMie (Hw.lit 32 4294967167));
-  let trapMs := Hw.or msPie (Hw.lit 32 6144);
-  let mpie := bitOf Csr.mpieBit ms;
-  let retMs0 := Hw.mux mpie (Hw.or ms (Hw.lit 32 8)) (Hw.and ms (Hw.lit 32 4294967287));
-  let retMs := Hw.or (Hw.or retMs0 (Hw.lit 32 128)) (Hw.lit 32 6144);
-  let msN := Hw.mux takeTrap trapMs (Hw.mux retireM retMs
-    (Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMstatus)) csrNew s.csr.mstatus));
-  let mieN := Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMie)) csrNew s.csr.mie;
-  let mtvecN := Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMtvec)) csrNew s.csr.mtvec;
-  let mscratchN := Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMscratch)) csrNew s.csr.mscratch;
+  let trapCauseV := Hw.mux intr intCause (coreTrapMcause code);
+  -- trap entry and mret update mstatus (MIE, MPIE, MPP = M); a halt (`stopTrap`)
+  -- leaves it, as `Rv.stop` does, and records mepc/mcause/mtval
+  let msN := Hw.mux enterTrap (coreTrapMstatus s.csr.mstatus) (Hw.mux retireM (coreRetMstatus s.csr.mstatus)
+    (Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMstatus)) csrW s.csr.mstatus));
+  let mieN := Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMie)) csrW s.csr.mie;
+  let mtvecN := Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMtvec)) csrW s.csr.mtvec;
+  let mscratchN := Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMscratch)) csrW s.csr.mscratch;
   let mepcN := Hw.mux takeTrap s.pc
-    (Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMepc)) csrNew s.csr.mepc);
+    (Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMepc)) csrW s.csr.mepc);
   let mcauseN := Hw.mux takeTrap trapCauseV
-    (Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMcause)) csrNew s.csr.mcause);
+    (Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMcause)) csrW s.csr.mcause);
   let tvalN := Hw.mux intr (Hw.lit 32 0)
-    (Hw.mux trapE tvalE (Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMtval)) csrNew s.tval));
-  let mtvecJ := Hw.and s.csr.mtvec (Hw.lit 32 4294967292);
-  let pcN := Hw.mux enterTrap mtvecJ (Hw.mux retireM s.csr.mepc (Hw.mux goE npc s.pc));
+    (Hw.mux trapE tvalE (Hw.mux (Hw.and csrWe (isK d.csrAddr Csr.aMtval)) csrW s.tval));
+  let pcN := Hw.mux enterTrap (coreVector s.csr.mtvec intr irqCode)
+    (Hw.mux retireM s.csr.mepc (Hw.mux goE npc s.pc));
   -- a private-memory SC.W succeeds iff the reservation is for this word; its store
   -- happens in E. A shared SC.W is decided by the bus, and its success bit comes back
   -- as the load value.
@@ -743,6 +779,11 @@ def CoreSt.held {r : HwTy → Type} [Hw r] (ab wb : Nat) (rst en : r W1)
     c.amoA c.amoD c.amoO c.sf5 (Hw.mux rst (Hw.lit 2 0) c.ak)
     c.baop c.baf5 (CsrFile.reset rst c.csr));
   Hw.hold en z cur
+
+-- hart 0 (`mhartid` 0): every machine but golem's four-hart SoC
+def coreStepC {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx cache : Bool) (s : CoreSt ab wb r) (x : In r) :
+    r (HwTy.prod (CoreSt.code ab wb) Out.code) :=
+  coreStepHC 0 ab wb mx cache s x
 
 -- the single-hart configurations (the Arty board, the Doom machine, the proofs) keep
 -- the private L1; `coreStepC` is the parameterised form
