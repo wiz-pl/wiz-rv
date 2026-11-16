@@ -104,7 +104,10 @@ mem; DDR code does not pay this.
 
 `rv32im_arty_uart` (src/Rv/Board.wiz): the core's output port is a UART transmitter,
 its input port a receiver, 115473 baud (a little fast of the FT2232's 115384.6), BTN0
-resets the core, LD4 blinks, LD5 … LD7 show a trap code. The program (`Prog.demo` in
+resets the core, LD4 blinks, LD5 … LD7 show a trap code. The UART (`src/Rv/Uart.wiz`) is
+the Wiz library's `Hdl.Uart` through its board API (`lib/Hdl/UartBoard.wiz`), at the
+Arty's ten-bit, 866-cycles-per-bit divider; the same implementation is `wiz-arty`'s and
+`wiz-icestick-uart`'s (7 bits there). The program (`Prog.demo` in
 src/Rv/Progs.wiz, assembled by src/Rv/Asm.wiz) prints
 
 ```

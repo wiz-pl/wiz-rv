@@ -1,8 +1,22 @@
 import Rv.Core
--- An 8N1 UART: a baud divider, a transmitter, a receiver and an input synchroniser.
--- Taken from wiz-arty's src/Arty/Uart.wiz (itself wiz-icestick-uart's Icestick.Uart with
--- ten-bit baud counters), with its small vocabulary from src/Arty/Gates.wiz. `n` is the
--- number of clock cycles per bit.
+import Hdl.UartBoard
+-- The RV boards' UART: the shared 8N1 UART of the Wiz library (`lib/Hdl/Uart.wiz`),
+-- through its board API (`lib/Hdl/UartBoard.wiz`). Nothing of the protocol is defined
+-- here. This page fixes the width of the clocks-per-bit counter (ten bits, 1 … 1024
+-- cycles per bit, as the Arty's 100 MHz / 866 needs), declares the bundles the boards
+-- are written against (the shapes of `UartB.Tx`, `UartB.Rx`, `UartB.Sync`, …), and
+-- forwards every step function to the shared implementation. It was taken from
+-- wiz-arty's `src/Arty/Uart.wiz`; both are now the same shared implementation.
+--
+-- Why the bundles are declared here rather than aliased: Wiz structures are structural,
+-- so these declarations *are* `Uart.Tx 10`, `Uart.RxBits 10`, `Uart.Sync`, … (same
+-- fields, same order), and every part below takes them directly; a meta-level alias is
+-- not a structure, so `deriving Bundle` of a design that has one of them as a field
+-- could not see the nested `code`/`pack`/`unpack`.
+
+------------------------------------------------------------------------------------
+-- The small signal vocabulary the board modules share (they import this module for the
+-- UART, and it has always carried these).
 
 def B9 : HwTy := HwTy.bits 9
 def B10 : HwTy := HwTy.bits 10
@@ -19,20 +33,8 @@ def frame9 {r : HwTy → Type} [Hw r] (d : r W8) : r B9 := Hw.cat (Hw.lit 1 1) d
 def shiftIn9 {r : HwTy → Type} [Hw r] (x : r B9) (b : r W1) : r B9 := Hw.cat b (Hw.slice 1 8 x)
 def shiftIn8 {r : HwTy → Type} [Hw r] (x : r W8) (b : r W1) : r W8 := Hw.cat b (Hw.slice 1 7 x)
 
--- The baud divider: a 10-bit counter that counts 0 … n-1 (n ≤ 1024); `tick` is high in
--- the last cycle of each period.
-
-def baudStep {r : HwTy → Type} [Hw r] (n : Nat) (c : r B10) : r (HwTy.prod B10 W1) :=
-  let t := Hw.label "tick" (eqLit c (n - 1));
-  Hw.pair (Hw.mux t (Hw.lit 10 0) (inc c)) t
-
 ------------------------------------------------------------------------------------
--- The transmitter. State: the line (a register of its own, so the pin is driven by a
--- flip-flop and cannot glitch), the number of bit periods left (0: idle), the baud
--- counter, and a 9-bit shift register (stop bit on top of the data, least significant
--- bit first; ones are shifted in).
---
--- `start` with `data` is taken when idle and ignored otherwise.
+-- The bundles (the shapes of the shared ones, at the boards' counter width).
 
 structure UTx (r : HwTy → Type) where
   line : r W1
@@ -41,34 +43,15 @@ structure UTx (r : HwTy → Type) where
   sh : r B9
   deriving Bundle
 
-def UTx.init : UTx HwTy.El := UTx.mk (BitVec.ofNat 1 1) (BitVec.ofNat 4 0) (BitVec.ofNat 10 0) (BitVec.ofNat 9 511)
-
-def txIdle {r : HwTy → Type} [Hw r] (s : UTx r) : r W1 := eqLit s.left 0
-
-def txStep {r : HwTy → Type} [Hw r] (n : Nat) (s : UTx r) (start : r W1) (d : r W8) : r UTx.code :=
-  let idle := txIdle s;
-  let go := band idle start;
-  let b := baudStep n s.cnt;
-  let tick := band (bnot idle) (Hw.snd b);
-  UTx.pack (UTx.mk
-    (Hw.mux go lo (Hw.mux tick (Hw.slice 0 1 s.sh) s.line))
-    (Hw.mux go (Hw.lit 4 10) (Hw.mux tick (dec s.left) s.left))
-    (Hw.mux go (Hw.lit 10 0) (Hw.fst b))
-    (Hw.mux go (frame9 d) (Hw.mux tick (shiftIn9 s.sh hi) s.sh)))
-
-------------------------------------------------------------------------------------
--- The receiver. State: the phase (0: idle, 10: in the start bit, 9 … 2: data bits,
--- 1: stop bit), the baud counter and the shift register.
---
--- A low line when idle starts a frame; half a bit later the line must still be low
--- (otherwise it was a glitch), and from there the line is sampled once per bit period,
--- i.e. in the middle of each bit. `valid` is high for one cycle, at the sample of a
--- stop bit that is high, and `data` is the byte then.
-
 structure Rx (r : HwTy → Type) where
   ph : r B4
   cnt : r B10
   sh : r W8
+  deriving Bundle
+
+structure Sync (r : HwTy → Type) where
+  ff1 : r W1
+  ff2 : r W1
   deriving Bundle
 
 structure Byte (r : HwTy → Type) where
@@ -76,31 +59,25 @@ structure Byte (r : HwTy → Type) where
   data : r W8
   deriving Bundle
 
-def Rx.init : Rx HwTy.El := Rx.mk (BitVec.ofNat 4 0) (BitVec.ofNat 10 0) (BitVec.ofNat 8 0)
-
-def rxStep {r : HwTy → Type} [Hw r] (n : Nat) (s : Rx r) (rx : r W1) : r (HwTy.prod Rx.code Byte.code) :=
-  let idle := eqLit s.ph 0;
-  let inStart := eqLit s.ph 10;
-  let inStop := eqLit s.ph 1;
-  let fall := band idle (bnot rx);
-  let startTick := band inStart (eqLit s.cnt (Nat.div n 2 - 1));
-  let tick := band (bnot idle) (band (bnot inStart) (eqLit s.cnt (n - 1)));
-  let ph := Hw.mux fall (Hw.lit 4 10)
-    (Hw.mux startTick (Hw.mux rx (Hw.lit 4 0) (Hw.lit 4 9)) (Hw.mux tick (dec s.ph) s.ph));
-  let cnt := Hw.mux (bor fall (bor startTick tick)) (Hw.lit 10 0) (inc s.cnt);
-  let sh := Hw.mux (band tick (bnot inStop)) (shiftIn8 s.sh rx) s.sh;
-  Hw.pair (Rx.pack (Rx.mk ph cnt sh)) (Byte.pack (Byte.mk (band tick (band inStop rx)) s.sh))
+def UTx.init : UTx HwTy.El := Uart.Tx.init Uart.cntW10
+def Rx.init : Rx HwTy.El := Uart.RxBits.init Uart.cntW10
+def Sync.init : Sync HwTy.El := Uart.Sync.init
 
 ------------------------------------------------------------------------------------
--- The input synchroniser: the RX pin is asynchronous to the clock, so it goes through
--- two flip-flops before anything looks at it. Both idle high.
+-- The parts, as step functions (the shapes `Rv.Board`, `Rv.PBoard` and `Rv.Doom` are
+-- written against).
 
-structure Sync (r : HwTy → Type) where
-  ff1 : r W1
-  ff2 : r W1
-  deriving Bundle
+def baudStep {r : HwTy → Type} [Hw r] (n : Nat) (c : r B10) : r (HwTy.prod B10 W1) :=
+  UartB.baudStep Uart.cntW10 n c
 
-def Sync.init : Sync HwTy.El := Sync.mk (BitVec.ofNat 1 1) (BitVec.ofNat 1 1)
-def syncStep {r : HwTy → Type} [Hw r] (s : Sync r) (pin : r W1) : r Sync.code := Sync.pack (Sync.mk pin s.ff1)
+def txIdle {r : HwTy → Type} [Hw r] (s : UTx r) : r W1 := UartB.txIdle Uart.cntW10 s
 
-------------------------------------------------------------------------------------
+def txStep {r : HwTy → Type} [Hw r] (n : Nat) (s : UTx r) (start : r W1) (d : r W8) : r UTx.code :=
+  UartB.txStep Uart.cntW10 n s start d
+
+def syncStep {r : HwTy → Type} [Hw r] (s : Sync r) (pin : r W1) : r Sync.code :=
+  Uart.syncStep s pin
+
+def rxStep {r : HwTy → Type} [Hw r] (n : Nat) (s : Rx r) (rx : r W1) :
+    r (HwTy.prod Rx.code Byte.code) :=
+  UartB.rxStep Uart.cntW10 n s rx
