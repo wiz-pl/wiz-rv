@@ -51,27 +51,18 @@ the trailing alignment word of the 2.0 signature region (e.g. `add-01` has 584
 words: 583 results and the `0x00000000` pad), which is exactly what the suite's
 own `+signature` dump compares.
 
-## The machine's Zicsr subset
+## The machine's Zicsr support
 
-The core is explicitly “without CSRs” in `README.md`; the Zicsr tests need one
-writable CSR.  The implementation adds only what the suite names through
-`RVTEST_TEST_CSR`:
-
-* `mscratch` (0x340), and the six CSR instructions (`CSRRW`, `CSRRS`, `CSRRC`,
-  `CSRRWI`, `CSRRSI`, `CSRRCI`) with the standard “no write when rs1/uimm is
-  zero” rule for the set/clear forms.  Any other CSR number, and the privileged
-  `funct3` encodings, remain illegal instructions (cause 3, `mtval` = the word).
-
-It is in both `src/Rv/Isa.wiz` (the specification, `Arch.csr`) and
-`src/Rv/Core.wiz` (`CoreSt.csr`, decoded in `Dec.csr`/`Dec.csru`), so the
-lockstep checker compares it too.  The pipelined core (`Pipe.wiz`) does not
-implement it; its arch-test coverage remains the I/M suite.
-
-**Conflict note.**  Branch `agent/golem-atomics` is editing `src/Rv/Core.wiz`
-(atomics: `CoreSt` fields, `Dec`, `coreStep`) and `src/Rv/Isa.wiz`.  This
-branch's changes are deliberately additive at the ends of `Arch`, `CoreSt` and
-`Dec` and at the end of `coreStep`, so a rebase/merge should be mechanical
-(`Arch.mk`, `CoreSt.mk` positional arguments need the new field).
+The Zicsr programs need one writable CSR, which they name through
+`RVTEST_TEST_CSR`: `mscratch` (0x340), with the six CSR instructions (`CSRRW`,
+`CSRRS`, `CSRRC`, `CSRRWI`, `CSRRSI`, `CSRRCI`) and the standard "no write when
+rs1/uimm is zero" rule for the set/clear forms. The machine's full CSR file
+(golem-csr: `mstatus`, `mie`, `mtvec`, `mscratch`, `mepc`, `mcause`, `mtval`, `mip`,
+`mhartid`, MRET, WFI; docs/csr.md) is in both `src/Rv/Isa.wiz` (`Arch.csr`) and
+`src/Rv/Core.wiz` (`CoreSt.csr`), so the lockstep checker compares it, and
+`Prog.csr` (tests/lockstep.wiz) exercises all six forms on `mscratch`. An earlier
+version of this branch carried its own one-register Zicsr subset; it was replaced
+by that CSR file when the branch was merged with golem-csr.
 
 ## Commands
 
