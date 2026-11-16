@@ -159,6 +159,6 @@ def Tr.isaMain (path : String) : IO Unit :=
     match Fx.ofLines (Fx.lines text) with
     | .none => IO.println ("oracle: bad fixture " ++ path)
     | .some fx =>
-      let c := Cfg.mk 5 fx.mbits .false;
+      let c := Cfg.mk 5 fx.mbits .false .false;
       Tr.say (List.append (Tr.header fx "isa")
         (Tr.isaGo c fx fx.steps 0 (Arch.start c fx.words))))
