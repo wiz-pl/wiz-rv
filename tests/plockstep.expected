@@ -16,7 +16,7 @@
 62 instructions, 70 cycles, trap 2, out 252 246 10 128 1 0 0 1 1 0 250 251 1 149 1 0 1 0 6 4 249 69 35 0 agrees
 14 instructions, 18 cycles, trap 3, out agrees
 206 instructions, 690 cycles, trap 2, out 20 0 0 2 1 6 0 0 128 0 128 128 128 0 0 128 0 0 0 0 0 0 132 132 agrees
-7 instructions, 16 cycles, trap 0, out DISAGREES; after 7 instructions; pc: core 22, spec 20
+74 instructions, 112 cycles, trap 2, out 10 20 0 20 1 agrees
 44 instructions, 81 cycles, trap 2, out 10 20 0 20 1 agrees
 1 instructions, 6 cycles, trap 3, out agrees
 1 instructions, 6 cycles, trap 3, out agrees

@@ -289,9 +289,12 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
   let ω bu := s.bus;
   -- C: a 32-bit instruction at pc[1] = 1 needs one more fetch: the word at pc + 2.
   -- (A 16-bit instruction's halfword has bits [1:0] != 11; `wD` is the halfword when
-  -- pc[1] = 1, so its low bits say which it is.)
+  -- pc[1] = 1, so its low bits say which it is.) Only for a word D will issue: not while
+  -- D is empty, frozen, or holding the squashed word after a taken branch (`fe.rdr`),
+  -- whose halfword would otherwise set `h2` for the branch target's fetch.
   let h2need : r W1 := Hw.and ihit (Hw.and (Hw.not fe.h2)
-    (Hw.and fe.al (isK (Hw.slice 0 2 wD : r B2) 3)));
+    (Hw.and fe.al (Hw.and (isK (Hw.slice 0 2 wD : r B2) 3)
+      (Hw.and fe.v (Hw.and (isK fe.fz 0) (Hw.not fe.rdr))))));
   ----------------------------------------------------------------- R
   let rTrap := Hw.not (isK rr.trap 0);
   let killMiss := Hw.or rr.imiss (gate rr.v (gate (Hw.not rTrap) rr.miss));

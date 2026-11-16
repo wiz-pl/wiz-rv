@@ -42,9 +42,9 @@ def aluI : String := report 5 Prog.alu 400
 -- RV32IM: the M extension (and without it, MUL is illegal)
 def mulI : String := report 5 Prog.muldivShort 400
 def mulIM : String := reportM 5 .true Prog.muldivShort 3000
--- the C extension: the illegal 16-bit encodings (the full compressed twin is in
--- tests/lockstep.wiz; the pipeline's redirect/squash path for a taken branch with
--- compressed targets is a known gap, FINDINGS H12, so it is not in this file yet)
+-- the C extension: the compressed program and its uncompressed twin (same state)
+def cE : String := report 4 (Prog.cProg Prog.cPad) 800
+def cUE : String := report 4 Prog.uProg 800
 -- an illegal 16-bit encoding (C.FLD: no FP) and the reserved zero C.ADDI4SPN
 def cBadE : List String := .cons (report 4 Prog.cIllegal 20) (.cons (report 4 Prog.cIllegal0 20) .nil)
 -- the Doom machine's boot loader (on-chip RAM, 16 KB), loading a program into DDR over
@@ -70,6 +70,7 @@ def all : List String :=
   List.append (sumE :: aluE :: shiftE :: memE :: branchE :: sortE :: .nil)
     (List.append trapsE
       (List.append (ddrE :: ioE :: x16I :: aluI :: mulI :: mulIM :: .nil)
-        (List.append cBadE (bootE :: ctestE :: .nil))))
+        (List.append (cE :: cUE :: .nil)
+          (List.append cBadE (bootE :: ctestE :: .nil)))))
 
 def main : IO Unit := say all

@@ -411,3 +411,12 @@ kernel terms before that), so `proofs/CoreProofs.wiz` is now opt-in
 themselves are unchanged; the next step is a C-aware restatement that caches the decoded
 instruction (or a proof about `decode`'s expansion separately) so `rfl` sees the small
 32-bit path. This is a real gap: `grail build` no longer checks the core proofs.
+
+The pipeline's second-fetch request (`h2need`) was first computed from D's word
+whatever D held. In the cycle after a taken branch D holds the squashed word (`fe.rdr`),
+and when that word's halfword looked like the first half of a 32-bit instruction at
+`pc[1] = 1`, `h2` was set for the branch target's fetch: the target's first halfword
+was then glued to the stale `w1`, and the compressed program retired a wrong
+instruction after C.BNEZ (x12 = 198 where the specification has 20). `h2need` is now
+gated by D being live (`fe.v`, `fz = 0`, not `fe.rdr`), and `tests/plockstep.wiz` runs
+the compressed program and its twin, both agreeing with the specification.
