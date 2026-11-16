@@ -307,10 +307,58 @@ def Intc.readClint {r : HwTy → Type} [Hw r] (s : Intc.Clint r) (off : r (HwTy.
                           (mux Intc.clintMtime (Hw.slice 0 32 s.mtime)
                             (mux (Intc.clintMtime + 4) (Hw.slice 32 32 s.mtime) Intc.zero)))))))))))))
 
+-- the same reads as balanced multiplexers on the offset's bits, with the exact-match and
+-- range conditions beside them (the priority chains above put up to 14 compares and
+-- multiplexers between the offset and the data: a critical path of doom_top, into the
+-- core's load result). Every offset reads what `Intc.readMbox`, `readPlic` and
+-- `readClint` give, behind `inMbox`, `inPlic`, `inClint`:
+--   mbox  0x1000 + 4i, i < 12: data/status of harts 0 … 3, then boot 0 … 3
+--   plic  0x2000 … 0x201f (any low bits): a priority; 0x2020 pending; 0x2040/60/80 + 4c
+--         enable, threshold, claim of context c
+--   clint 0x4000 + 4h msip, 0x8000 + 4j mtimecmp (low/high of hart j/2), 0xfff8/c mtime
+def Intc.m4 {r : HwTy → Type} [Hw r] (sel : r B2) (v0 v1 v2 v3 : r B32) : r B32 :=
+  Hw.mux (bitOf 1 sel) (Hw.mux (bitOf 0 sel) v3 v2) (Hw.mux (bitOf 0 sel) v1 v0)
+def Intc.m8 {r : HwTy → Type} [Hw r] (sel : r B3) (v0 v1 v2 v3 v4 v5 v6 v7 : r B32) : r B32 :=
+  Hw.mux (bitOf 2 sel) (Intc.m4 (Hw.slice 0 2 sel) v4 v5 v6 v7) (Intc.m4 (Hw.slice 0 2 sel) v0 v1 v2 v3)
 def Intc.read {r : HwTy → Type} [Hw r] (s : Intc.Ctl r) (src : r B7) (off : r (HwTy.bits 16)) : r B32 :=
-  Hw.mux (Intc.inMbox off) (Intc.readMbox s.clint off)
-    (Hw.mux (Intc.inPlic off) (Intc.readPlic s.plic src off)
-      (Hw.mux (Intc.inClint off) (Intc.readClint s.clint off) Intc.zero))
+  let ω cl := s.clint;
+  let ω pl := s.plic;
+  let z := Intc.zero;
+  let w0 := isK (Hw.slice 0 2 off : r B2) 0;
+  let hi8 : r W8 := Hw.slice 8 8 off;
+  let s2 : r B2 := Hw.slice 2 2 off;
+  let s3 : r B3 := Hw.slice 2 3 off;
+  let v := fun (k : Nat) => Intc.zext (Intc.mboxValid cl k);
+  -- the mailbox block: bits 5:2 pick, bits 7:6 and 1:0 are 0
+  let mb := Hw.mux (bitOf 5 off) (Hw.mux (bitOf 4 off) z (Intc.m4 s2 cl.boot0 cl.boot1 cl.boot2 cl.boot3))
+    (Intc.m8 s3 cl.mbox0 (v 0) cl.mbox1 (v 1) cl.mbox2 (v 2) cl.mbox3 (v 3));
+  let mbOk := Hw.and w0 (isK (Hw.slice 6 2 off : r B2) 0);
+  -- the PLIC block: bits 7:5 the group, 4 zero, 3:2 the context
+  let prio := Intc.zext (Hw.memRead pl.pr (Hw.slice 2 3 off));
+  let claim := fun (c : Nat) => Intc.zext (Intc.best pl src c);
+  let grp : r B3 := Hw.slice 5 3 off;
+  let pg := Intc.m8 grp prio
+    (Hw.mux (isK s2 0) (Intc.zext pl.pend) z)
+    (Intc.m4 s2 (Intc.zext pl.en0) (Intc.zext pl.en1) (Intc.zext pl.en2) (Intc.zext pl.en3))
+    (Intc.m4 s2 (Intc.zext pl.thr0) (Intc.zext pl.thr1) (Intc.zext pl.thr2) (Intc.zext pl.thr3))
+    (Intc.m4 s2 (claim 0) (claim 1) (claim 2) (claim 3)) z z z;
+  let pgOk := Hw.or (isK grp 0) (Hw.and w0 (Hw.not (bitOf 4 off)));
+  -- the CLINT: bits 15:14 the region (01 msip, 10 mtimecmp, 11 mtime), with the bits
+  -- between it and the index all 0 (all 1 for mtime)
+  let c14 : r B2 := Hw.slice 14 2 off;
+  let msipR := Intc.m4 s2 (Intc.zext (Hw.slice 0 1 cl.msip)) (Intc.zext (Hw.slice 1 1 cl.msip))
+    (Intc.zext (Hw.slice 2 1 cl.msip)) (Intc.zext (Hw.slice 3 1 cl.msip));
+  let cmpR := Intc.m8 s3 (Hw.slice 0 32 cl.cmp0) (Hw.slice 32 32 cl.cmp0) (Hw.slice 0 32 cl.cmp1)
+    (Hw.slice 32 32 cl.cmp1) (Hw.slice 0 32 cl.cmp2) (Hw.slice 32 32 cl.cmp2)
+    (Hw.slice 0 32 cl.cmp3) (Hw.slice 32 32 cl.cmp3);
+  let timeR := Hw.mux (bitOf 2 off) (Hw.slice 32 32 cl.mtime) (Hw.slice 0 32 cl.mtime);
+  let cR := Intc.m4 c14 z msipR cmpR timeR;
+  let cOk := Hw.and w0 (Hw.mux (bitOf 15 off)
+    (Hw.mux (bitOf 14 off) (isK (Hw.slice 3 11 off : r (HwTy.bits 11)) 2047) (isK (Hw.slice 5 9 off : r (HwTy.bits 9)) 0))
+    (gate (bitOf 14 off) (isK (Hw.slice 4 10 off : r (HwTy.bits 10)) 0)));
+  Hw.mux (isK hi8 16) (Hw.mux mbOk mb z)
+    (Hw.mux (isK hi8 32) (Hw.mux pgOk pg z)
+      (Hw.mux (Hw.not (isK c14 0)) (Hw.mux cOk cR z) z))
 
 -- one clock: `mtime` counts when `tick`, the core's writes and reads are taken, and the
 -- live sources are folded into the pending bits
