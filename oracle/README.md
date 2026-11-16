@@ -187,19 +187,27 @@ and `--all-insns` **45/45 PASS** (37 base-I + 8 M), no skips.
 ```
 <name>
 <cfg> <mbits> <steps> <mem_base> <mem_count>
-<instruction word, 8 hex digits, little-endian at address 0>
+<instruction, 8 hex digits (32-bit, two halfwords, low first)
+             or 4 hex digits (16-bit, C) at address 0>
 ...
 ```
 
 All fixtures are `rv32i|rv32im 14 <steps> 8192 256`: 16 KB of memory, program at
 0, and the compared data region `0x2000 … 0x20ff` (outside Spike's boot ROM).
-They use only the base-I encodings plus, in the eight `rv32im` fixtures, the M
-extension; no `A`/`F`/`D`/`C` and no I/O port. The five
+The base fixtures use only RV32I encodings; the eight `rv32im` fixtures add the M
+extension, and `compressed` the C extension; no `A`/`F`/`D` and no I/O port. The five
 `alu`/`branch`/`mem`/`shift`/`mixed` fixtures and the eight M fixtures have no
 traps or misaligned accesses. The six `trap_*` fixtures stop the Wiz machine on
 one trap each and are compared between `isa`, `core` and `py`; Sail and Spike are
 **skipped** for them, because they enter a trap handler (none is installed) where
 the Wiz machine stops, so the harness says `SKIP` rather than pretending they agree.
+
+`compressed` is the C extension: a hand-written sequence of 16-bit instructions
+(every form the machine implements), with a 32-bit LUI at an odd halfword so the
+two-word fetch a 32-bit instruction at `pc[1] = 1` needs is exercised, ending in
+EBREAK. It is compared between `isa`, `core` and `py`; Sail and Spike are skipped
+for it too (their configurations here are rv32i, without C). Its last state is
+cause 2, `epc` at the EBREAK.
 
 * `alu` — every ALU form, signed/unsigned compares, shifts by 0/1/31, LUI/AUIPC,
   x0 and same-value writes.
@@ -215,7 +223,10 @@ the Wiz machine stops, so the harness says `SKIP` rather than pretending they ag
 * `trap_ecall`, `trap_ebreak` — cause 1/2, `tval` 0.
 * `trap_illegal` — an all-ones word: cause 3, `tval` the instruction word.
 * `trap_load`, `trap_store` — LW/SW at 2: cause 5/6, `tval` the address 2.
-* `trap_jump` — JALR to 2: cause 4, `tval` the target 2.
+* `jump2` — with C a jump to a halfword boundary is legal: C.J to 2 executes the
+  C.ADDI there and then EBREAKs (cause 2). `Trap.jump` is unreachable through the
+  encodings now (JALR clears bit 0; JAL/branch offsets are even), so the old
+  `trap_jump` fixture no longer has a trap to show.
 
 In each trap fixture `epc` is 4 (the second instruction, where the machine stops)
 and the trace repeats the stopped state to `steps + 1` lines, as the ISA does.
@@ -282,8 +293,9 @@ and skips cleanly when a build or tool is missing.
 ## Limits and the next oracle step
 
 * The comparison is over finite traces of base-I/M programs with on-chip memory.
-  It covers traps (cause/tval/epc, `isa`/`core`/`py` only) but not the pipeline
-  (`Rv.Pipe`), caches/DDR, the bus, the Doom SoC, or the I/O port.
+  It covers traps (cause/tval/epc, `isa`/`core`/`py` only) and the C extension
+  (`compressed`, `isa`/`core`/`py` only) but not the pipeline (`Rv.Pipe`),
+  caches/DDR, the bus, the Doom SoC, or the I/O port.
 * `Rv.Isa` and the core share one author; `py` and Sail are independent of Wiz's
   code but not of the *machine description* (trap policy, memory map).
 * Next: (a) a `PLockstep`-driven pipeline trace in the same format (see §12b of

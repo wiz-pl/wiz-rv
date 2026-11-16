@@ -115,12 +115,7 @@ def Pf.EnterClaim (w : Nat) : Prop := Pf.EnterClaimAt Pf.withH w
 -- fetches the same word) does the same. `hs` is the specification's fetch.
 
 -- `Rv.step` with the fetched word given
-def Pf.stepF (c : Cfg) (s : Arch) (w : Nat) : Arch :=
-  if Nat.beq s.trap 0 then
-    (if Bool.and (Rv.takeIrq s) (Bool.not (Nat.beq w Rv.wfiWord))
-     then Rv.enterTrap s (Rv.irqCause s) (Rv.w32 0) .true
-     else Rv.exec c s w)
-  else s
+def Pf.stepF (c : Cfg) (s : Arch) (w : Nat) : Arch := Rv.stepW c s w
 
 def Pf.IrqClaim (x : In HwTy.El) (p : Arch → Arch) (w : Nat) : Prop :=
   (a : Arch) → (m0 m1 m2 m3 : BitVec 9 → BitVec 8) → (x1 x2 acc dv rm : BitVec 32) → (cnt srd : BitVec 5) → (sf3 : BitVec 3) → (slo : BitVec 2) → (sio : BitVec 1) →
