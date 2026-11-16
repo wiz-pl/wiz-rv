@@ -553,12 +553,20 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
   -- the decode of both views of D's word, picked by its low bits: a 32-bit instruction's
   -- decode does not wait for the C expansion (`decode` = this, field by field)
   let cD : r W1 := Hw.not (isK (Hw.slice 0 2 wD : r B2) 3);
-  let ω d := Dec.sel cD (decodeX ab mx (Hw.lit 1 1) (Cx.expand (Hw.slice 0 16 wD : r B16)))
-    (decodeX ab mx (Hw.lit 1 0) wD);
-  let immD := Hw.mux (Hw.or d.lui d.auipc) d.immU (Hw.mux d.jal d.immJ (Hw.mux d.branch d.immB (Hw.mux d.store d.immS d.immI)));
+  let dC := decodeX ab mx (Hw.lit 1 1) (Cx.expand (Hw.slice 0 16 wD : r B16));
+  let dW := decodeX ab mx (Hw.lit 1 0) wD;
+  let ω d := Dec.sel cD dC dW;
+  -- (the immediate of each view, picked afterwards like the fields)
+  let immOf := fun (x : Dec r) =>
+    (Hw.mux (Hw.or x.lui x.auipc) x.immU (Hw.mux x.jal x.immJ (Hw.mux x.branch x.immB (Hw.mux x.store x.immS x.immI))) : r B32);
+  let immD := Hw.mux cD (immOf dC) (immOf dW);
   let byp := fun (rs : r B5) (v : r B32) => (Hw.mux (Hw.and rr.we (Hw.eq rr.rd rs)) rr.val v : r B32);
-  let rv1 := byp d.r1 (Hw.memRead ms.rfa (regIx ab d.r1));
-  let rv2 := byp d.r2 (Hw.memRead ms.rfb (regIx ab d.r2));
+  -- the register file read for both views of the word, picked afterwards (a 32-bit
+  -- instruction's register numbers are bits of the word, not the decode's output; yosys
+  -- gives each read its own LUT RAM)
+  let rdByp := fun (rs : r B5) (m : r (HwTy.mem ab 32)) => (byp rs (Hw.memRead m (regIx ab rs)) : r B32);
+  let rv1 := Hw.mux cD (rdByp dC.r1 ms.rfa) (rdByp dW.r1 ms.rfa);
+  let rv2 := Hw.mux cD (rdByp dC.r2 ms.rfb) (rdByp dW.r2 ms.rfb);
   let u1 := Hw.not (Hw.or (Hw.or d.lui d.auipc) d.jal);
   let ar := Hw.or d.op d.opimm;
   let df3 := d.f3;
@@ -586,7 +594,16 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
   let fD := gate fe.v (gate run (Hw.not fe.rdr));
   -- the D-side read address: the instruction entering M, or the one staying there
   let rdA := Hw.mux stallM m.addr sum;
-  let ixF : r (HwTy.bits wb) := Hw.slice 2 wb nf;
+  -- the fetch memories' word address (`nf` without bits 1:0) from registers and two bits of
+  -- the fetched word, not through `h2need` (the tag compare) and the decode: with
+  -- pc[1] = 1 the next word is always the one after `fe.pc`'s (the second half of a
+  -- 32-bit instruction, or the instruction after a 16-bit one or after a 32-bit one's
+  -- second fetch); with pc[1] = 0 it is the next for a 32-bit instruction, the same for a
+  -- 16-bit one. (`h2` is only ever set with `al`.)
+  let wordInc := Hw.or fe.al (isK (Hw.slice 0 2 raw1 : r B2) 3);
+  let nfA := Hw.mux (isK fz 3) fe.rpc
+    (Hw.mux fe.rdr fe.rtgt (Hw.mux wordInc (Hw.add fe.pc (Hw.lit 32 4)) fe.pc));
+  let ixF : r (HwTy.bits wb) := Hw.slice 2 wb nfA;
   let ixD : r (HwTy.bits wb) := Hw.slice 2 wb rdA;
   ----------------------------------------------------------------- next state
   let eHold := gate (Hw.not kill) hold;
@@ -671,7 +688,7 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
     iFill (Hw.or iFill (gate ddrSt ihitD)) (Hw.mux iFill fIdx mLine) fillLine
     (Hw.mux iFill (Pp.tagOf wb bu.faddr) (Hw.lit (L1.tagW wb) 0));
   let oLane := fun (l : Nat) => (Hw.slice (8 * l) 8 wr.oD : r W8);
-  let ixFL := Pp.idx wb nf;
+  let ixFL := Pp.idx wb nfA;
   let ixDL := Pp.idx wb rdA;
   let ω msN := PpMem.mk
     (Hw.memWrite ms.mi0 (bitOf 0 wr.oWe) wr.oIx (oLane 0)) (Hw.memWrite ms.mi1 (bitOf 1 wr.oWe) wr.oIx (oLane 1))
