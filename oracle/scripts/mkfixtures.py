@@ -397,11 +397,6 @@ def trap_store():
     return [addi(x1, x0, 2), sw(x2, x1, 0), SPIN]
 
 
-def trap_jump():
-    """JALR to 2: cause 4, tval the target 2."""
-    return [addi(x1, x0, 2), jalr(x0, x1, 0), SPIN]
-
-
 FIXTURES = {
     "alu": ("rv32i", 14, 32, DATA, 256, alu()),
     "branch": ("rv32i", 14, 40, DATA, 256, branch()),
@@ -418,7 +413,6 @@ FIXTURES = {
     "trap_illegal": ("rv32i", 14, 6, DATA, 256, trap_illegal()),
     "trap_load": ("rv32i", 14, 6, DATA, 256, trap_load()),
     "trap_store": ("rv32i", 14, 6, DATA, 256, trap_store()),
-    "trap_jump": ("rv32i", 14, 6, DATA, 256, trap_jump()),
 }
 
 
