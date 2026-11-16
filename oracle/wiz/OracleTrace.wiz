@@ -74,6 +74,18 @@ def Fx.tok (i : Nat) (l : List String) : Nat :=
                 | .none => 0)
   | .none => 0
 
+-- A fixture line is an instruction in hexadecimal: 8 digits is a 32-bit instruction
+-- (two halfwords, low first), 4 digits is a 16-bit (C) instruction. The image is
+-- halfwords, the same layout `Asm.assemble` produces.
+def Fx.halves1 (s : String) : List Nat :=
+  let n := Ox.parse s;
+  if Nat.le (List.length (String.chars (String.trim s))) 4 then .cons n .nil
+  else .cons (Rv.bits n 0 16) (.cons (Rv.bits n 16 16) .nil)
+def Fx.halves : List String → List Nat
+  | .nil => .nil
+  | .cons s ss => List.append (Fx.halves1 s) (Fx.halves ss)
+
+
 def Fx.ofLines : List String → Option Fx
   | .nil => .none
   | .cons name rest =>
@@ -85,7 +97,7 @@ def Fx.ofLines : List String → Option Fx
          | .some s => String.trim s
          | .none => "rv32i";
        .some (Fx.mk (String.trim name) cfg (Fx.tok 1 toks) (Fx.tok 2 toks) (Fx.tok 3 toks)
-         (Fx.tok 4 toks) (List.map Ox.parse ws)))
+         (Fx.tok 4 toks) (Fx.halves ws)))
 
 ------------------------------------------------------------------------------------
 -- State lines

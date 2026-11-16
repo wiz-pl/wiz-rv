@@ -178,8 +178,9 @@ def compare_traces(a, b, label, limit=20, max_steps=10):
 # A minimal ELF32 writer (no compiler needed)
 
 
-def build_elf(words, base, text_off=0x1000):
-    code = b"".join(struct.pack("<I", w & 0xFFFFFFFF) for w in words)
+def build_elf(halves, base, text_off=0x1000):
+    # the image is halfwords (a 32-bit instruction is two of them)
+    code = b"".join(struct.pack("<H", h & 0xFFFF) for h in halves)
     shstr = b"\x00.text\x00.shstrtab\x00"
     shstr_off = text_off + len(code)
     shoff = (shstr_off + len(shstr) + 3) & ~3
@@ -247,7 +248,7 @@ def spike_exe(explicit=None):
 def sail_trace(fx, tmp, exe):
     elf = os.path.join(tmp, fx.name + ".elf")
     with open(elf, "wb") as f:
-        f.write(build_elf(fx.words, 0))
+        f.write(build_elf(fx.halves, 0))
     log = os.path.join(tmp, fx.name + ".sail")
     cmd = [exe, "--rv32", "--config-override", SAIL_CFG,
            "--inst-limit", str(fx.steps + 1),
@@ -280,8 +281,8 @@ def parse_sail_log(path, fx):
     pc = 0
     regs = [0] * 32
     mem = bytearray(1 << fx.mbits)
-    for i, w in enumerate(fx.words):
-        mem[4 * i:4 * i + 4] = (w & 0xFFFFFFFF).to_bytes(4, "little")
+    for i, h in enumerate(fx.halves):
+        mem[2 * i:2 * i + 2] = (h & 0xFFFF).to_bytes(2, "little")
     pending = []
     with open(path) as f:
         lines = f.read().splitlines()
@@ -351,7 +352,7 @@ def spike_trace(fx, tmp, exe):
     base = 0x80000000
     elf = os.path.join(tmp, fx.name + ".spike.elf")
     with open(elf, "wb") as f:
-        f.write(build_elf(fx.words, base))
+        f.write(build_elf(fx.halves, base))
     log = os.path.join(tmp, fx.name + ".spike.log")
     mem_end = fx.mbase + fx.mcount
     regions = f"0x{fx.mbase:x}:0x{max(0x1000, (mem_end - fx.mbase + 0xfff) & ~0xfff):x},0x80000000:0x10000"
@@ -371,8 +372,8 @@ def parse_spike_log(text, fx, base):
     meta = {"trace": "spike"}
     regs = [0] * 32
     mem = bytearray(1 << fx.mbits)
-    for i, w in enumerate(fx.words):
-        mem[4 * i:4 * i + 4] = (w & 0xFFFFFFFF).to_bytes(4, "little")
+    for i, h in enumerate(fx.halves):
+        mem[2 * i:2 * i + 2] = (h & 0xFFFF).to_bytes(2, "little")
     commit = re.compile(r"^core\s+\d+:\s+\d+\s+0x([0-9a-fA-F]+) \(0x([0-9a-fA-F]+)\)(.*)$")
     for line in text.splitlines():
         m = commit.match(line)
@@ -565,8 +566,14 @@ def cmd_run(args):
                                            os.path.join(FIXDIR, name + ".hex"),
                                            os.path.join(TRACEDIR, f"{name}.pipe.trace"))
         trapfixture = name.startswith("trap")
+        # the compressed fixtures are isa/core/py only: the rv32i configurations of
+        # Sail and Spike used here have no C extension (and Spike's --isa is rv32i)
+        has_c = any((h & 3) != 3 for h in fx.halves)
         if "sail" in backends:
-            if trapfixture:
+            if has_c:
+                rep.skip(f"{name} sail: the fixture has C (16-bit) instructions; "
+                         f"this Sail configuration is rv32i")
+            elif trapfixture:
                 rep.skip(f"{name} sail: the Wiz machine stops on a trap; Sail enters a "
                          f"trap handler (no handler is installed)")
             elif not sail:
@@ -577,13 +584,16 @@ def cmd_run(args):
                 traces["sail"] = tr
                 print(f"# sail: {cmd}")
         if "spike" in backends:
-            if trapfixture:
+            if has_c:
+                rep.skip(f"{name} spike: the fixture has C (16-bit) instructions; "
+                         f"spike runs with --isa=rv32i")
+            elif trapfixture:
                 rep.skip(f"{name} spike: the Wiz machine stops on a trap; Spike enters a "
                          f"trap handler (no handler is installed)")
             elif not spike:
                 rep.skip(f"{name} spike: spike not on PATH "
                          f"(nix shell nixpkgs#spike -c oracle/scripts/run-oracle.sh run --backends spike)")
-            elif any((w & 0x7F) == 0x17 for w in fx.words):
+            elif any((h & 0x7F) == 0x17 for h in fx.halves):
                 # Spike must load the ELF at 0x80000000 (its boot ROM occupies
                 # [0, 0x1000)), so AUIPC writes a value relative to that base, while
                 # the Wiz side starts at 0.  The difference is the ELF base, not a

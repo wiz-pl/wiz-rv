@@ -330,18 +330,26 @@ riscv-formal `insn_*` check (see "Formal pipeline checks" above).
 ```
 <name>
 <cfg> <mbits> <steps> <mem_base> <mem_count>
-<instruction word, 8 hex digits, little-endian at address 0>
+<instruction, 8 hex digits (32-bit, two halfwords, low first)
+             or 4 hex digits (16-bit, C) at address 0>
 ...
 ```
 
 All fixtures are `rv32i 14 32|40|6 8192 256`: 16 KB of memory, program at 0, and
-the compared data region `0x2000 … 0x20ff` (outside Spike's boot ROM). They use
-only the RV32I base encodings; no `M`/`A`/`F`/`D`/`C` and no I/O port. The five
+the compared data region `0x2000 … 0x20ff` (outside Spike's boot ROM). The base
+fixtures use only RV32I encodings; no `M`/`A`/`F`/`D` and no I/O port. The five
 `alu`/`branch`/`mem`/`shift`/`mixed` fixtures have no traps or misaligned
 accesses. The six `trap_*` fixtures stop the Wiz machine on one trap each and are
 compared between `isa`, `core` and `py`; Sail and Spike are **skipped** for them,
 because they enter a trap handler (none is installed) where the Wiz machine
 stops, so the harness says `SKIP` rather than pretending they agree.
+
+`compressed` is the C extension: a hand-written sequence of 16-bit instructions
+(every form the machine implements), with a 32-bit LUI at an odd halfword so the
+two-word fetch a 32-bit instruction at `pc[1] = 1` needs is exercised, ending in
+EBREAK. It is compared between `isa`, `core` and `py`; Sail and Spike are skipped
+for it too (their configurations here are rv32i, without C). Its last state is
+cause 2, `epc` at the EBREAK.
 
 * `alu` — every ALU form, signed/unsigned compares, shifts by 0/1/31, LUI/AUIPC,
   x0 and same-value writes.
@@ -358,7 +366,10 @@ stops, so the harness says `SKIP` rather than pretending they agree.
 * `trap_ecall`, `trap_ebreak` — cause 1/2, `tval` 0.
 * `trap_illegal` — an all-ones word: cause 3, `tval` the instruction word.
 * `trap_load`, `trap_store` — LW/SW at 2: cause 5/6, `tval` the address 2.
-* `trap_jump` — JALR to 2: cause 4, `tval` the target 2.
+* `jump2` — with C a jump to a halfword boundary is legal: C.J to 2 executes the
+  C.ADDI there and then EBREAKs (cause 2). `Trap.jump` is unreachable through the
+  encodings now (JALR clears bit 0; JAL/branch offsets are even), so the old
+  `trap_jump` fixture no longer has a trap to show.
 
 In each trap fixture `epc` is 4 (the second instruction, where the machine stops)
 and the trace repeats the stopped state to `steps + 1` lines, as the ISA does.
@@ -436,14 +447,17 @@ oracle/scripts/run-rvfi.sh --pipe --all-insns              # all 37 base-I check
 
 * The comparison is over finite traces of base-I programs with on-chip memory.
   `isa`, `core` and `pipe` (and `py`) cover the pipeline at retirement; traps are
-  covered for `isa`/`core`/`py` (cause/tval/epc); the M extension, caches/DDR, the
-  bus and the I/O port are not in the compared traces. The pipeline trace runs with
+  covered for `isa`/`core`/`py` (cause/tval/epc), and the C extension
+  (`compressed`) for `isa`/`core`/`py`; the M extension, caches/DDR, the bus and
+  the I/O port are not in the compared traces. The pipeline trace runs with
   `In.idle`/on-chip memory only.
 * The pipeline's rvfi port is the core's own (`rr_ins`/`rr_pcw`/`rr_ldw` and the
   architectural register file at R), and the 37 base-I `insn_*` checks pass at its
-  retirement cycle (4). The consistency checks are not configured for it, and
-  `rvfi_mem_wdata` is the architectural `rs2`, so a store's data path is not
-  independently checked. No `rvfi_muldiv` (no M-extension pipeline proof).
+  retirement cycle (4). `rr_ins` is the raw encoding (a C instruction's 16 bits),
+  but the riscv-formal configurations are `rv32i`, so C is not checked there. The
+  consistency checks are not configured for it, and `rvfi_mem_wdata` is the
+  architectural `rs2`, so a store's data path is not independently checked. No
+  `rvfi_muldiv` (no M-extension pipeline proof).
 * `Rv.Isa` and the cores share one author; `py` and Sail are independent of Wiz's
   code but not of the *machine description* (trap policy, memory map).
 * Next: (a) a cycle plan for the pipeline's consistency checks (`reg`, `pc_fwd`,

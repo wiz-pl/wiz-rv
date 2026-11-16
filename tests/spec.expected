@@ -5,6 +5,11 @@ atomics ddr: trap 2, pc 100, x1 1325400064, x15 2147483648, out 7 0 8 8 11 11 3 
 atomics resv: trap 2, pc 48, x1 512, x15 2147483648, out 1 
 trapLoad: cause 5, tval 2, epc 8, pc 8
 trapStore: cause 6, tval 1, epc 8, pc 8
-trapJump: cause 4, tval 6, epc 8, pc 8
-trapIllegal: cause 3, tval 0, epc 4, pc 4
+jumpHalf: trap 2, pc 4, x1 0, x15 0, out 
+trapIllegal: cause 3, tval 4294967295, epc 4, pc 4
 trapEcall: cause 1, tval 0, epc 4, pc 4
+cLast: trap 2, pc 30, x1 24, x15 2147483648, out 16 
+cLastBreak: cause 2, tval 0, epc 1022, pc 1022
+C expansion: PASS (65536 encodings, spec Rv.expand = core Cx.expand)
+C twin: PASS (pad 28, 100 halfwords)
+C compressed: trap 2, pc 196, out 10 20 0 20 1 
