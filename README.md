@@ -174,7 +174,9 @@ decay envelope, an octave up for the piezo, channel 15 as noise; `mustest` in
 sw/iss renders a lump to WAV on the host), newlib's system calls
 (the console on the UART, the WAD as the one file). `rvload PORT doom.bin doom1.wad`
 (app/rvload.wiz) sends both through the boot loader and starts Doom. The shareware
-`doom1.wad` is not in the repository (wad/ is ignored).
+`doom1.wad` is not in the repository (wad/ is ignored). sw/README.md has the memory
+map, the boot protocol, the entry convention and the builds (`make -C sw`); the boot
+flow runs end to end in the executable lockstep (bench/boot.wiz).
 
 On the board (2026-11-12, with wiz-ddr3 f99ab70): the boot loader printed "wiz-rv boot",
 "DDR ok"; rvload loaded doom.bin and the WAD into DDR and Doom started (its whole
