@@ -17,7 +17,8 @@ import Text
 -- "OK" on the UART and `ebreak`s. Three frames: a good one (trap 2, the decoded frame
 -- equal to the sent one, "run" and "OK"), a frame with one payload byte changed and the
 -- old CRC ("crc error", trap 0: no jump) and one over the 1 MiB cap ("length error",
--- trap 0). The image must also stay at most 256 words, i.e. a small BRAM init.
+-- trap 0). The image must also stay at most 256 words (512 of the halfwords `Asm.assemble`
+-- yields), i.e. a small BRAM init.
 
 def U.rep : Nat → Nat → List Nat
   | _, .zero => .nil
@@ -68,7 +69,10 @@ def U.payload : List Nat := Asm.assemble
   (A.ebreak :: A.lui 5 524288 :: A.li 6 79 :: A.sb 6 0 5 :: A.li 6 75 :: A.sb 6 0 5 ::
    A.ebreak :: .nil)
 
-def U.payloadBytes : List Nat := List.concat (List.map U.le32 U.payload)
+-- the image's bytes: `Asm.assemble` yields halfwords (since the C extension)
+def U.le16 (v : Nat) : List Nat := .cons (Nat.mod v 256) (.cons (Nat.mod (Nat.div v 256) 256) .nil)
+
+def U.payloadBytes : List Nat := List.concat (List.map U.le16 U.payload)
 
 def U.good : List Nat := U.frame (List.length U.payloadBytes) (U.crc32 U.payloadBytes) U.ddrEntry U.payloadBytes
 
@@ -138,7 +142,7 @@ def U.frameVerdict (frame : List Nat) : String :=
   if U.natsEq (U.received frame) frame then "PASS" else "FAIL"
 
 def U.report : String :=
-  let words := List.length (Asm.assemble GLoad.boot);
+  let words := Nat.div (List.length (Asm.assemble GLoad.boot)) 2;
   let sizeV := if Nat.le words 256 then "PASS" else "FAIL";
   "golem load: " ++ Nat.repr words ++ " words " ++ sizeV ++ ", frame "
     ++ Nat.repr (List.length U.good) ++ " bytes through Rx " ++ U.frameVerdict U.good ++ "; run "
