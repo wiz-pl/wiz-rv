@@ -1,7 +1,7 @@
 import Sys
 import Text
 -- `bin2wiz IN.bin OUT.wiz NAME`: a binary as a Wiz definition `def NAME : String`, its
--- bytes in hexadecimal (two digits each), for `Hex.words` (src/Rv/Progs.wiz).
+-- bytes in hexadecimal (two digits each), for `Hex.halves` (src/Rv/Progs.wiz).
 
 def hexDigit (n : Nat) : Char := Char.mk (if Nat.lt n 10 then 48 + n else 87 + n)
 def hexBytes : List Nat → List Char → List Char
