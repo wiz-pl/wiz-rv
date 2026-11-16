@@ -1,0 +1,113 @@
+-- test: check
+import Rv.OledFb
+import Text
+-- The Doom machine's double-buffered OLED framebuffer (`OledFb`, src/Rv/OledFb.wiz):
+-- the bank the controller sends changes only when a refresh starts, so a frame drawn
+-- into the other bank is never shown torn (the board's "odd refresh" artefact:
+-- scripts/oled-sim.sh shows it with one bank, over whole refreshes in Verilog).
+--
+-- The controller starts at pixel (93, 63), three pixels before the end of a refresh,
+-- with the frame tick due soon after. Bank 0 holds A1 A2 A3 there and A4 A5 at (0, 0)
+-- and (1, 0); bank 1 holds B1 … B5 at the same places. `Circuit.run` for 340 cycles; the
+-- SPI bytes decoded from JA with their D/C.
+--   flip: `show` = 1 written in the first cycle, before those three pixels go out. They
+--     must still come from bank 0 (A1 A2 A3), then the window commands
+--     15 00 5F 75 00 3F, then the new refresh from bank 1 (B4 B5).
+--   stay: no write of `show`: the new refresh from bank 0 again (A4 A5).
+
+def F.nthBit (v : Nat) (k : Nat) : Nat := Nat.mod (Nat.div v (Nat.pow 2 k)) 2
+
+def F.hexDigit (n : Nat) : Char :=
+  if Nat.lt n 10 then Char.mk (48 + n) else Char.mk (87 + n)
+
+def F.hex2 (n : Nat) : String :=
+  String.mk (.cons (F.hexDigit (Nat.div n 16)) (.cons (F.hexDigit (Nat.mod n 16)) .nil))
+
+-- a byte, with "c" in front when D/C was low (a command)
+def F.showBytes : List (Nat × Nat) → String
+  | .nil => ""
+  | .cons p ps => (if Nat.beq p.1 0 then "c" else "") ++ F.hex2 p.2 ++ " " ++ F.showBytes ps
+
+def F.eq : List (Nat × Nat) → List (Nat × Nat) → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => Bool.and (Bool.and (Nat.beq a.1 b.1) (Nat.beq a.2 b.2)) (F.eq as bs)
+  | _, _ => .false
+
+structure F.Spi where
+  prev : Nat
+  nbits : Nat
+  byte : Nat
+  dc : Nat
+  acc : List (Nat × Nat)     -- (D/C, byte), reverse order
+
+def F.spiGo : F.Spi → List Nat → F.Spi
+  | s, .nil => s
+  | s, .cons j js =>
+    let sclk := F.nthBit j 3;
+    let mosi := F.nthBit j 1;
+    let dc := F.nthBit j 4;
+    let rise := Bool.and (Nat.beq sclk 1) (Nat.beq s.prev 0);
+    if rise then
+      if Nat.beq s.nbits 0 then F.spiGo (F.Spi.mk sclk 1 mosi dc s.acc) js
+      else
+        let b := 2 * s.byte + mosi;
+        let nn := s.nbits + 1;
+        if Nat.beq nn 8 then F.spiGo (F.Spi.mk sclk 0 0 dc (.cons (dc, b) s.acc)) js
+        else F.spiGo (F.Spi.mk sclk nn b dc s.acc) js
+    else F.spiGo (F.Spi.mk sclk s.nbits s.byte s.dc s.acc) js
+
+def F.bytes (js : List Nat) : List (Nat × Nat) := List.reverse (F.spiGo (F.Spi.mk 1 0 0 0 .nil) js).acc
+
+-- the pixels: bank 0 (A) and bank 1 (B)
+def F.a (k : Nat) : Nat := 40960 + k     -- A0 0k
+def F.b (k : Nat) : Nat := 45056 + k     -- B0 0k
+def F.pix (a : Nat) : Nat :=
+  let bank := Nat.div a 8192;
+  let i := Nat.mod a 8192;
+  let k := (if Nat.beq i 6141 then 1 else if Nat.beq i 6142 then 2 else if Nat.beq i 6143 then 3
+    else if Nat.beq i 0 then 4 else if Nat.beq i 1 then 5 else 0);
+  if Nat.beq k 0 then 0 else (if Nat.beq bank 0 then F.a k else F.b k)
+
+def F.cfg : RgbCfg := RgbCfg.fast 0 1
+
+-- the controller at its `pixels` step, at (93, 63), CS low, the frame timer 105 steps from
+-- its tick; the framebuffer's read registers already at that pixel
+def F.start : OFbSt F.cfg.frameLog HwTy.El :=
+  OFbSt.mk
+    (Fb.mk (fun (a : BitVec 14) => BitVec.ofNat 16 (F.pix a.toNat)) (BitVec.ofNat 16 (F.a 1)) (BitVec.ofNat 4 0)
+      (BitVec.ofNat 1 0) (BitVec.ofNat 16 (F.a 1)) (BitVec.ofNat 1 0) (BitVec.ofNat 14 0) (BitVec.ofNat 16 0)
+      (BitVec.ofNat 1 0) (BitVec.ofNat 1 0))
+    (RCtl.mk (RSeq.mk (BitVec.ofNat 7 (RProg.frameAt + 7)) (BitVec.ofNat 1 0) (BitVec.ofNat 21 0))
+      (RPins.mk (BitVec.ofNat 1 1) (BitVec.ofNat 1 1) (BitVec.ofNat 1 1) (BitVec.ofNat 1 0) (BitVec.ofNat 1 1))
+      (RFrame.mk (BitVec.ofNat F.cfg.frameLog 150) (BitVec.ofNat 1 0) (BitVec.ofNat 11 1))
+      (RGen.mk (BitVec.ofNat 7 93) (BitVec.ofNat 6 63) (BitVec.ofNat 1 0) (BitVec.ofNat 8 0))
+      Spi.init)
+
+def F.idle : HwTy.El OFbIn.code :=
+  Bundle.toEl OFbIn.bundle (OFbIn.mk (BitVec.ofNat 1 0) (BitVec.ofNat 14 0) (BitVec.ofNat 16 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0))
+def F.show1 : HwTy.El OFbIn.code :=
+  Bundle.toEl OFbIn.bundle (OFbIn.mk (BitVec.ofNat 1 0) (BitVec.ofNat 14 0) (BitVec.ofNat 16 0) (BitVec.ofNat 1 1) (BitVec.ofNat 1 1))
+
+def F.idles : Nat → List (HwTy.El OFbIn.code)
+  | .zero => .nil
+  | .succ k => .cons F.idle (F.idles k)
+
+def F.run (flip : Bool) : List (Nat × Nat) :=
+  let ins := (if flip then List.cons F.show1 (F.idles 339) else F.idles 340);
+  let outs := Circuit.run (OledFb.circuitFrom F.cfg 0 F.start) ins;
+  F.bytes (Hdl.map (fun (o : HwTy.El OFbOut.code) => (Bundle.ofEl OFbOut.bundle o).ja.toNat) outs)
+
+def F.px (k : Nat) (v : Nat) : List (Nat × Nat) → List (Nat × Nat) :=
+  fun rest => List.cons (1, Nat.div v 256) (List.cons (1, Nat.mod v 256) rest)
+def F.window : List (Nat × Nat) :=
+  .cons (0, 21) (.cons (0, 0) (.cons (0, 95) (.cons (0, 117) (.cons (0, 0) (.cons (0, 63) .nil)))))
+def F.expect (flip : Bool) : List (Nat × Nat) :=
+  F.px 1 (F.a 1) (F.px 2 (F.a 2) (F.px 3 (F.a 3) (List.append F.window
+    (if flip then F.px 4 (F.b 4) (F.px 5 (F.b 5) .nil) else F.px 4 (F.a 4) (F.px 5 (F.a 5) .nil)))))
+
+def F.report (name : String) (flip : Bool) : String :=
+  let got := List.take 16 (F.run flip);
+  "oled " ++ name ++ ": " ++ F.showBytes got ++ (if F.eq got (F.expect flip) then "— PASS" else "— FAIL")
+
+#eval F.report "flip" .true
+#eval F.report "stay" .false

@@ -38,9 +38,31 @@ static void perf_report(void) {
   last = now; frames = 0; l_i = i; l_b = b; l_m = m; l_l = l; l_f = f; l_h = h; l_x = x;
 }
 
+/* The framebuffer has two banks (src/Rv/OledFb.wiz): draw into the one not shown, then
+   ask for it; the OLED controller switches only when a refresh starts, so a frame is
+   never shown half drawn (with one bank, a frame drawn during a refresh showed torn:
+   the perf line's "odd" refreshes). On a machine without banks, draw into bank 0. */
+static int fb_banks = -1, fb_back = 1;
+
+static volatile uint16_t *fb_begin(void) {
+  if (fb_banks < 0) fb_banks = (FB_CTRL & ~3u) == FB_CTRL_ID;
+  if (!fb_banks) return OLED_FB;
+  /* the bank to draw into must be neither shown nor waiting to be: wait for the last
+     switch (at most one refresh, about 42 ms; at 15 frames a second it has happened) */
+  while ((FB_CTRL & 3u) != (fb_back ? 0u : 3u)) {}
+  return OLED_FB + fb_back * OLED_BANK;
+}
+
+static void fb_end(void) {
+  if (!fb_banks) return;
+  FB_CTRL = (uint32_t)fb_back;
+  fb_back ^= 1;
+}
+
 void DG_DrawFrame(void) {
   perf_report();
   const uint32_t *fb = DG_ScreenBuffer;
+  volatile uint16_t *out = fb_begin();
   for (int y = 0; y < OLED_H; y++) {
     int r0 = y * DOOMGENERIC_RESY / OLED_H, r1 = ((y + 1) * DOOMGENERIC_RESY / OLED_H + r0) / 2;
     for (int x = 0; x < OLED_W; x++) {
@@ -49,10 +71,11 @@ void DG_DrawFrame(void) {
                         fb[r1 * DOOMGENERIC_RESX + c0], fb[r1 * DOOMGENERIC_RESX + c1] };
       uint32_t r = 0, g = 0, b = 0;
       for (int k = 0; k < 4; k++) { r += (p[k] >> 16) & 255; g += (p[k] >> 8) & 255; b += p[k] & 255; }
-      OLED_FB[y * OLED_W + x] = rgb565(r / 4, g / 4, b / 4);
+      out[y * OLED_W + x] = rgb565(r / 4, g / 4, b / 4);
       sw_w++;
     }
   }
+  fb_end();
 }
 
 uint32_t DG_GetTicksMs(void) { return (uint32_t)(hw_cycles() / (HW_CLOCK_HZ / 1000u)); }
