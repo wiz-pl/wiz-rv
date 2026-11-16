@@ -23,10 +23,30 @@ def PLs.regDiff (ab wb : Nat) (s : PpSt ab wb HwTy.El) (a : Arch) : Nat → List
       else .cons ("x" ++ Nat.repr i ++ ": core " ++ Nat.repr hwA ++ "/" ++ Nat.repr hwB ++ ", spec " ++ Nat.repr sp) .nil;
     List.append (PLs.regDiff ab wb s a k) here
 
-def PLs.compare (ab wb : Nat) (s : PpSt ab wb HwTy.El) (a : Arch) : List String :=
+def PLs.csrDiff {ab wb : Nat} (s : PpSt ab wb HwTy.El) (a : Arch) : List String :=
+  List.append (Ls.one "mstatus" s.csr.mstatus.toNat a.csr.mstatus.toNat)
+    (List.append (Ls.one "mie" s.csr.mie.toNat a.csr.mie.toNat)
+      (List.append (Ls.one "mtvec" s.csr.mtvec.toNat a.csr.mtvec.toNat)
+        (List.append (Ls.one "mscratch" s.csr.mscratch.toNat a.csr.mscratch.toNat)
+          (List.append (Ls.one "mepc" s.csr.mepc.toNat a.epc.toNat)
+            (List.append (Ls.one "mcause" s.csr.mcause.toNat a.csr.mcause.toNat)
+              (Ls.one "mtval" s.tval.toNat a.tval.toNat))))))
+
+-- is the word at `pc` (in the specification's memory) a SYSTEM instruction (a CSR
+-- instruction, MRET, WFI, ECALL, EBREAK)?
+def PLs.isSys (c : Cfg) (a : Arch) (pc : BitVec 32) : Bool := Nat.beq (Ins.opcode (Rv.load 4 c a pc)) Op.system
+
+-- The CSRs are written in E (src/Rv/Pipe.wiz, `serial`), two stages before the
+-- instruction retires, so while a SYSTEM instruction is in M or R the core's CSRs are
+-- already past the specification's: they are compared at every other retirement, and
+-- when the core stops.
+def PLs.compare (ab wb : Nat) (mx : Bool) (s : PpSt ab wb HwTy.El) (a : Arch) : List String :=
+  let ω c := Ls.cfgM ab wb mx;
+  let ω ahead := Bool.or (Bool.and (BitVec.isTrue s.rr.v) (PLs.isSys c a s.rr.pc))
+    (Bool.and (BitVec.isTrue s.m.v) (PLs.isSys c a s.m.pc));
   List.append (if Nat.beq s.rr.pc.toNat a.pc.toNat then .nil
       else .cons ("pc: core " ++ Nat.repr s.rr.pc.toNat ++ ", spec " ++ Nat.repr a.pc.toNat) .nil)
-    (PLs.regDiff ab wb s a (Rv.pow2 ab - 1))
+    (List.append (if ahead then .nil else PLs.csrDiff s a) (PLs.regDiff ab wb s a (Rv.pow2 ab - 1)))
 
 -- the core's byte at address `x`: the data copy, the fetch copy
 def PLs.byteD (ab wb : Nat) (s : PpSt ab wb HwTy.El) (x : Nat) : Nat :=
@@ -53,12 +73,36 @@ def PLs.finish (ab wb : Nat) (s : PpSt ab wb HwTy.El) (a : Arch) (cyc ins : Nat)
   let ω outP : List String := if Ls.natsEq o (List.reverse a.out) then .nil else .cons "output differs" .nil;
   let ω trapP : List String := if Nat.beq s.trap.toNat a.trap then .nil
     else .cons ("trap: core " ++ Nat.repr s.trap.toNat ++ ", spec " ++ Nat.repr a.trap) .nil;
+  let ω tvalP : List String := if Nat.beq s.tval.toNat a.tval.toNat then .nil
+    else .cons ("tval: core " ++ Nat.repr s.tval.toNat ++ ", spec " ++ Nat.repr a.tval.toNat) .nil;
+  let ω epcP : List String := if Nat.beq s.epc.toNat a.epc.toNat then .nil
+    else .cons ("epc: core " ++ Nat.repr s.epc.toNat ++ ", spec " ++ Nat.repr a.epc.toNat) .nil;
   Ls.Result.mk cyc ins s.trap.toNat o
-    (List.append why (List.append trapP (List.append outP (List.append (PLs.regDiff ab wb s a (Rv.pow2 ab - 1))
-      (List.append (PLs.memDiff ab wb s a (Rv.pow2 (wb + 2))) (Ls.ddrDiff ddr a 256))))))
+    (List.append why (List.append trapP (List.append tvalP (List.append epcP (List.append outP (List.append (List.append (PLs.csrDiff s a) (PLs.regDiff ab wb s a (Rv.pow2 ab - 1)))
+      (List.append (PLs.memDiff ab wb s a (Rv.pow2 (wb + 2))) (Ls.ddrDiff ddr a 256))))))))
+
+-- The specification's interrupt inputs for the instruction retiring in R. The core
+-- decides an interrupt in E (a cycle or more before the retirement, when the inputs may
+-- have changed since) and carries it to R as trap code 7 with its cause; the
+-- specification is then given exactly that pending bit, so it must agree that the
+-- interrupt was enabled (MIE, mie) and take it at the same instruction, with the same
+-- mepc/mcause/mstatus/vector. A WFI retires only once `mip & mie` was not zero, so the
+-- specification's WFI is given `mie`'s bits as pending. A CSR instruction that reads
+-- `mip` read the inputs in E: the specification is given the value the core read (it
+-- is in R's result). Anything else retires with no interrupt pending. (So the lockstep
+-- checks the architectural effect of every interrupt the core takes, not its latency.)
+def PLs.irqFor (ab wb : Nat) (mx : Bool) (s : PpSt ab wb HwTy.El) (a : Arch) : BitVec 32 :=
+  let ω w := Rv.fetch (Ls.cfgM ab wb mx) a;
+  if Bool.and (BitVec.isTrue s.rr.v) (Nat.beq s.rr.trap.toNat Trap.irq)
+  then Rv.w32 (Rv.pow2 (Rv.bits s.rr.tval.toNat 0 4))
+  else if Nat.beq w Rv.wfiWord then BitVec.and a.csr.mie (Rv.w32 Csr.mieW)
+  else if Bool.and (Nat.beq (Ins.opcode w) Op.system)
+      (Bool.and (Bool.not (Nat.beq (Ins.f3 w) 0)) (Nat.beq (Rv.bits w 20 12) Csr.aMip))
+  then BitVec.and s.rr.val (Rv.w32 Csr.mieW)
+  else Rv.w32 0
 
 -- `fuel` cycles at most; `a` is the specification's state for the next instruction to retire
-def PLs.go (ab wb : Nat) (mx : Bool) :
+def PLs.go (ab wb : Nat) (mx : Bool) (irq : Nat → Nat) :
     Nat → Nat → List Nat → List Nat → (BitVec 32 → BitVec 8) → Nat → Nat → HwTy.El (PpSt.code ab wb) → Arch → Ls.Result
   | cyc, ins, out, inp, ddr, lat, .zero, v, a => PLs.finish ab wb (PLs.hw (ab := ab) (wb := wb) v) a cyc ins out ddr (.cons "out of cycles" .nil)
   | cyc, ins, out, inp, ddr, lat, .succ fuel, v, a =>
@@ -68,7 +112,7 @@ def PLs.go (ab wb : Nat) (mx : Bool) :
     if stopped then PLs.finish ab wb s a cyc ins out ddr .nil
     else
       let ω retire := Bool.and (BitVec.isTrue s.rr.v) (Bool.not (BitVec.isTrue s.rr.miss));
-      let ω bad : List String := if retire then PLs.compare ab wb s a else .nil;
+      let ω bad : List String := if retire then PLs.compare ab wb mx s a else .nil;
       match bad with
       | .cons p ps => PLs.finish ab wb s a cyc ins out ddr (.cons ("after " ++ Nat.repr ins ++ " instructions") bad)
       | .nil =>
@@ -79,14 +123,16 @@ def PLs.go (ab wb : Nat) (mx : Bool) :
         let ω ioIn : BitVec 32 := (match inp with
           | .cons c cs => BitVec.ofNat 32 c
           | .nil => BitVec.ofNat 32 4294967295);
+        let ω ip := Ls.irqPort (irq cyc);
         let ω port : In HwTy.El := In.mk (BitVec.ofNat 1 1) ioIn
-          (Bool.toBits ans) (Bool.toBits (Bool.and ans (Bool.not (BitVec.isTrue q.we)))) (Ls.ddrWord ddr q.addr);
+          (Bool.toBits ans) (Bool.toBits (Bool.and ans (Bool.not (BitVec.isTrue q.we)))) (Ls.ddrWord ddr q.addr)
+          ip.1 ip.2.1 ip.2.2;
         let ω r := pipeStep (r := HwTy.El) ab wb mx s port;
         let ω o := Bundle.ofEl Out.bundle r.2;
         -- (the byte is forced now: left as a thunk it would be a chain over cycles)
         let ω ob := o.byte.toNat;
         let ω out2 : List Nat := if BitVec.isTrue o.wr then .cons ob out else out;
-        let ω a2 := if retire then Rv.step (Ls.cfgM ab wb mx) a else a;
+        let ω a2 := if retire then Rv.step (Ls.cfgM ab wb mx) (Rv.setIrq a (PLs.irqFor ab wb mx s a)) else a;
         let ω ins2 := if retire then Nat.succ ins else ins;
         let ω ddr2 := if wr then Ls.ddrStore ddr q.addr q.wdata q.wstrb else ddr;
         let ω lat2 := if req then (if Nat.beq lat 0 then Ls.lat else lat - 1) else Ls.lat;
@@ -94,10 +140,15 @@ def PLs.go (ab wb : Nat) (mx : Bool) :
           | .true, .cons c cs => cs
           | _, _ => inp);
         if Nat.beq ob 256 then PLs.finish ab wb s a cyc ins out ddr .nil
-        else PLs.go ab wb mx (Nat.succ cyc) ins2 out2 inp2 ddr2 lat2 fuel r.1 a2
+        else PLs.go ab wb mx irq (Nat.succ cyc) ins2 out2 inp2 ddr2 lat2 fuel r.1 a2
 
-def PLs.runIn (ab wb : Nat) (mx : Bool) (prog : List Nat) (input : List Nat) (fuel : Nat) : Ls.Result :=
-  PLs.go ab wb mx 0 0 .nil input (fun (x : BitVec 32) => BitVec.ofNat 8 0) Ls.lat fuel (Bundle.toEl (PpSt.bundle ab wb) (PpSt.init ab wb prog))
+def PLs.runIrqIn (ab wb : Nat) (mx : Bool) (prog : List Nat) (input : List Nat) (irq : Nat → Nat) (fuel : Nat) : Ls.Result :=
+  PLs.go ab wb mx irq 0 0 .nil input (fun (x : BitVec 32) => BitVec.ofNat 8 0) Ls.lat fuel (Bundle.toEl (PpSt.bundle ab wb) (PpSt.init ab wb prog))
     (Rv.setInp (Arch.start (Ls.cfgM ab wb mx) prog) input)
+def PLs.runIn (ab wb : Nat) (mx : Bool) (prog : List Nat) (input : List Nat) (fuel : Nat) : Ls.Result :=
+  PLs.runIrqIn ab wb mx prog input Ls.noIrq fuel
+-- with the interrupt inputs driven by `irq` (cycle → mip bits)
+def PLs.runIrq (ab wb : Nat) (mx : Bool) (prog : List Nat) (irq : Nat → Nat) (fuel : Nat) : Ls.Result :=
+  PLs.runIrqIn ab wb mx prog .nil irq fuel
 def PLs.run (ab wb : Nat) (mx : Bool) (prog : List Nat) (fuel : Nat) : Ls.Result :=
   PLs.runIn ab wb mx prog .nil fuel

@@ -5,16 +5,26 @@ import Text
 -- `core_trace FIXTURE`: the multi-cycle core (`Rv.Core.core`) on a fixture, as a
 -- trace in the oracle's line format.  One line per instruction, projected from the
 -- core's state at the E phase (before the instruction's write), which is the ISA
--- trace's pre-state.  The core is unchanged; this only drives `coreStep` at
--- `HwTy.El` and reads the state record.
+-- trace's pre-state, and a `T` line with the trap state (cause, tval, epc).  The core
+-- is unchanged; this only drives `coreStep` at `HwTy.El` and reads the state record.
 --
--- When the core stops (phase H), the final state is emitted too, so a trapping
--- program has the same number of lines as `isa_trace`.  The fixtures avoid traps.
+-- When the core stops (phase H), the final state is emitted and repeated up to
+-- `steps + 1` lines, which is what a trapping program's ISA trace does (it stutters).
 
 def Ct.line (ab wb : Nat) (fx : Fx) (k : Nat) (s : CoreSt ab wb HwTy.El) : String :=
   Tr.line k s.pc.toNat s.trap.toNat
     (Tr.regsGo 32 0 (fun i => if Nat.beq i 0 then 0 else (s.rfa (BitVec.ofNat ab i)).toNat))
     (Tr.memGo fx.mcount fx.mbase (fun a => Ls.byte ab wb s a))
+
+-- the core's trap state: cause, tval, and the PC (in H the PC is the epc: it stopped on
+-- the trapping instruction and does not move; while running there is no epc yet — the
+-- specification's `epc` is 0 until a trap, so this must not project the running PC)
+def Ct.trap (ab wb : Nat) (k : Nat) (s : CoreSt ab wb HwTy.El) : String :=
+  Tr.trapLine k s.trap.toNat s.tval.toNat
+    (if Nat.beq s.ph.toNat Ph.h then s.pc.toNat else 0)
+
+def Ct.lines (ab wb : Nat) (fx : Fx) (k : Nat) (s : CoreSt ab wb HwTy.El) : List String :=
+  List.append (.cons (Ct.line ab wb fx k s) .nil) (.cons (Ct.trap ab wb k s) .nil)
 
 def Ct.go (ab wb : Nat) (mx : Bool) (fx : Fx) :
     Nat → Nat → HwTy.El (CoreSt.code ab wb) → List String
@@ -22,10 +32,14 @@ def Ct.go (ab wb : Nat) (mx : Bool) (fx : Fx) :
   | .succ fuel, emitted, v =>
     let s := Ls.hw (ab := ab) (wb := wb) v;
     if Nat.beq s.ph.toNat Ph.h then
-      (if Nat.le emitted fx.steps then .cons (Ct.line ab wb fx emitted s) .nil else .nil)
+      -- stopped: the state after the trapping instruction, repeated (the ISA trace
+      -- stutters too, so both have `steps + 1` state lines)
+      (if Nat.le emitted fx.steps then
+        List.append (Ct.lines ab wb fx emitted s) (Ct.go ab wb mx fx fuel (Nat.succ emitted) v)
+       else .nil)
     else if Nat.beq s.ph.toNat Ph.e then
       (if Nat.le emitted fx.steps then
-        List.append (.cons (Ct.line ab wb fx emitted s) .nil)
+        List.append (Ct.lines ab wb fx emitted s)
           (Ct.go ab wb mx fx fuel (Nat.succ emitted)
             (coreStep (r := HwTy.El) ab wb mx s In.idle).1)
        else .nil)

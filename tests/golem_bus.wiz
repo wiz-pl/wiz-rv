@@ -1,0 +1,51 @@
+-- test: check
+import Rv.Golem.Bus
+import Text
+-- golem's bus, arbiter and DDR stub at values (`GBus.route`, `GBus.arb`,
+-- `GBus.ramStep`, src/Rv/Golem/Bus.wiz): the host loader writes 0x600d to DDR[0] on
+-- the first cycles, then the core reads the same word; the read must return 0x600d
+-- with no error. (Split from the boot check because of the 5 GB build cap; DESIGN.md,
+-- "Simulation".)
+
+structure B.T where
+  bus : BusA HwTy.El
+  arb : GBus.Arb HwTy.El
+  ram : GBus.Ram 16 HwTy.El
+
+structure B.S where
+  t : B.T
+  last : Nat × Nat     -- the core's rdata and err
+
+def B.step (s : B.S) (k : Nat) : B.S :=
+  let t := s.t;
+  let cv : BitVec 1 := Bool.toBits (Nat.lt 5 k);
+  let addr := BitVec.ofNat 32 1073741824;
+  let r0 := GBus.route t.bus cv cv (BitVec.ofNat 1 0) addr (BitVec.ofNat 32 0) (BitVec.ofNat 4 0) (BitVec.ofNat 2 0) (BitVec.ofNat 5 0) GBus.noResp;
+  let q := CacheReq.unpack (Hw.fst (Hw.snd r0));
+  let host : CacheReq HwTy.El := CacheReq.mk (Bool.toBits (Nat.lt k 5)) (BitVec.ofNat 28 0)
+    (Bool.toBits (Nat.lt k 5)) (BitVec.ofNat 32 24589) (BitVec.ofNat 4 15) (BitVec.ofNat 2 0) (BitVec.ofNat 5 0);
+  let ar0 := GBus.arb t.arb q host GBus.noResp;
+  let sel := CacheReq.unpack (Hw.fst (Hw.snd ar0));
+  let dr := GBus.ramStep 16 t.ram sel;
+  let resp := CacheResp.unpack (Hw.snd dr);
+  let ar := GBus.arb t.arb q host resp;
+  let coreResp := CacheResp.unpack (Hw.fst (Hw.snd (Hw.snd ar)));
+  let br := GBus.route t.bus cv cv (BitVec.ofNat 1 0) addr (BitVec.ofNat 32 0) (BitVec.ofNat 4 0) (BitVec.ofNat 2 0) (BitVec.ofNat 5 0) coreResp;
+  let toCore := GBus.Resp.unpack (Hw.snd (Hw.snd br));
+  B.S.mk (B.T.mk (BusA.unpack (Hw.fst br)) (GBus.Arb.unpack (Hw.fst ar)) (GBus.Ram.unpack 16 (Hw.fst dr)))
+    (toCore.rdata.toNat, toCore.err.toNat)
+
+def B.go : Nat → Nat → B.S → B.S
+  | .zero, _, s => s
+  | .succ k, n, s => B.go k (n + 1) (B.step s n)
+
+def B.init : B.S := B.S.mk (B.T.mk BusA.init GBus.arbInit (GBus.ramInit 16)) (0, 0)
+
+def B.report : String :=
+  let s := B.go 20 0 B.init;
+  let l := s.last;
+  let ok := Bool.and (Nat.beq l.1 24589) (Nat.beq l.2 0);
+  "golem bus: host wrote 0x600d, core read " ++ Nat.repr l.1 ++ ", err " ++ Nat.repr l.2
+    ++ (if ok then " — PASS" else " — FAIL")
+
+#eval B.report
