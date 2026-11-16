@@ -331,6 +331,31 @@ consistency checks are not configured. Cost: 6 × 32 = 192 flops (three register
 M and in R), and `proofs/PipeProofs/Base.wiz` needed its two constructors extended
 (the proofs themselves were not re-run).
 
+### H13. The CSR file made `src/Rv/Proofs.wiz` blow up past 8 GB (slow, fixed)
+
+With the CSRs (agent/golem-csr) `wiz check src/Rv/Proofs.wiz` went over heavy's 6 GB and
+then 8 GB caps (8.40 GB at 642 s user time), so `grail build` failed on it. On the commit before the CSRs the misaligned-load claim
+alone already ran for more than 200 s, under 400 MB. Bisected
+under `light`: the glue and eleven claims were small; the three `Pf.x1is2` claims
+(misaligned load, store, jump) reached 2 GB in 5 s, and `#reduce` put it on one field
+after the decode cycle: `trap`, `tval`, `mepc`, `mcause` and `mstatus`, not `mscratch`.
+Two causes, both fixed with no claim changed:
+
+* The trap controls were `Hw.and inE …` (`trapE`, `intr`, and from them `stopTrap`,
+  `enterTrap`, `goE`). `Hw.and` is `UIntN.land`, strict in both inputs (H2), so in the
+  decode cycle, with `inE` 0, the kernel still normalised the trap code. For a load or
+  store that code depends on `mis`, the low bits of `sum` over the leftover latches,
+  which are symbolic. Before the CSRs only `trap` and `tval` read it; trap entry
+  (`mepc`, `mcause`, `mstatus`, the vector) multiplied the paths. They are `gate`s now,
+  the same AND for synthesis.
+* The glue (`Pf.ok`, `Pf.trapOk`, and in src/Rv/TrapProofs `Pf.entryOk`, `Pf.irqOk` and
+  the CSRRW claim) went through `Eq.trans (Eq.congrArg G h) hE` with the implicit
+  arguments inferred. It now goes through `Pf.glueO`/`Pf.glueG` (η plus congruence) and
+  a one-cycle `Pf.readQ`, with every implicit argument given: rv-c's fix, its H12.
+
+After: Proofs.wiz checks in 24 s and 511 MB. Under `light` each file in
+src/Rv/TrapProofs takes 6 to 35 s and at most 870 MB.
+
 ## Compiler and run time
 
 ### S1. A program that imports the core takes 12 to 15 minutes to compile (slow)

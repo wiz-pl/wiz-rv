@@ -17,9 +17,12 @@ Five implementations of the same RV32I machine are compared on one trace at a ti
 
 `isa` vs `py`, `core` vs `py`, `pipe` vs `py`, `isa` vs `sail`, … are separate
 comparisons. All of them are architectural traces: per instruction, the PC, the
-trap code, **all 32 registers**, and the 256 bytes of data memory at `0x2000`.
+trap cause, **all 32 registers**, and the 256 bytes of data memory at `0x2000`.
 The pipeline's sample is also the **pre-state** of the retiring instruction; see
-"The pipeline retirement trace" below for the one-word memory detail.
+"The pipeline retirement trace" below for the one-word memory detail. The Wiz
+sides also emit the rest of the trap state (`tval`, `epc`) on a `T` line, and the
+Python reference agrees with it; Sail/Spike have no such line, so that field is
+skipped for them.
 
 ## What was run (2026-11-14, agent `rv-oracle`)
 
@@ -112,6 +115,22 @@ is **not** a pass. Per fixture (states compared / instruction steps):
 The `selftest` command additionally perturbs one register in a copy of the
 reference trace and requires the comparator to report it, so "the comparator
 works" is itself checked.
+
+### Trap fixtures (agent `rv-trap`, 2026-11-14)
+
+The traps and their state are compared by a second set of fixtures. `selftest`
+(no external tools) is **33 passed, 0 failed, 0 skipped**: 11 fixtures × (isa,
+core, perturbed-comparator check). `run --backends isa,core,py` is **33 passed,
+0 failed, 0 skipped**: 11 fixtures × isa-py, isa-core, core-py. The six trap
+fixtures each have 7 states (the initial state, the trapping instruction's
+pre-state, and five stutters of the stopped state), and the `T` line's
+`tval`/`epc` agree between `isa`, `core` and `py` (e.g. `trap_load`: cause 5,
+tval 2, epc 4). With Sail in the backend list (`run --backends isa,core,py,sail`,
+sail-riscv 0.12) the result is **43 passed, 0 failed, 6 skipped**: Sail agrees on
+the five non-trap fixtures and is `SKIP`ped on each trap fixture, because it
+enters a trap handler where the Wiz machine stops. Spike was not available here. The emitted core still builds and the rvfi wrapper still simulates:
+`rvfi --fixture alu` is 1 passed (32 beats) with Icarus 13.0; the riscv-formal
+sweep was not re-run for this change.
 
 ## Pipeline extension (2026-11-14, agent `rv-pipeline-oracle`)
 
@@ -315,11 +334,14 @@ riscv-formal `insn_*` check (see "Formal pipeline checks" above).
 ...
 ```
 
-All fixtures are `rv32i 14 32|40 8192 256`: 16 KB of memory, program at 0, and
+All fixtures are `rv32i 14 32|40|6 8192 256`: 16 KB of memory, program at 0, and
 the compared data region `0x2000 … 0x20ff` (outside Spike's boot ROM). They use
-only the RV32I base encodings; no `M`/`A`/`F`/`D`/`C`, no `ECALL`/`EBREAK`, no
-traps, and no misaligned accesses. `py` implements the Wiz machine's documented
-trap/IO choices as well, but those cases are not compared with Sail/Spike.
+only the RV32I base encodings; no `M`/`A`/`F`/`D`/`C` and no I/O port. The five
+`alu`/`branch`/`mem`/`shift`/`mixed` fixtures have no traps or misaligned
+accesses. The six `trap_*` fixtures stop the Wiz machine on one trap each and are
+compared between `isa`, `core` and `py`; Sail and Spike are **skipped** for them,
+because they enter a trap handler (none is installed) where the Wiz machine
+stops, so the harness says `SKIP` rather than pretending they agree.
 
 * `alu` — every ALU form, signed/unsigned compares, shifts by 0/1/31, LUI/AUIPC,
   x0 and same-value writes.
@@ -333,17 +355,26 @@ trap/IO choices as well, but those cases are not compared with Sail/Spike.
 * `redirect` — a loop with back-to-back branch targets, taken/not-taken branches,
   JAL and JALR (the two instructions after a taken transfer are squashed).
 * `stall` — load-use stalls after word, byte and half loads, store→load.
+* `trap_ecall`, `trap_ebreak` — cause 1/2, `tval` 0.
+* `trap_illegal` — an all-ones word: cause 3, `tval` the instruction word.
+* `trap_load`, `trap_store` — LW/SW at 2: cause 5/6, `tval` the address 2.
+* `trap_jump` — JALR to 2: cause 4, `tval` the target 2.
+
+In each trap fixture `epc` is 4 (the second instruction, where the machine stops)
+and the trace repeats the stopped state to `steps + 1` lines, as the ISA does.
 
 ## The trace format and mismatch reports
 
 `oracle/wiz/OracleTrace.wiz` documents it; a line is
 
 ```
-S <step> <pc> <trap> <x0> … <x31> <mem byte> …
+S <step> <pc> <cause> <x0> … <x31> <mem byte> …
+T <step> <cause> <tval> <epc>          (optional: the Wiz sides and `py`)
 ```
 
 `<step>` counts instructions and `<pc>`/the registers are the state **before**
-instruction `<step>`. A mismatch report names the fixture, the step, the pc, the
+instruction `<step>`. `T` is the trap state after that instruction; a backend
+without it (Sail, Spike) is not failed on `tval`/`epc`. A mismatch report names the fixture, the step, the pc, the
 differing fields, and both values:
 
 ```
@@ -404,9 +435,10 @@ oracle/scripts/run-rvfi.sh --pipe --all-insns              # all 37 base-I check
 ## Limits and the next oracle step
 
 * The comparison is over finite traces of base-I programs with on-chip memory.
-  `isa`, `core` and `pipe` (and `py`) cover the pipeline at retirement; the M
-  extension, caches/DDR, the bus, traps and the I/O port are not in the compared
-  traces. The pipeline trace runs with `In.idle`/on-chip memory only.
+  `isa`, `core` and `pipe` (and `py`) cover the pipeline at retirement; traps are
+  covered for `isa`/`core`/`py` (cause/tval/epc); the M extension, caches/DDR, the
+  bus and the I/O port are not in the compared traces. The pipeline trace runs with
+  `In.idle`/on-chip memory only.
 * The pipeline's rvfi port is the core's own (`rr_ins`/`rr_pcw`/`rr_ldw` and the
   architectural register file at R), and the 37 base-I `insn_*` checks pass at its
   retirement cycle (4). The consistency checks are not configured for it, and

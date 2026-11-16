@@ -75,6 +75,8 @@ class Machine:
         for i, w in enumerate(fx.words):
             self.mem[4 * i:4 * i + 4] = w.to_bytes(4, "little")
         self.trap = TRAP_NONE
+        self.tval = 0
+        self.epc = 0
         self.out = []
         self.inp = list(getattr(fx, "input", []))
 
@@ -105,8 +107,11 @@ class Machine:
             self.regs[rd] = value & MASK32
         self.pc = pc & MASK32
 
-    def stop(self, code):
+    def stop(self, code, tval=0):
+        # a stopped machine records the cause, what faulted and the trapping PC
         self.trap = code
+        self.tval = tval & MASK32
+        self.epc = self.pc
 
     # -- instruction semantics -------------------------------------------------
 
@@ -149,7 +154,7 @@ class Machine:
 
         def jump(rd_, value, target):
             if target % 4 != 0:
-                self.stop(TRAP_JUMP)
+                self.stop(TRAP_JUMP, target)
             else:
                 self.write(rd_, value, target)
 
@@ -166,26 +171,26 @@ class Machine:
             if ok_reg(rd):
                 self.write(rd, imm_u, nxt)
             else:
-                self.stop(TRAP_ILLEGAL)
+                self.stop(TRAP_ILLEGAL, w)
         elif op == 0x17:                                 # AUIPC
             if ok_reg(rd):
                 self.write(rd, (self.pc + imm_u) & MASK32, nxt)
             else:
-                self.stop(TRAP_ILLEGAL)
+                self.stop(TRAP_ILLEGAL, w)
         elif op == 0x6F:                                 # JAL
             if ok_reg(rd):
                 jump(rd, nxt, (self.pc + imm_j) & MASK32)
             else:
-                self.stop(TRAP_ILLEGAL)
+                self.stop(TRAP_ILLEGAL, w)
         elif op == 0x67:                                 # JALR
             if f3 == 0 and ok2(rd, r1):
                 t = ((a + imm_i) & MASK32) & ~1
                 jump(rd, nxt, t)
             else:
-                self.stop(TRAP_ILLEGAL)
+                self.stop(TRAP_ILLEGAL, w)
         elif op == 0x63:                                 # BRANCH
             if f3 in (2, 3) or not ok2(r1, r2):
-                self.stop(TRAP_ILLEGAL)
+                self.stop(TRAP_ILLEGAL, w)
             else:
                 if f3 == 0:
                     taken = a == b
@@ -205,12 +210,12 @@ class Machine:
                     self.write(0, 0, nxt)
         elif op == 0x03:                                 # LOAD
             if not (f3 < 3 or f3 in (4, 5)) or not ok2(rd, r1):
-                self.stop(TRAP_ILLEGAL)
+                self.stop(TRAP_ILLEGAL, w)
             else:
                 ad = (a + imm_i) & MASK32
                 size = 1 << (f3 & 3)
                 if ad % size != 0:
-                    self.stop(TRAP_LOAD)
+                    self.stop(TRAP_LOAD, ad)
                 elif (ad >> 31) & 1:
                     v = self.inp.pop(0) if self.inp else MASK32
                     self.write(rd, v, nxt)
@@ -224,12 +229,12 @@ class Machine:
                     self.write(rd, v, nxt)
         elif op == 0x23:                                 # STORE
             if f3 > 2 or not ok2(r1, r2):
-                self.stop(TRAP_ILLEGAL)
+                self.stop(TRAP_ILLEGAL, w)
             else:
                 ad = (a + imm_s) & MASK32
                 size = 1 << f3
                 if ad % size != 0:
-                    self.stop(TRAP_STORE)
+                    self.stop(TRAP_STORE, ad)
                 elif (ad >> 31) & 1:
                     self.out.append(b & 0xFF)
                     self.pc = nxt
@@ -242,7 +247,7 @@ class Machine:
             if ok_imm and ok2(rd, r1):
                 self.write(rd, alu(f3, f3 == 5 and f7 == 0x20, a, imm_i), nxt)
             else:
-                self.stop(TRAP_ILLEGAL)
+                self.stop(TRAP_ILLEGAL, w)
         elif op == 0x33:                                 # OP
             ok_op = f7 == 0 or (f7 == 0x20 and f3 in (0, 5))
             if ok_op and ok3(rd, r1, r2):
@@ -250,18 +255,18 @@ class Machine:
             elif self.mx and f7 == 1 and ok3(rd, r1, r2):
                 self.write(rd, muldiv(f3, a, b), nxt)
             else:
-                self.stop(TRAP_ILLEGAL)
+                self.stop(TRAP_ILLEGAL, w)
         elif op == 0x0F:                                 # FENCE (a no-op here)
             self.write(0, 0, nxt)
         elif op == 0x73:                                 # SYSTEM
             if w == 0x00000073:
-                self.stop(TRAP_ECALL)
+                self.stop(TRAP_ECALL, 0)
             elif w == 0x00100073:
-                self.stop(TRAP_EBREAK)
+                self.stop(TRAP_EBREAK, 0)
             else:
-                self.stop(TRAP_ILLEGAL)
+                self.stop(TRAP_ILLEGAL, w)
         else:
-            self.stop(TRAP_ILLEGAL)
+            self.stop(TRAP_ILLEGAL, w)
 
     def step(self):
         if self.trap == 0:
@@ -276,6 +281,9 @@ class Machine:
         fields += [f"{r:08x}" for r in regs]
         fields += [f"{b:02x}" for b in mem]
         return " ".join(fields)
+
+    def trap_line(self, k):
+        return f"T {k} {self.trap:08x} {self.tval:08x} {self.epc:08x}"
 
 
 def muldiv(f3, a, b):
@@ -319,6 +327,7 @@ def trace(fx):
              f"mem_base {fx.mbase} mem_count {fx.mcount}"]
     for k in range(fx.steps + 1):
         lines.append(m.state_line(fx, k))
+        lines.append(m.trap_line(k))
         if k < fx.steps:
             m.step()
     return lines

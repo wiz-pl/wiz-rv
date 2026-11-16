@@ -7,9 +7,28 @@ def showBytes : List Nat → String
   | .nil => ""
   | .cons x xs => Nat.repr x ++ " " ++ showBytes xs
 
-def report (name : String) (p : List Asm) (steps : Nat) : IO Unit :=
-  let s := Rv.run (Cfg.rv32e 12) steps (Arch.start (Cfg.rv32e 12) (Asm.assemble p));
+def reportCfg (name : String) (c : Cfg) (p : List Asm) (steps : Nat) : IO Unit :=
+  let s := Rv.run c steps (Arch.start c (Asm.assemble p));
   IO.println (name ++ ": trap " ++ Nat.repr s.trap ++ ", pc " ++ Nat.repr s.pc.toNat ++ ", x1 " ++ Nat.repr (Rv.reg s 1).toNat ++ ", x15 " ++ Nat.repr (Rv.reg s 15).toNat ++ ", out " ++ showBytes (List.reverse s.out))
+def report (name : String) (p : List Asm) (steps : Nat) : IO Unit := reportCfg name (Cfg.rv32e 12) p steps
+
+def cfgA : Cfg := Cfg.rv32ia 12
+
+-- the trap state (cause, tval, epc) after the run: the specification's `mcause`/
+-- `mtval`/`mepc` triple
+def reportTrap (name : String) (p : List Asm) (steps : Nat) : IO Unit :=
+  let s := Rv.run (Cfg.rv32e 12) steps (Arch.start (Cfg.rv32e 12) (Asm.assemble p));
+  IO.println (name ++ ": cause " ++ Nat.repr s.trap ++ ", tval " ++ Nat.repr s.tval.toNat
+    ++ ", epc " ++ Nat.repr s.epc.toNat ++ ", pc " ++ Nat.repr s.pc.toNat)
 
 def main : IO Unit := do
-  report "sum" Prog.sum 100
+  report "sum" Prog.sum 100;
+  report "csr" Prog.csr 100;
+  reportCfg "atomics" cfgA Prog.atomics 200;
+  reportCfg "atomics ddr" cfgA Prog.atomicsDdr 100;
+  reportCfg "atomics resv" cfgA Prog.atomicsResv 30;
+  reportTrap "trapLoad" Prog.trapLoad 50;
+  reportTrap "trapStore" Prog.trapStore 50;
+  reportTrap "trapJump" Prog.trapJump 50;
+  reportTrap "trapIllegal" Prog.trapIllegal 50;
+  reportTrap "trapEcall" Prog.trapEcall 50

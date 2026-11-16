@@ -1,0 +1,21 @@
+-- test: check
+import Rv.Golem.Board
+import Text
+-- The golem board configuration (`Rv.Golem.Board`, src/Rv/Golem/Board.wiz): the Arty
+-- A7-35T pin table (75 pins, 55 top-level ports: DDR3 from `Ddr3.Board`, the clock,
+-- UART, LEDs, JA/JB and BTN), the PLL's four clocks (100/400/400/200 MHz from the
+-- 100 MHz oscillator), and the reset domains (BTN0 plus DDR3 calibration for the core,
+-- 255 locked cycles for the PHY). The same `GBoard.problems` runs in `golem board`,
+-- before a bitstream is built; it does not elaborate the netlist, so it stays under the
+-- build cap. The netlist-time check (`Xdc.check` on the generated top) is in
+-- `app/golem.wiz`'s `gen`.
+
+def B.report : String :=
+  let probs := GBoard.problems;
+  "golem board: " <+> Hdl.show GBoard.pinCount <+> " pins, " <+> Hdl.show GBoard.portsCount
+    <+> " top ports, " <+> Hdl.show (List.length GBoard.resets) <+> " reset domains, clocks "
+    <+> GBoard.clockSummary <+> ", "
+    <+> (if Nat.beq (List.length probs) 0 then "PASS"
+         else "FAIL: " <+> Hdl.sepBy "; " probs)
+
+#eval B.report

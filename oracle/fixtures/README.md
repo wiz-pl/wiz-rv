@@ -15,10 +15,13 @@ address space. `steps` is the number of instructions traced, `mem_base` and
 `mem_count` select the compared data bytes (`0x2000 … 0x20ff`).
 
 The files are generated (and can be regenerated) by `../scripts/mkfixtures.py`,
-which is a tiny assembler only; the programs themselves are the fixtures. They
-use base-I encodings only and avoid traps, misaligned accesses, ECALL/EBREAK,
-CSRs, the M extension and the I/O port, because those are either Wiz-specific
-choices or outside the configured Sail/Spike models.
+which is a tiny assembler only; the programs themselves are the fixtures. The
+five `alu`/`branch`/`mem`/`shift`/`mixed` fixtures use base-I encodings only and
+avoid traps, misaligned accesses, ECALL/EBREAK, CSRs, the M extension and the I/O
+port, because those are either Wiz-specific choices or outside the configured
+Sail/Spike models. The six `trap_*` fixtures deliberately stop the machine on
+each trap cause and are compared between `isa`, `core` and `py` only (Sail/Spike
+enter a handler, so the harness skips them).
 
 The pipeline trace retires `steps + 1` instructions (line `step` is the pre-state
 of instruction `step`), so a fixture may end in `SPIN` (`jal x0, 0`): the spin is
