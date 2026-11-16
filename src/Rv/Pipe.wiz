@@ -565,8 +565,27 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
   -- instruction's register numbers are bits of the word, not the decode's output; yosys
   -- gives each read its own LUT RAM)
   let rdByp := fun (rs : r B5) (m : r (HwTy.mem ab 32)) => (byp rs (Hw.memRead m (regIx ab rs)) : r B32);
-  let rv1 := Hw.mux cD (rdByp dC.r1 ms.rfa) (rdByp dW.r1 ms.rfa);
-  let rv2 := Hw.mux cD (rdByp dC.r2 ms.rfb) (rdByp dW.r2 ms.rfb);
+  -- (a 16-bit instruction's register numbers straight from the halfword, by quadrant and
+  -- funct3, not through the expansion's legality tests: the same as `dC.r1`/`dC.r2` for
+  -- every legal encoding that reads the register; an illegal one traps, and an operand
+  -- an instruction does not read is not used)
+  let hw : r B16 := Hw.slice 0 16 wD;
+  let cq : r B2 := Hw.slice 0 2 hw;
+  let cf3 : r B3 := Hw.slice 13 3 hw;
+  let crd : r B5 := Hw.slice 7 5 hw;
+  let crs2 : r B5 := Hw.slice 2 5 hw;
+  let crs1p : r B5 := Hw.cat (Hw.lit 2 1) (Hw.slice 7 3 hw : r B3);
+  let crdp : r B5 := Hw.cat (Hw.lit 2 1) (Hw.slice 2 3 hw : r B3);
+  let k5 := fun (n : Nat) => (Hw.lit 5 n : r B5);
+  let r1C : r B5 := Hw.mux (isK cq 0) (Hw.mux (isK cf3 0) (k5 2) crs1p)
+    (Hw.mux (isK cq 1)
+      (Hw.mux (isK cf3 0) crd (Hw.mux (isK cf3 2) (k5 0) (Hw.mux (isK cf3 3) (k5 2) crs1p)))
+      (Hw.mux (Hw.or (isK cf3 2) (isK cf3 6)) (k5 2)
+        (Hw.mux (gate (isK cf3 4) (gate (Hw.not (bitOf 12 hw)) (Hw.not (isK crs2 0)))) (k5 0) crd)));
+  let r2C : r B5 := Hw.mux (isK cq 0) crdp
+    (Hw.mux (isK cq 1) (Hw.mux (isK cf3 4) crdp (k5 0)) crs2);
+  let rv1 := Hw.mux cD (rdByp r1C ms.rfa) (rdByp dW.r1 ms.rfa);
+  let rv2 := Hw.mux cD (rdByp r2C ms.rfb) (rdByp dW.r2 ms.rfb);
   let u1 := Hw.not (Hw.or (Hw.or d.lui d.auipc) d.jal);
   let ar := Hw.or d.op d.opimm;
   let df3 := d.f3;
