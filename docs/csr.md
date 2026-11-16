@@ -20,9 +20,9 @@ the specification models (`src/Rv/Isa.wiz`). M is the only privilege mode.
 | `mvendorid`, `marchid`, `mimpid`, `mconfigptr` | 0xf11 … 0xf15 | read-only 0 | — |
 | `mhartid` | 0xf14 | read-only: the hart's number (golem's four-hart SoC), else 0 | — |
 
-A CSR instruction to any other number is illegal, and so is a write (CSRRW, or
-CSRRS/CSRRC with rs1 ≠ x0, or their immediates with zimm ≠ 0) to the read-only block
-0xc00 … 0xfff. The masks are `Csr.mstatusW`/`mieW`/`mtvecW`/`mepcW` (`Rv.csrWrite`,
+A CSR instruction to any other number is illegal, and so is a write to the read-only
+block 0xc00 … 0xfff. CSRRW and CSRRWI always write (CSRRWI with zimm = 0 writes 0);
+CSRRS/CSRRC write only with rs1 ≠ x0, and CSRRSI/CSRRCI only with zimm ≠ 0. The masks are `Csr.mstatusW`/`mieW`/`mtvecW`/`mepcW` (`Rv.csrWrite`,
 `coreCsrWarl`).
 
 ## Traps

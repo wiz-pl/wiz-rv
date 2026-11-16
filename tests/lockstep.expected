@@ -11,6 +11,7 @@
 2 instructions, 5 cycles, trap 1, out agrees
 1 instructions, 3 cycles, trap 3, out agrees
 21 instructions, 43 cycles, trap 2, out agrees
+20 instructions, 48 cycles, trap 2, out 165 0 9 9 9 9 0 agrees
 275 instructions, 356 cycles, trap 2, out 11 1 7 128 11 7 8 agrees
 371 instructions, 862 cycles, trap 2, out 104 1 34 agrees
 47 instructions, 193 cycles, trap 2, out 33 135 33 67 33 34 agrees
