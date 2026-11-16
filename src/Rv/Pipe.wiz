@@ -550,7 +550,11 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
   ----------------------------------------------------------------- D
   let fz := fe.fz;
   let run := isK fz 0;
-  let ω d := decode ab mx wD;
+  -- the decode of both views of D's word, picked by its low bits: a 32-bit instruction's
+  -- decode does not wait for the C expansion (`decode` = this, field by field)
+  let cD : r W1 := Hw.not (isK (Hw.slice 0 2 wD : r B2) 3);
+  let ω d := Dec.sel cD (decodeX ab mx (Hw.lit 1 1) (Cx.expand (Hw.slice 0 16 wD : r B16)))
+    (decodeX ab mx (Hw.lit 1 0) wD);
   let immD := Hw.mux (Hw.or d.lui d.auipc) d.immU (Hw.mux d.jal d.immJ (Hw.mux d.branch d.immB (Hw.mux d.store d.immS d.immI)));
   let byp := fun (rs : r B5) (v : r B32) => (Hw.mux (Hw.and rr.we (Hw.eq rr.rd rs)) rr.val v : r B32);
   let rv1 := byp d.r1 (Hw.memRead ms.rfa (regIx ab d.r1));

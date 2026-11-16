@@ -499,9 +499,11 @@ def Cx.expand {r : HwTy → Type} [Hw r] (h : r B16) : r B32 :=
         (Hw.mux (isK f3 6) (Cx.S12 Op.store 2 (Hw.lit 5 2) rs2 (Cx.swspimm h)) bad)));
   Hw.mux (isK q 0) q0w (Hw.mux (isK q 1) q1w (Hw.mux (isK q 2) q2w bad))
 
-def decode {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (w : r B32) : Dec r :=
-  let c : r W1 := Hw.not (isK (Hw.slice 0 2 w : r B2) 3);
-  let we : r B32 := Hw.mux c (Cx.expand (Hw.slice 0 16 w : r B16)) w;
+-- the decode of an instruction word already expanded (`we`), with `c` saying whether it
+-- came from a 16-bit encoding. `decode` is this after the expansion; the pipeline calls it
+-- on both views of D's word and picks afterwards (`Dec.sel`), so that the expansion is
+-- not in series with the decode of a 32-bit instruction.
+def decodeX {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (c : r W1) (we : r B32) : Dec r :=
   let opc : r B7 := Hw.slice 0 7 we;
   let rd : r B5 := Hw.slice 7 5 we;
   let f3 : r B3 := Hw.slice 12 3 we;
@@ -570,6 +572,24 @@ def decode {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (w : r B32) : Dec r
       (Hw.cat (Hw.slice 21 10 we : r (HwTy.bits 10)) (Hw.lit 1 0))));
   Dec.mk rd f3 r1 r2 (bitOf 30 we) lui auipc jal jalr branch load store opimm op md ecall ebreak fence legal
     immI immS immB immU immJ opA lrA scA amoA f5 csrLegal csrAddr csrWrite mret wfi c we
+
+def decode {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (w : r B32) : Dec r :=
+  let c : r W1 := Hw.not (isK (Hw.slice 0 2 w : r B2) 3);
+  decodeX ab mx c (Hw.mux c (Cx.expand (Hw.slice 0 16 w : r B16)) w)
+
+-- field by field: `a` when `c`, else `b`
+def Dec.sel {r : HwTy → Type} [Hw r] (c : r W1) (a b : Dec r) : Dec r :=
+  Dec.mk (Hw.mux c a.rd b.rd) (Hw.mux c a.f3 b.f3) (Hw.mux c a.r1 b.r1) (Hw.mux c a.r2 b.r2)
+    (Hw.mux c a.alt b.alt) (Hw.mux c a.lui b.lui) (Hw.mux c a.auipc b.auipc) (Hw.mux c a.jal b.jal)
+    (Hw.mux c a.jalr b.jalr) (Hw.mux c a.branch b.branch) (Hw.mux c a.load b.load)
+    (Hw.mux c a.store b.store) (Hw.mux c a.opimm b.opimm) (Hw.mux c a.op b.op) (Hw.mux c a.md b.md)
+    (Hw.mux c a.ecall b.ecall) (Hw.mux c a.ebreak b.ebreak) (Hw.mux c a.fence b.fence)
+    (Hw.mux c a.legal b.legal) (Hw.mux c a.immI b.immI) (Hw.mux c a.immS b.immS)
+    (Hw.mux c a.immB b.immB) (Hw.mux c a.immU b.immU) (Hw.mux c a.immJ b.immJ)
+    (Hw.mux c a.atm b.atm) (Hw.mux c a.lr b.lr) (Hw.mux c a.sc b.sc) (Hw.mux c a.amo b.amo)
+    (Hw.mux c a.f5 b.f5) (Hw.mux c a.csr b.csr) (Hw.mux c a.csrAddr b.csrAddr)
+    (Hw.mux c a.csrWrite b.csrWrite) (Hw.mux c a.mret b.mret) (Hw.mux c a.wfi b.wfi)
+    (Hw.mux c a.c b.c) (Hw.mux c a.iw b.iw)
 
 ------------------------------------------------------------------------------------
 -- One cycle
