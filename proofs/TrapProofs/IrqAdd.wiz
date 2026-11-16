@@ -1,0 +1,4 @@
+import TrapProofs.Base
+-- Pf.irq_add: the statement and its form are in proofs/TrapProofs/Base.wiz and docs/csr.md
+def Pf.irq_add : Pf.IrqClaim Pf.mtip Pf.withIrq (Pf.w (A.add 3 1 2)) := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h hs =>
+  Pf.irqOk Pf.mtip (Pf.withIrq a) (Pf.w (A.add 3 1 2)) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio rfl h hs

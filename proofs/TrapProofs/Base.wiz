@@ -1,4 +1,7 @@
 import Rv.Proofs
+-- The definitions and glue for the trap-entry theorem (docs/csr.md); each claim is its
+-- own file in proofs/TrapProofs (one process per claim keeps memory per check bounded).
+-- Check them all with scripts/trap-proofs.sh.
 -- Kernel-checked trap-entry, interrupt, MRET, WFI and CSR claims for the multi-cycle
 -- RV32E core (16 registers, 2 KB), in the style of src/Rv/Proofs.wiz: the core starts
 -- in its decode phase on an instruction word, with its CSR file, mtval and register
@@ -87,19 +90,9 @@ def Pf.EnterClaimAt (p : Arch → Arch) (w : Nat) : Prop :=
     = Pf.entryOf (Rv.exec Pf.cfg (p a) w)
 def Pf.EnterClaim (w : Nat) : Prop := Pf.EnterClaimAt Pf.withH w
 
-def Pf.ecall_enter : Pf.EnterClaim (Pf.w A.ecall) := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
-  Pf.entryOk In.idle (Pf.withH a) (Pf.w A.ecall) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio (Pf.entryOf (Rv.exec Pf.cfg (Pf.withH a) (Pf.w A.ecall))) rfl h
-def Pf.ebreak_enter : Pf.EnterClaim (Pf.w A.ebreak) := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
-  Pf.entryOk In.idle (Pf.withH a) (Pf.w A.ebreak) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio (Pf.entryOf (Rv.exec Pf.cfg (Pf.withH a) (Pf.w A.ebreak))) rfl h
-def Pf.illegal_enter : Pf.EnterClaim 4294967295 := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
-  Pf.entryOk In.idle (Pf.withH a) 4294967295 m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio (Pf.entryOf (Rv.exec Pf.cfg (Pf.withH a) 4294967295)) rfl h
-
 ------------------------------------------------------------------------------------
 -- (2) MRET: from inside the handler, pc = mepc, MIE = MPIE, MPIE = 1; nothing else of
 -- the trap state moves.
-
-def Pf.mret_ok : Pf.EnterClaimAt Pf.inH (Pf.w A.mret) := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
-  Pf.entryOk In.idle (Pf.inH a) (Pf.w A.mret) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio (Pf.entryOf (Rv.exec Pf.cfg (Pf.inH a) (Pf.w A.mret))) rfl h
 
 ------------------------------------------------------------------------------------
 -- (3) Interrupt entry: with MIE and MTIE set and MTIP pending, the instruction in
@@ -135,19 +128,12 @@ def Pf.irqOk (x : In HwTy.El) (b : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → B
   Eq.trans (Pf.entryOk x b w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio (Pf.entryOf (Pf.stepF Pf.cfg b w)) hE h) (Eq.symm (Pf.stepAt Pf.cfg b w hs))
 
 -- the interrupt taken before an ADD (the word does not matter but must be fixed)
-def Pf.irq_add : Pf.IrqClaim Pf.mtip Pf.withIrq (Pf.w (A.add 3 1 2)) := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h hs =>
-  Pf.irqOk Pf.mtip (Pf.withIrq a) (Pf.w (A.add 3 1 2)) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio rfl h hs
 
 ------------------------------------------------------------------------------------
 -- (4) WFI: with MTIP pending and enabled it completes (pc + 4) and is not interrupted
 -- (the interrupt is taken on the next instruction); with nothing pending it stalls
 -- (the core stays in E on it, nothing moves, and the specification's step is the
 -- identity).
-
-def Pf.wfi_wake : Pf.IrqClaim Pf.mtip Pf.withIrq Rv.wfiWord := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h hs =>
-  Pf.irqOk Pf.mtip (Pf.withIrq a) Rv.wfiWord m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio rfl h hs
-def Pf.wfi_stall : Pf.IrqClaim In.idle Pf.withH Rv.wfiWord := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h hs =>
-  Pf.irqOk In.idle (Pf.withH a) Rv.wfiWord m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio rfl h hs
 
 ------------------------------------------------------------------------------------
 -- (5) A CSR instruction: CSRRW x3, mscratch, x1 reads the old mscratch into x3 and
@@ -165,9 +151,3 @@ def Pf.csrG (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 ac
     (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) (q : Pf.Q) : Pf.CsrObs :=
   Pf.csrCore (Pf.stepX In.idle (Pf.setQ (Pf.stepX In.idle (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) q))
 
-def Pf.csrrw_ok : (a : Arch) → (m0 m1 m2 m3 : BitVec 9 → BitVec 8) → (x1 x2 acc dv rm : BitVec 32) → (cnt srd : BitVec 5) → (sf3 : BitVec 3) → (slo : BitVec 2) → (sio : BitVec 1) →
-    Pf.fetchQ (Pf.withH a) m0 m1 m2 m3 = Pf.bytes (Pf.w (A.csrrw 3 Csr.aMscratch 1)) →
-    Pf.csrCore (Pf.stepX In.idle (Pf.stepX In.idle (Pf.atC (Pf.withH a) (Pf.w (A.csrrw 3 Csr.aMscratch 1)) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)))
-      = Pf.csrSpec (Rv.exec Pf.cfg (Pf.withH a) (Pf.w (A.csrrw 3 Csr.aMscratch 1))) :=
-  fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
-    Eq.trans (Eq.congrArg (Pf.csrG (Pf.withH a) (Pf.w (A.csrrw 3 Csr.aMscratch 1)) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h) rfl

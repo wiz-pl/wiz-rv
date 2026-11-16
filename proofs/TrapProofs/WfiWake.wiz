@@ -1,0 +1,4 @@
+import TrapProofs.Base
+-- Pf.wfi_wake: the statement and its form are in proofs/TrapProofs/Base.wiz and docs/csr.md
+def Pf.wfi_wake : Pf.IrqClaim Pf.mtip Pf.withIrq Rv.wfiWord := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h hs =>
+  Pf.irqOk Pf.mtip (Pf.withIrq a) Rv.wfiWord m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio rfl h hs

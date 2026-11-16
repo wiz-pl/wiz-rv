@@ -1,0 +1,4 @@
+import TrapProofs.Base
+-- Pf.ebreak_enter: the statement and its form are in proofs/TrapProofs/Base.wiz and docs/csr.md
+def Pf.ebreak_enter : Pf.EnterClaim (Pf.w A.ebreak) := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+  Pf.entryOk In.idle (Pf.withH a) (Pf.w A.ebreak) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio (Pf.entryOf (Rv.exec Pf.cfg (Pf.withH a) (Pf.w A.ebreak))) rfl h
