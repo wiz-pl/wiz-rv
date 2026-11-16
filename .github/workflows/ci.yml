@@ -106,12 +106,12 @@ jobs:
           # ci.sh reports a missing trace binary as SKIP; here everything must run (its
           # "SKIP riscv-formal checks" is expected: no --sby)
           oracle/scripts/ci.sh | tee "$RUNNER_TEMP/oracle.log"
-          ! grep -q '^SKIP oracle' "$RUNNER_TEMP/oracle.log"
+          if grep -q '^SKIP oracle' "$RUNNER_TEMP/oracle.log"; then exit 1; fi
       - name: rvfi beats against the Python reference (Icarus)
         run: |
           for fx in alu branch mem mixed shift; do
             python3 oracle/scripts/oracle.py rvfi --fixture "$fx" | tee "$RUNNER_TEMP/rvfi.log"
-            ! grep -q '^SKIP' "$RUNNER_TEMP/rvfi.log"
+            if grep -q '^SKIP' "$RUNNER_TEMP/rvfi.log"; then exit 1; fi
           done
 
   # 3. The cores against the specification: tests/lockstep.wiz (multi-cycle core),

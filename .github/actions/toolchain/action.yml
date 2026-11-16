@@ -3,7 +3,9 @@ description: >
   Nix, then wiz and grail at the commit `wiz-toolchain` names, built from the wiz flake
   (github:wiz-pl/wiz/COMMIT#wiz) and put on PATH. The store paths come from the wiz Cachix
   cache when it has them; otherwise from this repository's Actions cache, which the
-  `toolchain` job fills after building them once (a cold build of wiz takes a while).
+  `toolchain` job fills after building them once (a cold build of wiz takes about 15
+  minutes): a `nix-store --export` of wiz, whose references are substituted from
+  cache.nixos.org before the import.
   Expects the checkout in ./wiz-rv (wiz-ddr3 next to it, as grail.wiz wants).
 inputs:
   save:
@@ -32,10 +34,6 @@ runs:
         fi
         echo "ref=$ref" >> "$GITHUB_OUTPUT"
         echo "toolchain: $spec -> github:wiz-pl/wiz/$ref#wiz"
-        # A local binary cache that the Nix daemon substitutes from (below). Created by
-        # this user before Nix is installed, so `nix copy --to` can write into it later.
-        mkdir -p "$RUNNER_TEMP/wiz-nix/nar"
-        [ -f "$RUNNER_TEMP/wiz-nix/nix-cache-info" ] || printf 'StoreDir: /nix/store\n' > "$RUNNER_TEMP/wiz-nix/nix-cache-info"
     - name: Restore the toolchain (Actions cache)
       id: restore
       uses: actions/cache/restore@v4
@@ -43,9 +41,6 @@ runs:
         path: ${{ runner.temp }}/wiz-nix
         key: wiz-toolchain-${{ steps.pin.outputs.ref }}-${{ runner.os }}-${{ runner.arch }}
     - uses: cachix/install-nix-action@v31
-      with:
-        extra_nix_config: |
-          extra-substituters = file://${{ runner.temp }}/wiz-nix?trusted=1&priority=45
     # Substitution only (no token: the cache is public, and nothing is pushed).
     - uses: cachix/cachix-action@v16
       with:
@@ -62,6 +57,15 @@ runs:
         if [ "$SAVE" != true ] && [ "$HIT" != true ]; then
           echo "::warning title=toolchain::not in the Actions cache: building wiz here (the toolchain job should have saved it)"
         fi
+        cache=$RUNNER_TEMP/wiz-nix
+        if [ "$HIT" = true ]; then
+          # wiz's references come from cache.nixos.org (they are nixpkgs'); then wiz itself
+          # (the runner's user is trusted, so the unsigned import is accepted)
+          # shellcheck disable=SC2046
+          nix-store --realise $(cat "$cache/references") > /dev/null &&
+            nix-store --import < "$cache/wiz.closure" ||
+            echo "::warning title=toolchain::the cached wiz did not import; building it"
+        fi
         wiz=$(nix build "github:wiz-pl/wiz/$REF#wiz" --no-link --print-out-paths -L)
         echo "$wiz/bin" >> "$GITHUB_PATH"
         "$wiz/bin/wiz" --version
@@ -71,11 +75,13 @@ runs:
           echo "$p: $out"
         done
         if [ "$SAVE" = true ] && [ "$HIT" != true ]; then
-          # only what neither cache.nixos.org nor Cachix has: wiz and wiz-unwrapped
-          paths=$(nix path-info -r "$wiz" | grep -E '^/nix/store/[0-9a-z]{32}-wiz-(unwrapped-)?[0-9]')
-          echo "$paths"
-          nix copy --no-recursive --to "file://$RUNNER_TEMP/wiz-nix?compression=zstd" $paths
-          du -sh "$RUNNER_TEMP/wiz-nix"
+          # only wiz itself (its references are nixpkgs', on cache.nixos.org; wiz-unwrapped
+          # is a build input, not a reference)
+          mkdir -p "$cache"
+          nix-store --query --references "$wiz" | grep -vxF "$wiz" > "$cache/references"
+          cat "$cache/references"
+          nix-store --export "$wiz" > "$cache/wiz.closure"
+          du -sh "$cache"
           echo "WIZ_TOOLCHAIN_SAVE=true" >> "$GITHUB_ENV"
         fi
     - name: Save the toolchain (Actions cache)
