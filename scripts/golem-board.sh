@@ -14,8 +14,14 @@
 #                                             authorise hardware)
 #
 # Options after the command: --boot rom|loader|upload (default upload, GLoad.boot and
-# sw/golem-upload; loader = rvload/Prog.boot), --variant golem|mc|both (default golem;
-# mc is golemMc at 50 MHz effective). The two hardware commands are
+# sw/golem-upload; loader = rvload/Prog.boot), --variant golem|mc|four|four_nol1|both
+# (default golem; mc is golemMc at 50 MHz effective; four is four multi-cycle harts
+# with per-hart L1s, four_nol1 the same without them).
+# `four` is the A7-35T multicore target: 4 harts, shared UART/OLED/timer/mailbox and
+# DDR. Its harts are enabled every other cycle, so its XDC uses a 20 ns (50 MHz) target
+# and `timing` checks 50 MHz for it; the bus/DDR stay at 100 MHz. See DESIGN.md,
+# "Four harts" and "Timing: the harts are a 50 MHz (20 ns) target".
+# The two hardware commands are
 #   openFPGALoader -b arty_a7_35t build/a35t/golem.bit
 #   sw/golem-upload /dev/ttyUSB1 prog.bin
 #

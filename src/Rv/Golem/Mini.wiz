@@ -33,6 +33,8 @@ structure MOut (r : HwTy → Type) where
   addr : r B32
   wdata : r B32
   wstrb : r B4
+  aop : r B2
+  af5 : r B5
   deriving Bundle
 
 def MB13 : HwTy := HwTy.bits 13
@@ -71,14 +73,18 @@ def Mini.step (cfg : RgbCfg) (n : Nat) {r : HwTy → Type} [Hw r] (s : MSt cfg.f
   -- the interrupt/timer block: the core's 16-bit register offset, and the live sources
   -- (the UART's received byte; the spare input is tied low)
   let ioff : r B16 := Hw.mux fbA (Hw.lit 16 0) off;
-  let isrc : r B5 := Intc.srcBits (Intc.Src.mk s.full (Hw.lit 1 0));
+  let isrc : r B7 := Intc.srcBits (Intc.Src.mk s.full (Hw.lit 1 0));
+  let mip : r B32 := Intc.mip s.intc isrc 0;
   let status : r B32 := Hw.cat (Hw.lit 30 0) (Hw.cat s.full (Hw.and (txIdle s.tx) (Hw.not s.txGo)));
   let ioIn : r B32 := Hw.mux uartA (Hw.mux s.full (Hw.cat (Hw.lit 24 0) s.byte) (Hw.lit 32 4294967295))
     (Hw.mux (isK off 4) status
     (Hw.mux (isK off 16) (Hw.slice 0 32 s.cyc)
     (Hw.mux (isK off 20) (Hw.slice 32 32 s.cyc)
-    (Hw.mux (isK off 64) (Hw.cat (Hw.lit 30 0) x.ddr) (Intc.read s.intc isrc ioff)))));
-  let cr := coreStep 5 12 .true s.cpu (In.mk (Hw.and (txIdle s.tx) (Hw.not s.txGo)) ioIn x.ready x.rvalid x.rdata);
+    (Hw.mux (isK off 64) (Hw.cat (Hw.lit 30 0) x.ddr)
+    (Hw.mux (isK off GMap.mip) mip
+      (Intc.read s.intc isrc ioff))))));
+  let cr := coreStep 5 12 .true s.cpu (In.mk (Hw.and (txIdle s.tx) (Hw.not s.txGo)) ioIn x.ready x.rvalid x.rdata
+    (Intc.irqM mip) (Intc.irqT mip) (Intc.irqE mip));
   let ω o := Out.unpack (Hw.snd cr);
   let ω c := CoreSt.unpack 5 12 (Hw.fst cr);
   let intcNext := Intc.step s.intc (Hw.lit 1 1) isrc
@@ -86,7 +92,7 @@ def Mini.step (cfg : RgbCfg) (n : Nat) {r : HwTy → Type} [Hw r] (s : MSt cfg.f
   -- BTN0 resets the phase, the PC and the trap code (the memories/registers keep)
   let c2 := CoreSt.mk (Hw.mux rst (Hw.lit 4 Ph.f) c.ph) (Hw.mux rst (Hw.lit 32 0) c.pc) c.q0 c.q1 c.q2 c.q3
     c.m0 c.m1 c.m2 c.m3 c.rfa c.rfb c.x1 c.x2 c.acc c.dv c.rm c.cnt c.srd c.sf3 c.slo c.sio (Hw.mux rst (Hw.lit 3 0) c.trap)
-    c.busq c.fromBus c.badr c.bwe c.bwd c.bst c.bret c.bsent c.ra c.l1q c.l1t c.l1d c.l1tag c.fromL1 c.rmode c.rk c.rgap c.rbuf c.rline c.bnew;
+    (Hw.mux rst (Hw.lit 32 0) c.tval) c.busq c.fromBus c.badr c.bwe c.bwd c.bst c.bret c.bsent c.ra c.l1q c.l1t c.l1d c.l1tag c.fromL1 c.rmode c.rk c.rgap c.rbuf c.rline c.bnew c.resv c.resOk c.amoA c.amoD c.amoO c.sf5 c.ak c.baop c.baf5 (CsrFile.reset rst c.csr);
   -- the OLED: the pixel at the controller's (x, y), read every cycle
   let ω ol := s.oled;
   let y13 : r MB13 := Hw.cat (Hw.lit 7 0) ol.gen.y;
@@ -112,7 +118,7 @@ def Mini.step (cfg : RgbCfg) (n : Nat) {r : HwTy → Type} [Hw r] (s : MSt cfg.f
       (Hw.cat ol.pins.pmoden (Hw.cat ol.pins.vccen (Hw.cat ol.pins.res (Hw.cat ol.pins.dc
         (Hw.cat ol.spi.sclk (Hw.cat (Hw.lit 1 0) (Hw.cat ol.spi.mosi ol.pins.cs)))))))
       (Hw.lit 8 0)
-      o.valid o.pend o.we o.addr o.wdata o.wstrb))
+      o.valid o.pend o.we o.addr o.wdata o.wstrb o.aop o.af5))
 
 -- a framebuffer preloaded with `pixels` (the test starts the streamer at the frame)
 def Mini.pix0 (pixels : List Nat) : HwTy.El (HwTy.mem 13 16) :=

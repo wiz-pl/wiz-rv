@@ -1,0 +1,599 @@
+import Prelude
+-- A small operational memory model of the golem bus, for the coherence note
+-- (`/workspace/wiz-notes/golem-coherence-model.md`).
+--
+-- It is deliberately *not* a model of the RTL: it is an abstract machine that keeps
+-- only the features that decide which litmus outcomes are possible:
+--
+--   * N masters, each with an in-order program of loads, stores, uncached (MMIO)
+--     accesses, waits and fences;
+--   * a per-master store buffer of bounded depth (0 for the multi-cycle core, 1 for
+--     the pipelined core, unbounded for the TSO reference);
+--   * a private L1 that is write-through, no-write-allocate, updates a present line,
+--     and is *not* invalidated by another master's writes unless `coherent` is set;
+--   * one shared memory (the shared 8 KB DDR cache, which is the visibility point;
+--     its write-back to DDR is invisible to bus masters and not modelled);
+--   * an interleaving scheduler that may commit a store from any master's store
+--     buffer at any time. That over-approximates `GBus.arb`: the real arbiter is
+--     fixed-priority and one-outstanding, so it picks *one* total order of the
+--     requests; this model picks any total order that preserves each master's FIFO.
+--     If an outcome is impossible here, it is impossible on the real bus.
+--
+-- `CM.outcomes` enumerates every terminal state (with memoisation on the whole
+-- machine state) and returns the sorted, deduplicated readings. A deadlock (a wait
+-- that can never succeed, e.g. spinning on a stale L1 line) is the outcome [99].
+--
+-- The reference modes are `CM.sc` (no cache, no store buffer: sequential
+-- consistency), `CM.core` (the multi-cycle core: no store buffer, incoherent L1),
+-- `CM.pipe` (the pipelined core: one-entry buffer, no miss bypass (hits and same-address forwards still bypass), incoherent L1,
+-- FENCE a no-op), `CM.pipeF` (the same with a real drain fence), `CM.coh` (a coherent
+-- L1 with a drain fence), and `CM.tso` (unbounded store buffer with load bypass, no
+-- cache: the usual TSO reference).
+
+inductive Op where
+  | ld (a : Nat)                 -- a recorded cacheable load
+  | ldu (a : Nat)                -- a recorded uncached load (MMIO)
+  | guard (a v : Nat)            -- a cacheable wait: enabled when the read is v
+  | guardU (a v : Nat)           -- an uncached wait (MMIO flag)
+  | st (a v : Nat)               -- a cacheable write-through store
+  | stu (a v : Nat)              -- an uncached store (MMIO)
+  | fence
+
+structure Mode where
+  sbDepth : Nat      -- 0: no store buffer; 1: the pipelined core; 64: TSO reference
+  loadBypass : Bool  -- a load *miss* may execute with a non-empty store buffer
+  cache : Bool       -- a private write-through L1
+  coherent : Bool    -- a committed write invalidates the other masters' lines
+  fenceDrain : Bool  -- FENCE waits for the store buffer to empty
+  lineFill : Bool    -- a miss fills the whole 16-byte line (the real L1)
+
+structure Hart where
+  prog : List Op
+  pc : Nat
+  sb : List (Nat × Nat)        -- FIFO, head first
+  cache : List (Nat × Nat)     -- sorted by address
+  regs : List Nat              -- reverse program order
+
+structure St where
+  harts : List Hart
+  mem : List (Nat × Nat)       -- sorted by address; absent means 0
+
+structure Walk where
+  fuel : Nat
+  work : List St
+  seen : List (List Nat)
+  outs : List (List Nat)
+
+--------------------------------------------------------------------------------
+-- lists and maps
+
+def CM.len : List (Nat × Nat) → Nat
+  | .nil => 0
+  | .cons p ps => Nat.succ (CM.len ps)
+
+def CM.find (a : Nat) : List (Nat × Nat) → Option Nat
+  | .nil => .none
+  | .cons p ps => if Nat.beq p.1 a then .some p.2 else CM.find a ps
+
+def CM.memVal (l : List (Nat × Nat)) (a : Nat) : Nat := match CM.find a l with
+  | .some v => v
+  | .none => 0
+
+-- insert/replace, keeping the list sorted by address
+def CM.ins (a v : Nat) : List (Nat × Nat) → List (Nat × Nat)
+  | .nil => .cons (a, v) .nil
+  | .cons p ps =>
+      if Nat.beq p.1 a then .cons (a, v) ps
+      else if Nat.lt a p.1 then .cons (a, v) (.cons p ps)
+      else .cons p (CM.ins a v ps)
+
+def CM.del (a : Nat) : List (Nat × Nat) → List (Nat × Nat)
+  | .nil => .nil
+  | .cons p ps => if Nat.beq p.1 a then ps else .cons p (CM.del a ps)
+
+def CM.sbPush (a v : Nat) (l : List (Nat × Nat)) : List (Nat × Nat) :=
+  List.append l (.cons (a, v) .nil)
+
+-- the latest pending value for `a` (a later store overrides an earlier one)
+def CM.sbLatest (a : Nat) : List (Nat × Nat) → Option Nat
+  | .nil => .none
+  | .cons p ps => match CM.sbLatest a ps with
+    | .some v => .some v
+    | .none => if Nat.beq p.1 a then .some p.2 else .none
+
+def CM.empty : List (Nat × Nat) → Bool
+  | .nil => .true
+  | .cons p ps => .false
+
+def CM.setAt (h : Hart) : Nat → List Hart → List Hart
+  | .zero, .nil => .nil
+  | .zero, .cons x xs => .cons h xs
+  | .succ k, .nil => .nil
+  | .succ k, .cons x xs => .cons x (CM.setAt h k xs)
+
+def CM.mapAt (f : Nat → Hart → Hart) : Nat → List Hart → List Hart
+  | i, .nil => .nil
+  | i, .cons h hs => .cons (f i h) (CM.mapAt f (Nat.succ i) hs)
+
+def CM.revOnto : List Nat → List Nat → List Nat
+  | .nil, acc => acc
+  | .cons x xs, acc => CM.revOnto xs (.cons x acc)
+
+def CM.rev (l : List Nat) : List Nat := CM.revOnto l .nil
+
+def CM.regsOf : List Hart → List Nat
+  | .nil => .nil
+  | .cons h hs => List.append (CM.rev h.regs) (CM.regsOf hs)
+
+-- a hart is done when its program has retired *and* its store buffer is empty: a
+-- pending store is not an outcome, it is a store that has not reached the shared
+-- memory yet.
+def CM.allDone : List Hart → Bool
+  | .nil => .true
+  | .cons h hs => Bool.and (Nat.beq h.pc (List.length h.prog))
+      (Bool.and (CM.empty h.sb) (CM.allDone hs))
+
+--------------------------------------------------------------------------------
+-- the machine's operations
+
+def CM.withCache (m : Mode) (h : Hart) (a v : Nat) : Hart :=
+  if m.cache then
+    match CM.find a h.cache with
+    | .some _ => Hart.mk h.prog h.pc h.sb (CM.ins a v h.cache) h.regs
+    | .none => h
+  else h
+
+-- a load (or a guard's read): store-to-load forwarding, then the L1, then memory
+def CM.loadVal (m : Mode) (mem : List (Nat × Nat)) (h : Hart) (a : Nat) (unc : Bool) : Nat × Hart :=
+  if unc then (CM.memVal mem a, h)
+  else match CM.sbLatest a h.sb with
+    | .some v => (v, h)
+    | .none => match (if m.cache then CM.find a h.cache else Option.none) with
+      | .some v => (v, h)
+      | .none =>
+          let v := CM.memVal mem a;
+          if m.cache then
+            let base := Nat.mul 4 (Nat.div a 4);
+            let c0 := CM.ins base (CM.memVal mem base) h.cache;
+            let c1 := CM.ins (Nat.add base 1) (CM.memVal mem (Nat.add base 1)) c0;
+            let c2 := CM.ins (Nat.add base 2) (CM.memVal mem (Nat.add base 2)) c1;
+            let c3 := CM.ins (Nat.add base 3) (CM.memVal mem (Nat.add base 3)) c2;
+            let c5 := if m.lineFill then c3 else CM.ins a v h.cache;
+            (v, Hart.mk h.prog h.pc h.sb c5 h.regs)
+          else (v, h)
+
+def CM.invalidateOthers (a i : Nat) (hs : List Hart) : List Hart :=
+  let base := Nat.mul 4 (Nat.div a 4);
+  CM.mapAt (fun j h => if Nat.beq i j then h
+    else Hart.mk h.prog h.pc h.sb
+      (CM.del (Nat.add base 3) (CM.del (Nat.add base 2) (CM.del (Nat.add base 1) (CM.del base h.cache)))) h.regs) 0 hs
+
+def CM.commitState (m : Mode) (s : St) (i : Nat) (a v : Nat) (hs : List Hart) : St :=
+  let s1 := St.mk hs (CM.ins a v s.mem);
+  if m.coherent then St.mk (CM.invalidateOthers a i hs) s1.mem else s1
+
+def CM.stEnabled (m : Mode) (h : Hart) : Bool :=
+  if Nat.beq m.sbDepth 0 then .true else Nat.lt (CM.len h.sb) m.sbDepth
+
+def CM.hasCache (a : Nat) (h : Hart) : Bool := match CM.find a h.cache with
+  | .some _ => .true
+  | .none => .false
+
+def CM.hasSb (a : Nat) (h : Hart) : Bool := match CM.find a h.sb with
+  | .some _ => .true
+  | .none => .false
+
+def CM.ldEnabled (m : Mode) (h : Hart) (a : Nat) : Bool :=
+  Bool.or (CM.empty h.sb) (Bool.or m.loadBypass
+    (Bool.or (CM.hasSb a h) (Bool.and m.cache (CM.hasCache a h))))
+
+def CM.nextOf (h : Hart) : Option Op :=
+  match List.dropN h.pc h.prog with
+  | .nil => .none
+  | .cons x xs => .some x
+
+-- one instruction step of hart `i`, if its next instruction is enabled
+def CM.hartStep (m : Mode) (s : St) (i : Nat) (h : Hart) : List St :=
+  match CM.nextOf h with
+  | .none => .nil
+  | .some op =>
+      let h0 := Hart.mk h.prog (Nat.succ h.pc) h.sb h.cache h.regs;
+      match op with
+      | .ld a => if CM.ldEnabled m h a then
+          let r := CM.loadVal m s.mem h0 a .false;
+          let h1 := r.2;
+          let h2 := Hart.mk h1.prog h1.pc h1.sb h1.cache (.cons r.1 h1.regs);
+          .cons (St.mk (CM.setAt h2 i s.harts) s.mem) .nil
+        else .nil
+      | .ldu a =>
+          let r := CM.loadVal m s.mem h0 a .true;
+          let h1 := r.2;
+          let h2 := Hart.mk h1.prog h1.pc h1.sb h1.cache (.cons r.1 h1.regs);
+          .cons (St.mk (CM.setAt h2 i s.harts) s.mem) .nil
+      | .guard a v => if CM.ldEnabled m h a then
+          let r := CM.loadVal m s.mem h0 a .false;
+          if Nat.beq r.1 v then .cons (St.mk (CM.setAt r.2 i s.harts) s.mem) .nil else .nil
+        else .nil
+      | .guardU a v =>
+          let r := CM.loadVal m s.mem h0 a .true;
+          if Nat.beq r.1 v then .cons (St.mk (CM.setAt r.2 i s.harts) s.mem) .nil else .nil
+      | .st a v => if CM.stEnabled m h then
+          let h1 := CM.withCache m h0 a v;
+          if Nat.beq m.sbDepth 0 then
+            .cons (CM.commitState m s i a v (CM.setAt h1 i s.harts)) .nil
+          else
+            let h2 := Hart.mk h1.prog h1.pc (CM.sbPush a v h1.sb) h1.cache h1.regs;
+            .cons (St.mk (CM.setAt h2 i s.harts) s.mem) .nil
+        else .nil
+      | .stu a v =>
+          -- an uncached store commits at once; the pipelined core does not stall it
+          -- on the store buffer (M.stallM only gates `m.ddr && bu.sbv`, and an I/O
+          -- store is not `ddr`), so it can overtake a pending cacheable store.
+          .cons (CM.commitState m s i a v (CM.setAt h0 i s.harts)) .nil
+      | .fence =>
+          if m.fenceDrain then (if CM.empty h.sb then .cons (St.mk (CM.setAt h0 i s.harts) s.mem) .nil else .nil)
+          else .cons (St.mk (CM.setAt h0 i s.harts) s.mem) .nil
+
+-- a commit step: the head of hart `i`'s store buffer reaches shared memory
+def CM.commitStep (m : Mode) (s : St) (i : Nat) (h : Hart) : List St :=
+  match h.sb with
+  | .nil => .nil
+  | .cons p ps =>
+      let h' := Hart.mk h.prog h.pc ps h.cache h.regs;
+      .cons (CM.commitState m s i p.1 p.2 (CM.setAt h' i s.harts)) .nil
+
+def CM.hartSteps (m : Mode) (s : St) : Nat → List Hart → List St
+  | i, .nil => .nil
+  | i, .cons h hs => List.append (CM.hartStep m s i h) (CM.hartSteps m s (Nat.succ i) hs)
+
+def CM.commitSteps (m : Mode) (s : St) : Nat → List Hart → List St
+  | i, .nil => .nil
+  | i, .cons h hs => List.append (CM.commitStep m s i h) (CM.commitSteps m s (Nat.succ i) hs)
+
+def CM.nextStates (m : Mode) (s : St) : List St :=
+  List.append (CM.hartSteps m s 0 s.harts) (CM.commitSteps m s 0 s.harts)
+
+--------------------------------------------------------------------------------
+-- the whole-machine state key (memoisation)
+
+def CM.pairKey (p : Nat × Nat) : Nat := Nat.add (Nat.mul p.1 4096) p.2
+
+def CM.pairKeys : List (Nat × Nat) → List Nat
+  | .nil => .nil
+  | .cons p ps => .cons (CM.pairKey p) (CM.pairKeys ps)
+
+def CM.hartKey (h : Hart) : List Nat :=
+  .cons h.pc (.cons (CM.len h.sb) (List.append (CM.pairKeys h.sb)
+    (.cons (List.length h.cache) (List.append (CM.pairKeys h.cache)
+      (.cons (List.length h.regs) h.regs)))))
+
+def CM.hartKeys : List Hart → List Nat
+  | .nil => .nil
+  | .cons h hs => List.append (CM.hartKey h) (CM.hartKeys hs)
+
+def CM.stateKey (s : St) : List Nat :=
+  .cons (List.length s.harts) (List.append (CM.hartKeys s.harts)
+    (.cons (List.length s.mem) (CM.pairKeys s.mem)))
+
+def CM.natsEq : List Nat → List Nat → Bool
+  | .nil, .nil => .true
+  | .nil, .cons y ys => .false
+  | .cons x xs, .nil => .false
+  | .cons x xs, .cons y ys => Bool.and (Nat.beq x y) (CM.natsEq xs ys)
+
+def CM.memberKey (k : List Nat) : List (List Nat) → Bool
+  | .nil => .false
+  | .cons x xs => if CM.natsEq k x then .true else CM.memberKey k xs
+
+--------------------------------------------------------------------------------
+-- enumeration
+
+def CM.terminal (ext : St → List Nat) (s : St) : List Nat :=
+  if CM.allDone s.harts then ext s else .cons 99 .nil
+
+-- A worklist DFS: each state is expanded at most once (its future, and so its
+-- outcomes, does not depend on the path). `99` is a stuck state.
+def CM.walk (m : Mode) (ext : St → List Nat) : Nat → List St → List (List Nat) → List (List Nat) → Walk
+  | .zero, work, seen, outs => Walk.mk 0 work seen outs
+  | .succ k, .nil, seen, outs => Walk.mk k .nil seen outs
+  | .succ k, .cons s ss, seen, outs =>
+      let key := CM.stateKey s;
+      if CM.memberKey key seen then CM.walk m ext k ss seen outs
+      else
+        let seen1 : List (List Nat) := .cons key seen;
+        if CM.allDone s.harts then CM.walk m ext k ss seen1 (.cons (ext s) outs)
+        else
+          let ns : List St := CM.nextStates m s;
+          match ns with
+          | .nil => CM.walk m ext k ss seen1 (.cons (CM.terminal ext s) outs)
+          | .cons x xs => CM.walk m ext k (List.append ns ss) seen1 outs
+
+def CM.initHarts : List (List Op) → List Hart
+  | .nil => .nil
+  | .cons p ps => .cons (Hart.mk p 0 .nil .nil .nil) (CM.initHarts ps)
+
+def CM.pack : List Nat → Nat
+  | .nil => 0
+  | .cons x xs => Nat.add (Nat.mul 16 (CM.pack xs)) x
+
+-- a left-to-right key: [0,1] < [1,0]
+def CM.keyOf (x : List Nat) : Nat := CM.pack (CM.rev x)
+
+def CM.insPair (p : Nat × List Nat) : List (Nat × List Nat) → List (Nat × List Nat)
+  | .nil => .cons p .nil
+  | .cons q qs => if Nat.lt p.1 q.1 then .cons p (.cons q qs) else .cons q (CM.insPair p qs)
+
+def CM.sortPairs : List (Nat × List Nat) → List (Nat × List Nat)
+  | .nil => .nil
+  | .cons p ps => CM.insPair p (CM.sortPairs ps)
+
+def CM.anyNats (x : List Nat) : List (List Nat) → Bool
+  | .nil => .false
+  | .cons y ys => if CM.natsEq x y then .true else CM.anyNats x ys
+
+def CM.dedup : List (List Nat) → List (List Nat)
+  | .nil => .nil
+  | .cons x xs => if CM.anyNats x xs then CM.dedup xs else .cons x (CM.dedup xs)
+
+def CM.mapSnd : List (Nat × List Nat) → List (List Nat)
+  | .nil => .nil
+  | .cons p ps => .cons p.2 (CM.mapSnd ps)
+
+def CM.mapKeyGo : List (List Nat) → List (Nat × List Nat)
+  | .nil => .nil
+  | .cons x xs => .cons (CM.keyOf x, x) (CM.mapKeyGo xs)
+
+-- sort by packed key, then dedup
+def CM.norm (l : List (List Nat)) : List (List Nat) :=
+  let ps := CM.sortPairs (CM.mapKeyGo l);
+  CM.dedup (CM.mapSnd ps)
+
+-- every outcome of `progs` under mode `m`; `ext` reads the interesting state
+def CM.outcomes (m : Mode) (progs : List (List Op)) (ext : St → List Nat) : List (List Nat) :=
+  let s := St.mk (CM.initHarts progs) .nil;
+  let w := CM.walk m ext 4000 (.cons s .nil) .nil .nil;
+  CM.norm w.outs
+
+-- a final-memory extractor and the register extractor
+def CM.memOutGo : List Nat → St → List Nat
+  | .nil, s => .nil
+  | .cons a as, s => .cons (CM.memVal s.mem a) (CM.memOutGo as s)
+
+def CM.memOut (as : List Nat) (s : St) : List Nat := CM.memOutGo as s
+def CM.regOut (s : St) : List Nat := CM.regsOf s.harts
+
+--------------------------------------------------------------------------------
+-- the modes
+
+def CM.sc : Mode := Mode.mk 0 .false .false .false .false .false
+def CM.core : Mode := Mode.mk 0 .false .true .false .false .false
+def CM.pipe : Mode := Mode.mk 1 .false .true .false .false .false
+def CM.pipeF : Mode := Mode.mk 1 .false .true .false .true .false
+def CM.coh : Mode := Mode.mk 1 .false .true .true .true .false
+def CM.tso : Mode := Mode.mk 64 .true .false .false .true .false
+def CM.coreL : Mode := Mode.mk 0 .false .true .false .false .true
+
+--------------------------------------------------------------------------------
+-- The atomic primitive (LR/SC), modelled separately so the bus model above stays
+-- independent of the `agent/golem-atomics` branch.
+--
+-- The target: an LR sets a reservation on a word, any *committed write by any hart*
+-- to that word clears it, and an SC succeeds only if the reservation is still there
+-- and writes its value as one shared-memory step. `global = false` models the
+-- branch as committed: the reservation is per hart and is cleared only by that
+-- hart's own store/AMO (`Core.wiz` `stClr`), so two harts can both SC the same word
+-- successfully. An AMO in that branch is a bus read of `old` followed by a bus write
+-- of `old + rs2`, not one step at the shared cache.
+
+structure AHar where
+  pc : Nat
+  resv : Nat
+  resOk : Bool
+  val : Nat            -- the value LR read: the lock is free iff it is 0
+  out : List Nat       -- reverse order: 0 an SC succeeded, 1 it failed
+
+structure ASt where
+  x : Nat
+  h0 : AHar
+  h1 : AHar
+
+def CM.aInit : ASt := ASt.mk 0 (AHar.mk 0 0 .false 0 .nil) (AHar.mk 0 0 .false 0 .nil)
+
+def CM.aStep (global : Bool) (s : ASt) (i : Nat) : List ASt :=
+  let h := if Nat.beq i 0 then s.h0 else s.h1;
+  if Nat.lt 1 h.pc then .nil
+  else if Nat.beq h.pc 0 then
+    -- LR.W x: read x, set the reservation
+    let h' := AHar.mk 1 1 .true s.x h.out;
+    .cons (if Nat.beq i 0 then ASt.mk s.x h' s.h1 else ASt.mk s.x s.h0 h') .nil
+  else
+    -- SC.W x = 1: succeed iff the reservation is still valid
+    let ok := Bool.and h.resOk (Nat.beq h.val 0);
+    let h' := AHar.mk 2 1 .false h.val (.cons (if ok then 0 else 1) h.out);
+    let x' := if ok then 1 else s.x;
+    let s1 := if Nat.beq i 0 then ASt.mk x' h' s.h1 else ASt.mk x' s.h0 h';
+    -- a successful SC's write clears the *other* reservation only if global
+    .cons (if Bool.and global ok then
+      (if Nat.beq i 0 then ASt.mk x' h' (AHar.mk s.h1.pc 0 .false s.h1.val s.h1.out)
+       else ASt.mk x' (AHar.mk s.h0.pc 0 .false s.h0.val s.h0.out) h')
+    else s1) .nil
+
+def CM.aDone (s : ASt) : Bool := Bool.and (Nat.beq s.h0.pc 2) (Nat.beq s.h1.pc 2)
+
+def CM.aWalk (global : Bool) : Nat → List ASt → List (List Nat) → List (List Nat)
+  | .zero, work, acc => acc
+  | .succ k, .nil, acc => acc
+  | .succ k, .cons s ss, acc =>
+      if CM.aDone s then
+        CM.aWalk global k ss (.cons (List.append (CM.rev s.h0.out) (CM.rev s.h1.out)) acc)
+      else
+        let ns := List.append (CM.aStep global s 0) (CM.aStep global s 1);
+        match ns with
+        | .nil => CM.aWalk global k ss acc
+        | .cons x xs => CM.aWalk global k (List.append ns ss) acc
+
+def CM.lrsc (global : Bool) : List (List Nat) :=
+  CM.norm (CM.aWalk global 64 (.cons CM.aInit .nil) .nil)
+
+--------------------------------------------------------------------------------
+-- The shared-point atomics, and the litmus tests that separate them from a split
+-- implementation.
+--
+-- `MOp` is a small program language for the shared aperture: an ordinary load/store, a
+-- `guard` (wait until a word has a value), LR, SC, an AMO, and the two halves of a
+-- split AMO (`amor` reads, `amow` writes) used only to model the rejected design. The
+-- machine keeps one reservation per hart, on the 16-byte line (`a / 4`, the cache's
+-- line): any committed store, successful SC or AMO to a line clears every reservation
+-- on it. `amo` is one atomic step; `amor`/`amow` are two steps that other harts may
+-- interleave, which is exactly the lost-update bug the hardware fixes at the bus.
+
+inductive MOp where
+  | ld (a : Nat)
+  | lr (a : Nat)
+  | sc (a v : Nat)
+  | scz (a v : Nat)   -- SC.W that requires the LR value to have been 0 (a lock)
+  | amo (f5 a v : Nat)
+  | amor (f5 a v : Nat)
+  | amow (f5 a v : Nat)
+  | st (a v : Nat)
+  | guard (a v : Nat)
+  | fence
+
+structure MHar where
+  prog : List MOp
+  pc : Nat
+  res : Option Nat      -- the reserved line
+  tmp : Nat             -- the split AMO's read value
+  regs : List Nat       -- reverse order
+
+structure MSt where
+  harts : List MHar
+  mem : List (Nat × Nat)
+
+def CM.mVal (f5 a b : Nat) : Nat :=
+  if Nat.beq f5 0 then Nat.mod (Nat.add a b) 4294967296
+  else if Nat.beq f5 1 then b
+  else a
+
+def CM.mLine (a : Nat) : Nat := Nat.div a 4
+
+def CM.mMapAt (f : Nat → MHar → MHar) : Nat → List MHar → List MHar
+  | _, .nil => .nil
+  | i, .cons h hs => .cons (f i h) (CM.mMapAt f (Nat.succ i) hs)
+
+def CM.mSetAt (h : MHar) : Nat → List MHar → List MHar
+  | .zero, .nil => .nil
+  | .zero, .cons x xs => .cons h xs
+  | .succ k, .nil => .nil
+  | .succ k, .cons x xs => .cons x (CM.mSetAt h k xs)
+
+def CM.mClearLine (line : Nat) (hs : List MHar) : List MHar :=
+  CM.mMapAt (fun _ h => match h.res with
+    | .none => h
+    | .some l => if Nat.beq l line then MHar.mk h.prog h.pc .none h.tmp h.regs else h) 0 hs
+
+def CM.mClearHart (i : Nat) (hs : List MHar) : List MHar :=
+  CM.mMapAt (fun j h => if Nat.beq i j then MHar.mk h.prog h.pc .none h.tmp h.regs else h) 0 hs
+
+def CM.mNextOf (h : MHar) : Option MOp :=
+  match List.dropN h.pc h.prog with
+  | .nil => .none
+  | .cons x xs => .some x
+
+def CM.mSc (i : Nat) (h : MHar) (h0 : MHar) (a v : Nat) (zero : Bool) (s : MSt) : List MSt :=
+  let live := match h.res with
+    | .none => (.false : Bool)
+    | .some l => Nat.beq l (CM.mLine a);
+  let hit := Bool.and live (if zero then Nat.beq h.tmp 0 else (.true : Bool));
+  let s1 := if hit then MSt.mk (CM.mClearLine (CM.mLine a) s.harts) (CM.ins a v s.mem)
+    else MSt.mk (CM.mClearHart i s.harts) s.mem;
+  let h1 := MHar.mk h0.prog h0.pc .none h0.tmp (.cons (if hit then 0 else 1) h0.regs);
+  .cons (MSt.mk (CM.mSetAt h1 i s1.harts) s1.mem) .nil
+
+def CM.mStep (s : MSt) (i : Nat) (h : MHar) : List MSt :=
+  match CM.mNextOf h with
+  | .none => .nil
+  | .some op =>
+      let h0 := MHar.mk h.prog (Nat.succ h.pc) h.res h.tmp h.regs;
+      let put : MHar → List MSt := fun (h1 : MHar) => .cons (MSt.mk (CM.mSetAt h1 i s.harts) s.mem) .nil;
+      match op with
+      | .ld a => put (MHar.mk h0.prog h0.pc h0.res h0.tmp (.cons (CM.memVal s.mem a) h0.regs))
+      | .lr a => put (MHar.mk h0.prog h0.pc (.some (CM.mLine a)) (CM.memVal s.mem a)
+          (.cons (CM.memVal s.mem a) h0.regs))
+      | .sc a v => CM.mSc i h h0 a v .false s
+      | .scz a v => CM.mSc i h h0 a v .true s
+      | .amo f5 a v =>
+          let old := CM.memVal s.mem a;
+          .cons (MSt.mk (CM.mSetAt h0 i (CM.mClearLine (CM.mLine a) s.harts))
+            (CM.ins a (CM.mVal f5 old v) s.mem)) .nil
+      | .amor f5 a v => put (MHar.mk h0.prog h0.pc h0.res (CM.memVal s.mem a) h0.regs)
+      | .amow f5 a v =>
+          .cons (MSt.mk (CM.mSetAt h0 i (CM.mClearLine (CM.mLine a) s.harts))
+            (CM.ins a (CM.mVal f5 h.tmp v) s.mem)) .nil
+      | .st a v =>
+          .cons (MSt.mk (CM.mSetAt h0 i (CM.mClearLine (CM.mLine a) s.harts)) (CM.ins a v s.mem)) .nil
+      | .guard a v => if Nat.beq (CM.memVal s.mem a) v then put h0 else .nil
+      | .fence => put h0
+
+def CM.mSteps (s : MSt) : Nat → List MHar → List MSt
+  | i, .nil => .nil
+  | i, .cons h hs => List.append (CM.mStep s i h) (CM.mSteps s (Nat.succ i) hs)
+
+def CM.mNextStates (s : MSt) : List MSt := CM.mSteps s 0 s.harts
+
+def CM.mAllDone : List MHar → Bool
+  | .nil => .true
+  | .cons h hs => Bool.and (Nat.beq h.pc (List.length h.prog)) (CM.mAllDone hs)
+
+def CM.mHartKey (h : MHar) : List Nat :=
+  .cons h.pc (.cons (match h.res with | .none => 0 | .some l => Nat.succ l)
+    (.cons h.tmp (List.append h.regs (.cons (List.length h.regs) .nil))))
+
+def CM.mHartKeys : List MHar → List Nat
+  | .nil => .nil
+  | .cons h hs => List.append (CM.mHartKey h) (CM.mHartKeys hs)
+
+def CM.mKey (s : MSt) : List Nat :=
+  .cons (List.length s.harts) (List.append (CM.mHartKeys s.harts)
+    (.cons (List.length s.mem) (CM.pairKeys s.mem)))
+
+structure MWalk where
+  fuel : Nat
+  work : List MSt
+  seen : List (List Nat)
+  outs : List (List Nat)
+
+def CM.mWalk (ext : MSt → List Nat) : Nat → List MSt → List (List Nat) → List (List Nat) → MWalk
+  | .zero, work, seen, outs => MWalk.mk 0 work seen outs
+  | .succ k, .nil, seen, outs => MWalk.mk k .nil seen outs
+  | .succ k, .cons s ss, seen, outs =>
+      let key := CM.mKey s;
+      if CM.memberKey key seen then CM.mWalk ext k ss seen outs
+      else
+        let seen1 : List (List Nat) := .cons key seen;
+        if CM.mAllDone s.harts then CM.mWalk ext k ss seen1 (.cons (ext s) outs)
+        else
+          let ns := CM.mNextStates s;
+          match ns with
+          | .nil => CM.mWalk ext k ss seen1 (.cons (.cons 99 .nil) outs)
+          | .cons x xs => CM.mWalk ext k (List.append ns ss) seen1 outs
+
+def CM.mInitHarts : List (List MOp) → List MHar
+  | .nil => .nil
+  | .cons p ps => .cons (MHar.mk p 0 .none 0 .nil) (CM.mInitHarts ps)
+
+def CM.mOutcomes (progs : List (List MOp)) (ext : MSt → List Nat) : List (List Nat) :=
+  let s := MSt.mk (CM.mInitHarts progs) .nil;
+  let w := CM.mWalk ext 4000 (.cons s .nil) .nil .nil;
+  CM.norm w.outs
+
+def CM.mMemOutGo : List Nat → MSt → List Nat
+  | .nil, s => .nil
+  | .cons a as, s => .cons (CM.memVal s.mem a) (CM.mMemOutGo as s)
+
+def CM.mMemOut (as : List Nat) (s : MSt) : List Nat := CM.mMemOutGo as s
+def CM.mRegH (i : Nat) (s : MSt) : List Nat :=
+  match List.dropN i s.harts with
+  | .nil => .nil
+  | .cons h _ => CM.rev h.regs
+def CM.mMem4 (s : MSt) : List Nat := CM.mMemOut (.cons 4 .nil) s

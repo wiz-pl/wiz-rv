@@ -68,14 +68,14 @@ structure COut (r : HwTy → Type) where
   ev : CEv r
   deriving Bundle
 
--- the multi-cycle core (src/Rv/Core.wiz); the reset: the phase, the PC and the trap code
+-- the multi-cycle core (src/Rv/Core.wiz); the reset: the phase, the PC and the trap state
 def Doom.oldStep {r : HwTy → Type} [Hw r] (s : CoreSt 5 12 r) (x : CIn r) : r (HwTy.prod (CoreSt.code 5 12) COut.code) :=
   let cr := coreStep 5 12 .true s x.i;
   let rst := x.rst;
   let ω c := CoreSt.unpack 5 12 (Hw.fst cr);
   let c2 := CoreSt.mk (Hw.mux rst (Hw.lit 4 Ph.f) c.ph) (Hw.mux rst (Hw.lit 32 0) c.pc) c.q0 c.q1 c.q2 c.q3
     c.m0 c.m1 c.m2 c.m3 c.rfa c.rfb c.x1 c.x2 c.acc c.dv c.rm c.cnt c.srd c.sf3 c.slo c.sio (Hw.mux rst (Hw.lit 3 0) c.trap)
-    c.busq c.fromBus c.badr c.bwe c.bwd c.bst c.bret c.bsent c.ra c.l1q c.l1t c.l1d c.l1tag c.fromL1 c.rmode c.rk c.rgap c.rbuf c.rline c.bnew;
+    (Hw.mux rst (Hw.lit 32 0) c.tval) c.busq c.fromBus c.badr c.bwe c.bwd c.bst c.bret c.bsent c.ra c.l1q c.l1t c.l1d c.l1tag c.fromL1 c.rmode c.rk c.rgap c.rbuf c.rline c.bnew c.resv c.resOk c.amoA c.amoD c.amoO c.sf5 c.ak c.baop c.baf5 (CsrFile.reset rst c.csr);
   Hw.pair (CoreSt.pack 5 12 c2)
     (COut.pack (COut.mk (Out.unpack (Hw.snd cr)) (CEv.mk (isK s.ph Ph.d) (isK s.ph Ph.p) (isK s.ph Ph.m)
       (Hw.or (isK s.ph Ph.s) (Hw.or (isK s.ph Ph.x) (isK s.ph Ph.v))) (isK s.ph Ph.f))))
@@ -104,6 +104,8 @@ structure DOut (r : HwTy → Type) where
   we : r W1
   wdata : r B32
   wstrb : r B4
+  aop : r B2
+  af5 : r B5
   pend : r W1
   deriving Bundle
 
@@ -198,7 +200,8 @@ def dSys (full : Bool) (cfg : RgbCfg) (ediv : Nat) (cc : Circuit CIn.code COut.c
   -- the interrupt/timer block's register offset, and the live external sources (a
   -- received UART byte; the spare input is tied low)
   let ioff : r B16 := Hw.mux fbA (Hw.lit 16 0) off;
-  let isrc : r B5 := Intc.srcBits (Intc.Src.mk s.full (Hw.lit 1 0));
+  let isrc : r B7 := Intc.srcBits (Intc.Src.mk s.full (Hw.lit 1 0));
+  let mip : r B32 := Intc.mip s.intc isrc 0;
   let ω sn := s.snd;
   let count : r B13 := Hw.sub sn.wp sn.rp;
   let free : r B32 := Hw.sub (Hw.lit 32 4096) (Hw.cat (Hw.lit 19 0) count);
@@ -211,8 +214,10 @@ def dSys (full : Bool) (cfg : RgbCfg) (ediv : Nat) (cc : Circuit CIn.code COut.c
     (Hw.mux (isK off 100) s.edge.hits (Hw.mux (isK off 104) s.edge.misses (Hw.mux (isK off 108) s.perf.fbw
     (Hw.mux (isK off 112) s.perf.refreshes (Hw.mux (isK off 116) s.perf.odd (Hw.mux (isK off 120) s.perf.lastSum (Hw.mux (isK off 124) s.perf.under (Hw.mux (isK off 128)
       (Hw.cat (Hw.lit 20 0) (Hw.cat s.oled.pins.pmoden (Hw.cat s.oled.pins.vccen (Hw.cat s.oled.pins.res
-        (Hw.cat s.oled.pins.dc (Hw.cat s.oled.pins.cs s.oled.sq.pc)))))) (Intc.read s.intc isrc ioff)))))))))))))))))));
-  let cr := Circuit.inst cc s.cpu (CIn.pack (CIn.mk (In.mk (Hw.and (txIdle s.tx) (Hw.not s.txGo)) ioIn s.edge.ready s.edge.rvalid s.edge.rdata) rst));
+        (Hw.cat s.oled.pins.dc (Hw.cat s.oled.pins.cs s.oled.sq.pc)))))) (Hw.mux (isK off GMap.mip)
+          mip (Intc.read s.intc isrc ioff))))))))))))))))))));
+  let cr := Circuit.inst cc s.cpu (CIn.pack (CIn.mk (In.mk (Hw.and (txIdle s.tx) (Hw.not s.txGo)) ioIn s.edge.ready s.edge.rvalid s.edge.rdata
+    (Intc.irqM mip) (Intc.irqT mip) (Intc.irqE mip)) rst));
   let ω co := COut.unpack (Hw.snd cr);
   let ω o := co.o;
   let ω ev := co.ev;
@@ -292,7 +297,7 @@ def dSys (full : Bool) (cfg : RgbCfg) (ediv : Nat) (cc : Circuit CIn.code COut.c
       -- (JB1 the PWM, JB2 its complement: a piezo from JB1 to GND, or across JB1 and JB2
       -- for twice the swing)
       (Hw.cat (Hw.lit 6 0) (Hw.cat (Hw.not (Hw.ult (Hw.slice lob 8 sn.pwm : r W8) sn.cur)) (Hw.ult (Hw.slice lob 8 sn.pwm : r W8) sn.cur)))
-      s.edge.valid o.addr o.we o.wdata o.wstrb s.edge.pend))
+      s.edge.valid o.addr o.we o.wdata o.wstrb o.aop o.af5 s.edge.pend))
 
 def DSys.init (cfg : RgbCfg) (cc : Circuit CIn.code COut.code) : DSys cfg.frameLog cc.st HwTy.El :=
   DSys.mk (Edge.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
