@@ -51,7 +51,8 @@ def Trap.none : Nat := 0
 def Trap.ecall : Nat := 1
 def Trap.ebreak : Nat := 2
 def Trap.illegal : Nat := 3
-def Trap.jump : Nat := 4    -- a jump or branch to an address that is not a multiple of 4
+def Trap.jump : Nat := 4    -- a jump or branch to an address that is not a multiple of 2
+                            -- (unreachable with C: JALR clears bit 0, JAL/branch are even)
 def Trap.load : Nat := 5    -- a misaligned load
 def Trap.store : Nat := 6   -- a misaligned store
 -- (internal to the pipelined core: an interrupt on its way from E to R, the cause in
@@ -282,6 +283,127 @@ def Op.amo : Nat := 47       -- 0101111 (RV32A)
 def Op.system : Nat := 115   -- 1110011
 
 ------------------------------------------------------------------------------------
+-- The C extension: 16-bit instructions expanded to their 32-bit equivalents
+--
+-- `Rv.expand` is the one definition of the expansion. The cores call the same function
+-- at the gate level (`Core.cExpand`, src/Rv/Core.wiz), and `tests/spec.wiz` checks the
+-- two agree on all 65536 encodings. `none` is an illegal 16-bit encoding: the machine
+-- traps with `Trap.illegal` and the 16-bit word as `tval`.
+--
+-- Only the RV32C subset without floating point is expanded. `C.FLD`/`C.FLW`/`C.FSD`/
+-- `C.FSW` (and their stack forms) are illegal here: this machine has no FP.
+
+-- encoders (an immediate is a 32-bit value; the field takes its low bits)
+def Rv.encR (op f3 f7 rd rs1 rs2 : Nat) : Nat :=
+  f7 * Rv.pow2 25 + rs2 * Rv.pow2 20 + rs1 * Rv.pow2 15 + f3 * 4096 + rd * 128 + op
+def Rv.encI (op f3 rd rs1 imm : Nat) : Nat :=
+  Rv.bits imm 0 12 * Rv.pow2 20 + rs1 * Rv.pow2 15 + f3 * 4096 + rd * 128 + op
+def Rv.encS (op f3 rs1 rs2 imm : Nat) : Nat :=
+  Rv.bits imm 5 7 * Rv.pow2 25 + rs2 * Rv.pow2 20 + rs1 * Rv.pow2 15 + f3 * 4096
+    + Rv.bits imm 0 5 * 128 + op
+def Rv.encB (f3 rs1 rs2 imm : Nat) : Nat :=
+  Rv.bits imm 12 1 * Rv.pow2 31 + Rv.bits imm 5 6 * Rv.pow2 25 + rs2 * Rv.pow2 20
+    + rs1 * Rv.pow2 15 + f3 * 4096 + Rv.bits imm 1 4 * 256 + Rv.bits imm 11 1 * 128 + Op.branch
+def Rv.encU (op rd imm : Nat) : Nat :=
+  Rv.bits imm 12 20 * 4096 + rd * 128 + op
+def Rv.encJ (rd imm : Nat) : Nat :=
+  Rv.bits imm 20 1 * Rv.pow2 31 + Rv.bits imm 1 10 * Rv.pow2 21 + Rv.bits imm 11 1 * Rv.pow2 20
+    + Rv.bits imm 12 8 * 4096 + rd * 128 + Op.jal
+
+-- the fields of a 16-bit instruction
+def C.q (h : Nat) : Nat := Rv.bits h 0 2
+def C.f3 (h : Nat) : Nat := Rv.bits h 13 3
+def C.rd (h : Nat) : Nat := Rv.bits h 7 5
+def C.rs2 (h : Nat) : Nat := Rv.bits h 2 5
+def C.rdp (h : Nat) : Nat := Rv.bits h 2 3 + 8
+def C.rs1p (h : Nat) : Nat := Rv.bits h 7 3 + 8
+def C.b12 (h : Nat) : Nat := Rv.bits h 12 1
+def C.shamt (h : Nat) : Nat := Rv.bits h 2 5
+-- C.ADDI / C.LI / C.ANDI: imm[5|4:0]
+def C.imm6 (h : Nat) : Nat := (Rv.sext 6 (C.b12 h * 32 + Rv.bits h 2 5)).toNat
+-- C.ADDI4SPN: nzuimm[5:4|9:6|2|3]
+def C.uimm10 (h : Nat) : Nat :=
+  Rv.bits h 11 2 * 16 + Rv.bits h 7 4 * 64 + Rv.bits h 6 1 * 4 + Rv.bits h 5 1 * 8
+-- C.LW / C.SW: uimm[5:3|2|6]
+def C.lwuimm (h : Nat) : Nat := Rv.bits h 10 3 * 8 + Rv.bits h 6 1 * 4 + Rv.bits h 5 1 * 64
+-- C.LWSP: uimm[7:6|5|4:2]
+def C.lwspimm (h : Nat) : Nat := Rv.bits h 2 2 * 64 + Rv.bits h 12 1 * 32 + Rv.bits h 4 3 * 4
+-- C.SWSP: uimm[7:6|5:2]
+def C.swspimm (h : Nat) : Nat := Rv.bits h 7 2 * 64 + Rv.bits h 9 4 * 4
+-- C.LUI: imm[17|16:12], sign-extended from bit 17, low 12 bits zero
+def C.luiimm (h : Nat) : Nat :=
+  (Rv.sext 18 (C.b12 h * 131072 + Rv.bits h 2 5 * 4096)).toNat
+-- C.ADDI16SP: nzimm[9|4|6|8:7|5], sign-extended from bit 9, low 4 bits zero
+def C.spoff (h : Nat) : Nat :=
+  (Rv.sext 10 (C.b12 h * 512 + Rv.bits h 4 1 * 256 + Rv.bits h 3 1 * 128
+    + Rv.bits h 5 1 * 64 + Rv.bits h 2 1 * 32 + Rv.bits h 6 1 * 16)).toNat
+-- C.J / C.JAL: imm[11|4|9:8|10|6|7|3:1|5]
+def C.joff (h : Nat) : Nat :=
+  (Rv.sext 12 (C.b12 h * 2048 + Rv.bits h 8 1 * 1024 + Rv.bits h 10 2 * 256
+    + Rv.bits h 6 1 * 128 + Rv.bits h 7 1 * 64 + Rv.bits h 2 1 * 32
+    + Rv.bits h 11 1 * 16 + Rv.bits h 3 3 * 2)).toNat
+-- C.BEQZ / C.BNEZ: imm[8|4:3|7:6|2:1|5]
+def C.boff (h : Nat) : Nat :=
+  (Rv.sext 9 (C.b12 h * 256 + Rv.bits h 6 1 * 128 + Rv.bits h 5 1 * 64
+    + Rv.bits h 2 1 * 32 + Rv.bits h 11 1 * 16 + Rv.bits h 10 1 * 8
+    + Rv.bits h 4 1 * 4 + Rv.bits h 3 1 * 2)).toNat
+
+def Rv.expand (h : Nat) : Option Nat :=
+  let q := C.q h; let f3 := C.f3 h; let b12 := C.b12 h;
+  let rd := C.rd h; let rs2 := C.rs2 h; let rdp := C.rdp h;
+  let rs1p := C.rs1p h; let rs1 := C.rs1p h; let rs2p := C.rdp h;
+  let imm6 := C.imm6 h; let sh := C.shamt h;
+  if Nat.beq q 0 then
+    (if Nat.beq f3 0 then
+       (if Nat.beq (C.uimm10 h) 0 then .none
+        else .some (Rv.encI Op.opimm 0 rdp 2 (C.uimm10 h)))
+     else if Nat.beq f3 2 then .some (Rv.encI Op.load 2 rdp rs1p (C.lwuimm h))
+     else if Nat.beq f3 6 then .some (Rv.encS Op.store 2 rs1p rs2p (C.lwuimm h))
+     else .none)
+  else if Nat.beq q 1 then
+    (if Nat.beq f3 0 then .some (Rv.encI Op.opimm 0 rd rd imm6)
+     else if Nat.beq f3 1 then .some (Rv.encJ 1 (C.joff h))
+     else if Nat.beq f3 2 then .some (Rv.encI Op.opimm 0 rd 0 imm6)
+     else if Nat.beq f3 3 then
+       (if Nat.beq rd 2 then
+          (if Nat.beq (C.spoff h) 0 then .none
+           else .some (Rv.encI Op.opimm 0 2 2 (C.spoff h)))
+        else if Nat.beq rd 0 then .none
+        else .some (Rv.encU Op.lui rd (C.luiimm h)))
+     else if Nat.beq f3 4 then
+       (if Nat.beq (Rv.bits h 10 2) 0 then
+          (if Nat.beq b12 1 then .none else .some (Rv.encI Op.opimm 5 rs1p rs1p sh))
+        else if Nat.beq (Rv.bits h 10 2) 1 then
+          (if Nat.beq b12 1 then .none else .some (Rv.encI Op.opimm 5 rs1p rs1p (1024 + sh)))
+        else if Nat.beq (Rv.bits h 10 2) 2 then
+          .some (Rv.encI Op.opimm 7 rs1p rs1p imm6)
+        else if Nat.beq b12 1 then .none
+        else if Nat.beq (Rv.bits h 5 2) 0 then .some (Rv.encR Op.op 0 32 rs1p rs1p rdp)
+        else if Nat.beq (Rv.bits h 5 2) 1 then .some (Rv.encR Op.op 4 0 rs1p rs1p rdp)
+        else if Nat.beq (Rv.bits h 5 2) 2 then .some (Rv.encR Op.op 6 0 rs1p rs1p rdp)
+        else .some (Rv.encR Op.op 7 0 rs1p rs1p rdp))
+     else if Nat.beq f3 5 then .some (Rv.encJ 0 (C.joff h))
+     else if Nat.beq f3 6 then .some (Rv.encB 0 rs1p 0 (C.boff h))
+     else .some (Rv.encB 1 rs1p 0 (C.boff h)))
+  else if Nat.beq q 2 then
+    (if Nat.beq f3 0 then
+       (if Nat.beq b12 1 then .none else .some (Rv.encI Op.opimm 1 rd rd sh))
+     else if Nat.beq f3 2 then
+       (if Nat.beq rd 0 then .none else .some (Rv.encI Op.load 2 rd 2 (C.lwspimm h)))
+     else if Nat.beq f3 4 then
+       (if Nat.beq b12 0 then
+          (if Nat.beq rs2 0 then
+             (if Nat.beq rd 0 then .none else .some (Rv.encI Op.jalr 0 0 rd 0))
+           else .some (Rv.encR Op.op 0 0 rd 0 rs2))
+        else if Nat.beq rd 0 then
+          (if Nat.beq rs2 0 then .some 1048691 else .none)
+        else if Nat.beq rs2 0 then .some (Rv.encI Op.jalr 0 1 rd 0)
+        else .some (Rv.encR Op.op 0 0 rd rd rs2))
+     else if Nat.beq f3 6 then .some (Rv.encS Op.store 2 2 rs2 (C.swspimm h))
+     else .none)
+  else .none
+
+------------------------------------------------------------------------------------
 -- The state
 
 def Rv.reg (s : Arch) (i : Nat) : BitVec 32 :=
@@ -304,6 +426,23 @@ def Rv.load : Nat → Cfg → Arch → BitVec 32 → Nat
 def Rv.fetch (c : Cfg) (s : Arch) : Nat := Rv.load 4 c s s.pc
 
 def Rv.next (s : Arch) : BitVec 32 := Rv.plus s.pc 4
+def Rv.nextBy (s : Arch) (len : Nat) : BitVec 32 := Rv.plus s.pc len
+
+-- A 16-bit instruction has bits [1:0] != 11; every 32-bit instruction's opcode ends in
+-- 11. `ilen` is 2 or 4 from the halfword at the PC; `ifetch` is the instruction the
+-- decoder sees (expanded for C) and `raw` is what `tval` records for an illegal one
+-- (the 16-bit encoding, zero-extended).
+def Rv.halfword (c : Cfg) (s : Arch) : Nat := Rv.load 2 c s s.pc
+def Rv.compressed (c : Cfg) (s : Arch) : Bool :=
+  Bool.not (Nat.beq (Nat.mod (Rv.halfword c s) 4) 3)
+def Rv.ilen (c : Cfg) (s : Arch) : Nat := if Rv.compressed c s then 2 else 4
+def Rv.ifetch (c : Cfg) (s : Arch) : Nat :=
+  let h := Rv.halfword c s;
+  if Rv.compressed c s then
+    (match Rv.expand h with
+     | .some w => w
+     | .none => h)          -- not a 32-bit opcode: the decoder calls it illegal
+  else Rv.load 4 c s s.pc
 
 -- PC := pc, x[rd] := v (unless rd is x0); the trap state is unchanged
 def Rv.write (s : Arch) (rd : Nat) (v : BitVec 32) (pc : BitVec 32) : Arch :=
@@ -352,9 +491,9 @@ def Rv.resAfterStore (c : Cfg) (s : Arch) (a : BitVec 32) : Option (BitVec 32) :
 
 -- a load from the input port into rd
 def Rv.setInp (s : Arch) (i : List Nat) : Arch := Arch.mk s.pc s.regs s.mem s.trap s.tval s.epc s.csr s.irq s.out i s.res
-def Rv.input (s : Arch) (rd : Nat) : Arch := match s.inp with
-  | .nil => Rv.write s rd (Rv.w32 (Rv.pow2 32 - 1)) (Rv.next s)
-  | .cons b bs => Rv.setInp (Rv.write s rd (Rv.w32 b) (Rv.next s)) bs
+def Rv.input (s : Arch) (rd : Nat) (len : Nat) : Arch := match s.inp with
+  | .nil => Rv.write s rd (Rv.w32 (Rv.pow2 32 - 1)) (Rv.nextBy s len)
+  | .cons b bs => Rv.setInp (Rv.write s rd (Rv.w32 b) (Rv.nextBy s len)) bs
 
 -- the `n` low bytes of `v` stored from `a`
 def Rv.storeB (c : Cfg) (m : BitVec 32 → BitVec 8) (a : BitVec 32) (v : Nat) : BitVec 32 → BitVec 8 :=
@@ -363,9 +502,11 @@ def Rv.store : Nat → Cfg → (BitVec 32 → BitVec 8) → BitVec 32 → Nat �
   | .zero, c, m, a, v => m
   | .succ n, c, m, a, v => Rv.store n c (Rv.storeB c m a (Nat.mod v 256)) (Rv.plus a 1) (Nat.div v 256)
 
--- a jump: to `t`, or a trap if `t` is not a multiple of 4 (tval is the target)
+-- a jump: to `t`, or a trap if `t` is not a multiple of 2 (tval is the target). With the
+-- C extension a 32-bit instruction may start on any halfword boundary, so `JALR`'s
+-- cleared bit 0 is the only alignment a target needs.
 def Rv.jump (s : Arch) (rd : Nat) (v t : BitVec 32) : Arch :=
-  if Nat.beq (Nat.mod t.toNat 4) 0 then Rv.write s rd v t else Rv.exception s Trap.jump t
+  if Nat.beq (Nat.mod t.toNat 2) 0 then Rv.write s rd v t else Rv.exception s Trap.jump t
 
 ------------------------------------------------------------------------------------
 -- The ALU (OP and OP-IMM): funct3, and bit 30 of the instruction (`alt`: SUB, SRA)
@@ -475,7 +616,11 @@ def Rv.wfi (s : Arch) : Arch :=
   if Nat.beq (BitVec.and (Rv.mipOf s) s.csr.mie).toNat 0 then s
   else Rv.write s 0 (Rv.w32 0) (Rv.next s)
 
-def Rv.exec (c : Cfg) (s : Arch) (w : Nat) : Arch :=
+-- `exec` is the 32-bit form (the proofs and the oracle's ISA trace use it);
+-- `execAt` is one instruction of length `len` (2 for C, 4 otherwise), and `raw` is
+-- what `tval` records if it is illegal (the 16-bit encoding for C, the word otherwise).
+def Rv.execAt (c : Cfg) (s : Arch) (w : Nat) (len : Nat) (raw : Nat) : Arch :=
+  let ω nxt := Rv.nextBy s len;
   let ω op := Ins.opcode w;
   let ω rd := Ins.rd w;
   let ω f3 := Ins.f3 w;
@@ -497,34 +642,34 @@ def Rv.exec (c : Cfg) (s : Arch) (w : Nat) : Arch :=
     else BitVec.and csrOld (BitVec.not csrSrc);
   let ω csrDone := Rv.write (if csrWrite then Rv.csrWrite s csr csrNew else s) rd csrOld (Rv.next s);
   if Nat.beq op Op.lui then
-    (if Rv.okReg c rd then Rv.write s rd (Ins.immU w) (Rv.next s) else Rv.illegal s w)
+    (if Rv.okReg c rd then Rv.write s rd (Ins.immU w) (nxt) else Rv.illegal s raw)
   else if Nat.beq op Op.auipc then
-    (if Rv.okReg c rd then Rv.write s rd (BitVec.add s.pc (Ins.immU w)) (Rv.next s) else Rv.illegal s w)
+    (if Rv.okReg c rd then Rv.write s rd (BitVec.add s.pc (Ins.immU w)) (nxt) else Rv.illegal s raw)
   else if Nat.beq op Op.jal then
-    (if Rv.okReg c rd then Rv.jump s rd (Rv.next s) (BitVec.add s.pc (Ins.immJ w)) else Rv.illegal s w)
+    (if Rv.okReg c rd then Rv.jump s rd (nxt) (BitVec.add s.pc (Ins.immJ w)) else Rv.illegal s raw)
   else if Nat.beq op Op.jalr then
     (if Bool.and (Nat.beq f3 0) (Rv.ok2 c rd r1)
-     then Rv.jump s rd (Rv.next s) (BitVec.and (BitVec.add a (Ins.immI w)) (BitVec.not (Rv.w32 1)))
-     else Rv.illegal s w)
+     then Rv.jump s rd (nxt) (BitVec.and (BitVec.add a (Ins.immI w)) (BitVec.not (Rv.w32 1)))
+     else Rv.illegal s raw)
   else if Nat.beq op Op.branch then
     (if Bool.and (Rv.okBranch f3) (Rv.ok2 c r1 r2)
      then (if Rv.cond f3 a b then Rv.jump s 0 (Rv.w32 0) (BitVec.add s.pc (Ins.immB w))
-           else Rv.write s 0 (Rv.w32 0) (Rv.next s))
-     else Rv.illegal s w)
+           else Rv.write s 0 (Rv.w32 0) (nxt))
+     else Rv.illegal s raw)
   else if Nat.beq op Op.load then
     (if Bool.and (Rv.okLoad f3) (Rv.ok2 c rd r1)
      then (let ω ad := BitVec.add a (Ins.immI w);
            if Bool.not (Rv.aligned f3 ad) then Rv.exception s Trap.load ad
-           else if Rv.bit ad.toNat 31 then Rv.input s rd
-           else Rv.write s rd (Rv.extend f3 (Rv.load (Rv.size f3) c s ad)) (Rv.next s))
-     else Rv.illegal s w)
+           else if Rv.bit ad.toNat 31 then Rv.input s rd len
+           else Rv.write s rd (Rv.extend f3 (Rv.load (Rv.size f3) c s ad)) (nxt))
+     else Rv.illegal s raw)
   else if Nat.beq op Op.store then
     (if Bool.and (Rv.okStore f3) (Rv.ok2 c r1 r2)
      then (let ω ad := BitVec.add a (Ins.immS w);
            if Bool.not (Rv.aligned f3 ad) then Rv.exception s Trap.store ad
-           else if Rv.bit ad.toNat 31 then Arch.mk (Rv.next s) s.regs s.mem s.trap s.tval s.epc s.csr s.irq (.cons (Rv.bits b.toNat 0 8) s.out) s.inp s.res
-           else Arch.mk (Rv.next s) s.regs (Rv.store (Rv.size f3) c s.mem ad b.toNat) s.trap s.tval s.epc s.csr s.irq s.out s.inp (Rv.resAfterStore c s ad))
-     else Rv.illegal s w)
+           else if Rv.bit ad.toNat 31 then Arch.mk (nxt) s.regs s.mem s.trap s.tval s.epc s.csr s.irq (.cons (Rv.bits b.toNat 0 8) s.out) s.inp s.res
+           else Arch.mk (nxt) s.regs (Rv.store (Rv.size f3) c s.mem ad b.toNat) s.trap s.tval s.epc s.csr s.irq s.out s.inp (Rv.resAfterStore c s ad))
+     else Rv.illegal s raw)
   else if Nat.beq op Op.amo then
     (let ω f5 := Nat.div f7 4;
      let ω lr := Nat.beq f5 2;
@@ -533,7 +678,7 @@ def Rv.exec (c : Cfg) (s : Arch) (w : Nat) : Arch :=
      if Bool.and c.a (Bool.and (Nat.beq f3 2) (Bool.and (Rv.okF5 f5) regsOk)) then
        (if Bool.not (Rv.aligned 2 a) then Rv.exception s (if lr then Trap.load else Trap.store) a
         else if Bool.not (Bool.and (Bool.not (Rv.bit a.toNat 31))
-                 (Bool.or (Bool.not (Rv.bit a.toNat 30)) (Rv.isUncached a))) then Rv.illegal s w
+                 (Bool.or (Bool.not (Rv.bit a.toNat 30)) (Rv.isUncached a))) then Rv.illegal s raw
         else if lr then Rv.write (Rv.reserve s a) rd (Rv.w32 (Rv.load 4 c s a)) (Rv.next s)
         else if sc then
           (let ω hit := Rv.resHit c s a;
@@ -545,50 +690,69 @@ def Rv.exec (c : Cfg) (s : Arch) (w : Nat) : Arch :=
            let ω old := Rv.load 4 c s a;
            let ω s2 := Arch.mk s1.pc s1.regs (Rv.store 4 c s1.mem a (Rv.amo f5 (Rv.w32 old) b).toNat) s1.trap s1.tval s1.epc s1.csr s1.irq s1.out s1.inp s1.res;
            Rv.write s2 rd (Rv.w32 old) (Rv.next s)))
-     else Rv.illegal s w)
+     else Rv.illegal s raw)
   else if Nat.beq op Op.opimm then
     (if Bool.and (Rv.okOpImm f3 f7) (Rv.ok2 c rd r1)
-     then Rv.write s rd (Rv.alu f3 (Bool.and (Nat.beq f3 5) (Nat.beq f7 32)) a (Ins.immI w)) (Rv.next s)
-     else Rv.illegal s w)
+     then Rv.write s rd (Rv.alu f3 (Bool.and (Nat.beq f3 5) (Nat.beq f7 32)) a (Ins.immI w)) (nxt)
+     else Rv.illegal s raw)
   else if Nat.beq op Op.op then
     (if Bool.and (Rv.okOp f3 f7) (Rv.ok3 c rd r1 r2)
-     then Rv.write s rd (Rv.alu f3 (Nat.beq f7 32) a b) (Rv.next s)
+     then Rv.write s rd (Rv.alu f3 (Nat.beq f7 32) a b) (nxt)
      else if Bool.and c.m (Bool.and (Nat.beq f7 1) (Rv.ok3 c rd r1 r2))
-     then Rv.write s rd (Rv.muldiv f3 a b) (Rv.next s)
-     else Rv.illegal s w)
-  else if Nat.beq op Op.fence then Rv.write s 0 (Rv.w32 0) (Rv.next s)
+     then Rv.write s rd (Rv.muldiv f3 a b) (nxt)
+     else Rv.illegal s raw)
+  else if Nat.beq op Op.fence then Rv.write s 0 (Rv.w32 0) (nxt)
   else if Nat.beq op Op.system then
     (if Nat.beq w 115 then Rv.exception s Trap.ecall (Rv.w32 0)
      else if Nat.beq w 1048691 then Rv.exception s Trap.ebreak (Rv.w32 0)
      else if Nat.beq w 807403635 then Rv.mret s      -- 0x30200073
      else if Nat.beq w 273678451 then Rv.wfi s      -- 0x10500073
      else if Bool.and csrKind csrOk then csrDone
-     else Rv.illegal s w)
-  else Rv.illegal s w
+     else Rv.illegal s raw)
+  else Rv.illegal s raw
+
+-- the 32-bit form (the proofs and the oracle's ISA trace)
+def Rv.exec (c : Cfg) (s : Arch) (w : Nat) : Arch := Rv.execAt c s w 4 w
+
+-- One step given the four bytes at the PC (`f`, little-endian): the low halfword says
+-- whether the instruction is 16-bit (C) and is its encoding; otherwise `f` is the
+-- instruction. `Rv.step` is this at `Rv.fetch`, so a claim about a fetched word can name
+-- the step with the word given (src/Rv/TrapProofs/Base.wiz, `Pf.stepF`). (A WFI's low
+-- bits are 11, so comparing `f` with it is the same as comparing the expanded word.)
+def Rv.stepW (c : Cfg) (s : Arch) (f : Nat) : Arch :=
+  if Nat.beq s.trap 0 then
+    (let ω h := Nat.mod f 65536;
+     let ω cmp := Bool.not (Nat.beq (Nat.mod h 4) 3);
+     if Bool.and (Rv.takeIrq s) (Bool.not (Nat.beq f Rv.wfiWord))
+     then Rv.enterTrap s (Rv.irqCause s) (Rv.w32 0) .true
+     else if cmp then
+       (match Rv.expand h with
+        | .some w => Rv.execAt c s w 2 h
+        | .none => Rv.execAt c s h 2 h)   -- not a 32-bit opcode: illegal
+     else Rv.execAt c s f 4 f)
+  else s
 
 -- the architectural step: a pending, enabled interrupt is taken between instructions,
 -- always at the vector (mtvec = 0 included). A WFI is not interrupted: it completes
 -- (as a NOP) once `mip & mie` is not zero, and the interrupt, if `mstatus.MIE` allows
 -- it, is taken before the next instruction, so mepc is the WFI's PC + 4.
-def Rv.step (c : Cfg) (s : Arch) : Arch :=
-  if Nat.beq s.trap 0 then
-    (let ω w := Rv.fetch c s;
-     if Bool.and (Rv.takeIrq s) (Bool.not (Nat.beq w Rv.wfiWord))
-     then Rv.enterTrap s (Rv.irqCause s) (Rv.w32 0) .true
-     else Rv.exec c s w)
-  else s
+def Rv.step (c : Cfg) (s : Arch) : Arch := Rv.stepW c s (Rv.fetch c s)
 
 def Rv.run (c : Cfg) : Nat → Arch → Arch
   | .zero, s => s
   | .succ k, s => Rv.run c k (Rv.step c s)
 
--- the machine after reset: PC 0, registers 0, the program's words from address 0
-def Rv.wordAt : List Nat → Nat → Nat
+-- the machine after reset: PC 0, registers 0, the program's halfwords from address 0.
+-- A program image is a list of 16-bit halfwords (a 32-bit instruction is two of them,
+-- low half first), so that compressed and uncompressed instructions share one layout.
+def Rv.halfAt : List Nat → Nat → Nat
   | .nil, _ => 0
-  | .cons w ws, .zero => w
-  | .cons w ws, .succ k => Rv.wordAt ws k
+  | .cons h hs, .zero => h
+  | .cons h hs, .succ k => Rv.halfAt hs k
+def Rv.wordAt (prog : List Nat) (k : Nat) : Nat :=
+  Rv.halfAt prog (2 * k) + 65536 * Rv.halfAt prog (2 * k + 1)
 def Rv.image (prog : List Nat) (a : BitVec 32) : BitVec 8 :=
-  BitVec.ofNat 8 (Rv.bits (Rv.wordAt prog (Nat.div a.toNat 4)) (8 * Nat.mod a.toNat 4) 8)
+  BitVec.ofNat 8 (Rv.bits (Rv.halfAt prog (Nat.div a.toNat 2)) (8 * Nat.mod a.toNat 2) 8)
 def Arch.start (c : Cfg) (prog : List Nat) : Arch :=
   Arch.mk (Rv.w32 0) (fun (j : BitVec 5) => Rv.w32 0) (fun (a : BitVec 32) => Rv.image prog (Rv.maddr c a))
     0 (Rv.w32 0) (Rv.w32 0) Csr.init (Rv.w32 0) .nil .nil .none
