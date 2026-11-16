@@ -8,7 +8,7 @@ import Rv.Asm
 --
 -- The trap half (`Pf.TrapClaimAt`): with no handler (mtvec 0), a trapping instruction
 -- stops with the specification's cause, tval and epc. Trap entry into a handler,
--- interrupts, MRET, WFI and a CSR instruction are proofs/TrapProofs (one file per claim, scripts/trap-proofs.sh). ECALL, EBREAK and an illegal instruction are proved for a fully
+-- interrupts, MRET, WFI and a CSR instruction are src/Rv/TrapProofs (one file per claim, checked by grail build). ECALL, EBREAK and an illegal instruction are proved for a fully
 -- symbolic architectural state; the misaligned load/store/jump, whose tval is an
 -- address, are proved from a state with a concrete x1 (the PC, memory and the other
 -- registers stay symbolic), because the core's address adder and the specification's
@@ -115,7 +115,7 @@ def Pf.trapOk (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 
 -- The trap-state claim for `w`, from a state built by `p` (the traps that record an
 -- address need a concrete register value; see `Pf.x1is2`). These are the halting
 -- traps: `p` leaves no handler (`Pf.noVec`: the reset CSRs, mtvec 0, as the core's
--- `Pf.at` has them); trap entry into a handler is proofs/TrapProofs (one file per claim, scripts/trap-proofs.sh).
+-- `Pf.at` has them); trap entry into a handler is src/Rv/TrapProofs (one file per claim, checked by grail build).
 def Pf.TrapClaimAt (p : Arch → Arch) (w : Nat) : Prop :=
   (a : Arch) → (m0 m1 m2 m3 : BitVec 9 → BitVec 8) → (x1 x2 acc dv rm : BitVec 32) → (cnt srd : BitVec 5) → (sf3 : BitVec 3) → (slo : BitVec 2) → (sio : BitVec 1) →
   Pf.fetchQ (p a) m0 m1 m2 m3 = Pf.bytes w →

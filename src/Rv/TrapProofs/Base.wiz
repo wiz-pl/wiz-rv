@@ -1,7 +1,8 @@
 import Rv.Proofs
 -- The definitions and glue for the trap-entry theorem (docs/csr.md); each claim is its
--- own file in proofs/TrapProofs (one process per claim keeps memory per check bounded).
--- Check them all with scripts/trap-proofs.sh.
+-- own file in src/Rv/TrapProofs, so `grail build` checks each in its own job (one
+-- process per claim keeps the memory per check bounded).
+-- Outside grail: scripts/trap-proofs.sh.
 -- Kernel-checked trap-entry, interrupt, MRET, WFI and CSR claims for the multi-cycle
 -- RV32E core (16 registers, 2 KB), in the style of src/Rv/Proofs.wiz: the core starts
 -- in its decode phase on an instruction word, with its CSR file, mtval and register

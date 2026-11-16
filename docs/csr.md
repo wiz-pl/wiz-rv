@@ -117,7 +117,8 @@ specification at every comparison point.
 ## The trap-entry theorem
 
 Stated for the multi-cycle core, RV32E, 2 KB (the configuration of `src/Rv/Proofs.wiz`),
-and proved by `rfl` per instruction word in `proofs/TrapProofs (one file per claim, scripts/trap-proofs.sh)`:
+and proved by `rfl` per instruction word in `src/Rv/TrapProofs/` (Base.wiz, and one file per claim, so
+`grail build` checks each claim in its own job):
 
 > Let `a` be any architectural state, and let `b` be `a` with a handler installed
 > (`Pf.withH`: running, `mstatus` = 0x1808, `mie` = 0x880, `mtvec` = H = 0x100; the PC,

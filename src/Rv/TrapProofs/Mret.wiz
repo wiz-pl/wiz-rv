@@ -1,4 +1,4 @@
-import TrapProofs.Base
--- Pf.mret_ok: the statement and its form are in proofs/TrapProofs/Base.wiz and docs/csr.md
+import Rv.TrapProofs.Base
+-- Pf.mret_ok: the statement and its form are in src/Rv/TrapProofs/Base.wiz and docs/csr.md
 def Pf.mret_ok : Pf.EnterClaimAt Pf.inH (Pf.w A.mret) := fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
   Pf.entryOk In.idle (Pf.inH a) (Pf.w A.mret) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio (Pf.entryOf (Rv.exec Pf.cfg (Pf.inH a) (Pf.w A.mret))) rfl h
