@@ -47,7 +47,7 @@ wiz-ddr3's cache and controller at the full rate and the existing bus adapter
 | `0x8000_0000` + `0x40` | DDR status | bit 0 calibration done, bit 1 failed |
 | `0x8000_0000` + `0x50 … 0x7c` | performance counters | instructions, bus/memory cycles, cache hits/misses, framebuffer writes, OLED refreshes |
 | `0x8000_0000` + `0x80` | OLED controller | the pins and program counter (debug) |
-| `0x8000_0000` + `0x90` | `mip` | read: this hart's MSIP/MTIP/MEIP (the software interrupt input until CSRs) |
+| `0x8000_0000` + `0x90` | `mip` | read: this hart's MSIP/MTIP/MEIP (the `mip` CSR's value, for polling software) |
 | `0x8000_1000` + `0x00` | mailbox | per hart: message and valid bit (`+8h`), and the boot entry (`+0x20 + 4h`) |
 | `0x8000_2000` | PLIC-style controller | priorities, pending, per-context enable/threshold, claim/complete |
 | `0x8000_4000` + `0x00/0x4000/0xbff8` | CLINT-like timer | `msip` per hart, `mtimecmp` (64-bit per hart), `mtime` |
@@ -147,15 +147,15 @@ The other `mip` bits read 0 (no supervisor or user mode). `mie` has the same thr
 and an interrupt is taken when `mstatus.MIE` is set and `mip & mie != 0`; the code is
 MEI (11), then MSI (3), then MTI (7), matching the privileged specification's priority.
 Trap entry is the standard M-mode one: `mepc = pc`, `mcause = 0x8000_0000 | code`,
-`mstatus.MPIE = mstatus.MIE`, `mstatus.MIE = 0`, `mstatus.MPP = M`, `pc = mtvec` (direct
-mode only). `mret` restores `MIE = MPIE` and returns to `mepc`.
+`mstatus.MPIE = mstatus.MIE`, `mstatus.MIE = 0`, `mstatus.MPP = M`, `pc = mtvec` (BASE,
+or BASE + 4 × code in vectored mode). `mret` restores `MIE = MPIE` and returns to `mepc`.
 
-**The core does not implement this yet.** `Rv.Core`/`Rv.Pipe` have no machine CSRs and
-no interrupt input (`In` has no `irq`); the blocks are the prerequisite, and the
-`Intc.mip`/`Intc.take`/`Intc.cause` functions are the specification to wire in. Until
-then software polls the read-only `MIP` word for its own `mip`, or the blocks directly:
-`MTIME_LO/HI` against `MTIMECMP`, `IPI_STATUS`, and `PENDING` (`sw/golem.h` has the
-addresses, the `mip`/`mie` bits and the helper calls). `tests/golem_intc.wiz` checks the
+Both cores implement this (docs/csr.md: the CSRs, WARL fields, WFI, the halting rule
+for exceptions while `mtvec` is 0); `Intc.mip s src h` drives hart h's `In.irqM/T/E`
+(docs/plic.md: one PLIC context per hart, `mhartid`). Software may still poll the
+read-only `MIP` word or the blocks directly: `MTIME_LO/HI` against `MTIMECMP`,
+`IPI_STATUS`, and `PENDING` (`sw/golem.h` has the addresses, the `mip`/`mie` bits and the
+helper calls). `tests/golem_intc.wiz` checks the
 timer, the UART and mailbox paths in all four contexts, claim/complete, no
 cross-context claim, level re-arm, the `mip`/`mie` gating, the priority between MSI and
 MTI, and the boot handshake.
@@ -468,6 +468,7 @@ tests/golem_four.wiz    the four-hart interconnect: no loss, and fairness under 
 tests/golem_four_litmus.wiz the 4-hart mailbox ring in the coherence model (SC only)
 tests/golem_four_ring.wiz the four-hart mailbox ring with the real Intc (MMIO, round-robin)
 tests/golem_four_plic.wiz the four-hart boot/wake: each hart's PLIC source claims its mailbox
+tests/golem_plic_harts.wiz four real cores take MEI through their own PLIC contexts (docs/plic.md)
 tests/golem_litmus.wiz  the bus litmus: SC shapes, warm caches, LR/SC, AMO sum
 tests/golem_board.wiz   the `golem board` config/constraints check
 sw/golem.h              the memory map and MMIO for software
@@ -499,6 +500,7 @@ There are six checks, one per piece, because each kernel run's state is large
 | `tests/golem_oled.wiz` | the framebuffer and the SSD1331 streamer (`OledSim`, the controller at its `pixels` step) | the first six SPI data bytes: red, green, blue (RGB 565, high byte first) |
 | `tests/golem_bus.wiz` | `GBus.route`/`arb`/`ramStep` at values | the host writes `0x600d` to DDR[0], the core reads it back, no error |
 | `tests/golem_intc.wiz` | `Intc` at values | MTIP rises exactly when `mtime` reaches `mtimecmp` (tick 100), cause 7; `mstatus.MIE` gates it; MSI outranks MTI; the UART and mailbox PLIC paths claim, in-service, complete and re-arm in all four contexts (sources 1, 3, 5 and 6); no cross-context claim; the boot entry and doorbell handshake |
+| `tests/golem_plic_harts.wiz` | `Intc` with four real multi-cycle cores | every hart sleeps in WFI with MEIE; hart 0 enables context h for source `mboxSrc h` and posts 100+h; each hart takes MEI (mcause 0x8000000b), claims its own source in its own context (via `mhartid`), reads its message, completes, MRETs and halts; nothing left pending |
 | `tests/golem_four_plic.wiz` | `Intc` with four hart state machines | hart 0 enables each context and posts a go message; harts 1/2/3 wake on MEIP and claim sources 3/5/6, take messages 101/202/303 and complete; harts 2/3 have no MEIP before the message |
 | `tests/golem_board.wiz` | `GBoard` (the Arty configuration) | 75 pins, 55 top ports, clocks 100/400/400/200 MHz, reset domains as the design |
 
@@ -510,8 +512,9 @@ bytes of a frame; the boot ROM also writes those pixels in the board image, but 
 specification sends every store with bit 31 set to the output port, so the lockstep
 program (`GProg.sim`) leaves the framebuffer out.
 
-The interrupt checks run the `Intc` step function at values, not the machine (the
-`mhartid` CSR and the core's interrupt input are the next change). `golem_intc` posts,
+The interrupt checks run the `Intc` step function at values (`tests/golem_plic_harts.wiz`
+adds four real cores taking the external interrupt through their own PLIC contexts:
+docs/plic.md). `golem_intc` posts,
 claims and completes through one context at a time; `golem_four_plic` runs four hart
 state machines behind one MMIO port: hart 0 enables each context and posts a go
 message, and harts 1/2/3 leave the doorbell wait, poll `MIP.MEIP`, claim their own
@@ -527,6 +530,7 @@ wiz check tests/golem_oled.wiz -I src -I ../wiz-ddr3/src
 wiz check tests/golem_bus.wiz  -I src -I ../wiz-ddr3/src
 wiz check tests/golem_intc.wiz -I src -I ../wiz-ddr3/src
 wiz check tests/golem_four_plic.wiz -I src -I ../wiz-ddr3/src
+wiz check tests/golem_plic_harts.wiz -I src -I ../wiz-ddr3/src
 wiz check tests/golem_board.wiz -I src -I ../wiz-ddr3/src
 # or through grail (checks the library and runs the tests):
 grail build && grail test golem
@@ -544,6 +548,7 @@ golem oled: 11 data bytes, first six f8 00 07 e0 00 1f  — PASS
 golem bus: host wrote 0x600d, core read 24589, err 0 — PASS
 golem intc: timer mtip at tick 100, taken 1, cause 7, rearmed 0, csr 0/3; uart claim 1, again 0, completed 1, pending 2; ipi valid 1, meip 1, claim 3, pending 0, msg 24589; ipi0 [1 1 2 12345 ]; ctx2/3 [1 1 0 5 6 0 0 0 5 8738 13107 ], uart ctx2/3 [1 1 0 1 0 1 ], ext [4 0 4 ]; boot 0 -> 1 entry 1073742080 — PASS
 golem four plic: phases [13 5 5 5 ], sources [0 3 5 6 ], messages [0 101 202 303 ], before [0 0 ] — PASS
+golem plic harts: 144 cycles; hart 0 [2 2147483659 2 100 0 ] hart 1 [2 2147483659 3 101 1 ] hart 2 [2 2147483659 5 102 2 ] hart 3 [2 2147483659 6 103 3 ]; pending 0 — PASS
 golem board: 75 pins, 55 top ports, 3 reset domains, clocks 100/400/400/200 MHz, PASS
 ```
 

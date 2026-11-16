@@ -23,10 +23,11 @@ import Rv.Core
 --           0x8000 + 8 * hart, `mtime` at 0xfff8: the standard CLINT layout, rebased
 --           from 0x02000000 so that it stays inside the I/O window
 --
--- The controller does not interrupt the core itself: `Rv.Core`/`Rv.Pipe` have no
--- machine-mode CSRs yet (DESIGN.md, "Interrupts, timer and harts" lists the change and
--- what stays open). `Intc.mip`, `Intc.take` and `Intc.cause` are the contract the core's
--- interrupt input must implement, and tests/golem_intc.wiz checks them.
+-- `Intc.mip s src h` drives hart h's interrupt lines (`In.irqM/T/E`): its own CLINT
+-- bits and its own PLIC context (docs/plic.md); the cores take the interrupts with the
+-- machine CSRs (docs/csr.md). `Intc.take` and `Intc.cause` are the contract the cores
+-- implement, and tests/golem_intc.wiz checks them; tests/golem_plic_harts.wiz runs four
+-- cores against this block.
 --
 -- The register offsets (from `GMap.mmioBase`; four harts, `G4.harts`):
 

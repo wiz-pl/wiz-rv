@@ -39,8 +39,8 @@ def GMap.soundFree : Nat := 52
 def GMap.ddrStatus : Nat := 64      -- bit 0 calibration done, bit 1 it failed
 def GMap.perf : Nat := 80           -- the performance counters, 0x50 … 0x7c
 def GMap.cycles : Nat := 0x50       -- alias of GMap.perf's first counter (instructions)
--- read-only: this hart's `mip` (MSIP/MTIP/MEIP). The core has no CSRs yet, so this is
--- how software polls the interrupt inputs, including its PLIC context's MEIP.
+-- read-only: this hart's `mip` (MSIP/MTIP/MEIP), the same value as the `mip` CSR: how
+-- software written before the CSRs polls the interrupt inputs.
 def GMap.mip : Nat := 0x90
 
 -- the interrupt/timer blocks (offsets from GMap.mmioBase; the registers themselves are

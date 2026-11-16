@@ -1,7 +1,7 @@
 import Rv.Asm
 -- The four-hart ring: the boot/park protocol and the mailbox handoff the 4-hart test
 -- runs (`tests/golem_four.wiz`). One image runs on all four harts; each reads its
--- `mhartid` from MMIO offset 8 (the core has no CSR file), harts 1..3 park on their
+-- hart id from MMIO offset 8 (the `mhartid` CSR has the same value), harts 1..3 park on their
 -- `msip(h)` doorbell, and every hart then runs the same ring:
 --
 --   hart 0: increments its private counter 20 times, sends it to hart 1, waits for

@@ -35,13 +35,13 @@ import Rv.Golem.Map
 -- and is a one-cycle drain (`Ph.w`), which is all the ordering this core needs.
 --
 -- Boot ABI (the same as `Intc` and sw/golem.h): every hart starts at PC 0 in its own
--- local RAM; the image reads `GMap.hartId` (MMIO offset 8) for its `mhartid` — the
--- core has no CSR file yet — hart 0 boots, harts 1..3 park on `msip(h)` and are
+-- local RAM; the image reads `GMap.hartId` (MMIO offset 8) for its hart id (the same
+-- as the `mhartid` CSR, `coreStepHC h`) — hart 0 boots, harts 1..3 park on `msip(h)` and are
 -- released by the doorbell after reading `bootEntry(h)`. A hart's own `mip` is the
 -- read-only MMIO word `GMap.mip`; hart 0 releases each park hart through the doorbell
 -- and then a PLIC mailbox source, and the hart claims/completes that source in its own
--- context before entering its entry point. This is the software form of the interrupt
--- input until the core has CSRs and `mret`.
+-- context before entering its entry point: the software form of the interrupt path,
+-- which the cores now also take as traps (docs/plic.md).
 
 def G4.harts : Nat := 4
 def G4.ab : Nat := 5

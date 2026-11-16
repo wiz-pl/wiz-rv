@@ -30,8 +30,8 @@
 #define HART_ID         IO(0x08)            /* this hart's mhartid (0 … 3): the core has
                                                no CSR file, so mhartid is an MMIO word */
 #define MIP             IO(0x90)            /* read: this hart's mip (MSIP|MTIP|MEIP);
-                                               the software form of the interrupt input
-                                               until the core has CSRs */
+                                               the same as the mip CSR, for software
+                                               that polls */
 #define CYCLES_LO      IO(0x10)             /* the cycle counter (GOLEM_CLOCK_HZ) */
 #define CYCLES_HI      IO(0x14)
 #define DDR_STATUS     IO(0x40)             /* bit 0: calibration done, bit 1: failed */
@@ -102,8 +102,7 @@ static inline unsigned golem_plic_ipi(unsigned hart) {
 #define MTIME_LO        IO(0xfff8)
 #define MTIME_HI        IO(0xfffc)
 
-/* `mip`/`mie` bits (M-mode). The core has no CSRs yet (DESIGN.md, "Interrupts, timer
-   and harts"), so software polls the blocks above or MTIP's source until it does. */
+/* `mip`/`mie` bits (M-mode): the CSRs and the MIP word (docs/csr.md). */
 #define MIP_MSIP        (1u << 3)                    /* the CLINT doorbell */
 #define MIP_MTIP        (1u << 7)                    /* mtime >= mtimecmp */
 #define MIP_MEIP        (1u << 11)                   /* the PLIC's external interrupt */
