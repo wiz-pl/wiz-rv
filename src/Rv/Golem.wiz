@@ -2,6 +2,7 @@ import Rv.DPipe
 import Rv.Doom
 import Rv.Golem.Board
 import Rv.Golem.Bus
+import Rv.Golem.Four
 import Ddr3.Cache
 import Ddr3.Board
 -- golem, the first SoC top level: a core, the DDR3 controller, the UART and the
@@ -75,10 +76,10 @@ def Golem.step (t : Timing) (h : Circuit DIn.code DOut.code) {r : HwTy → Type}
   let quiet := DIn.pack (DIn.mk rx (Hw.lit 4 0) lo lo (Hw.lit 32 0) (Hw.lit 2 0) (Hw.lit 32 0) (Hw.lit 32 0));
   let ω o0 := DOut.unpack (Hw.snd (Circuit.inst h s.sys quiet));
   -- the decode and the adapter: a zero answer gives the request, the real one the state
-  let r0 := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb (GBus.noResp (r := r));
+  let r0 := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb o0.aop o0.af5 (GBus.noResp (r := r));
   let ω q := CacheReq.unpack (Hw.fst (Hw.snd r0));
   -- the arbiter's second master: absent on the board
-  let host := CacheReq.mk lo (Hw.lit 28 0) lo (Hw.lit 32 0) (Hw.lit 4 0);
+  let host := CacheReq.mk lo (Hw.lit 28 0) lo (Hw.lit 32 0) (Hw.lit 4 0) (Hw.lit 2 0) (Hw.lit 5 0);
   let ar0 := GBus.arb s.arb q host (GBus.noResp (r := r));
   let ω sel := CacheReq.unpack (Hw.fst (Hw.snd ar0));
   -- the controller's answer to the cache comes from its state and its PHY input
@@ -91,7 +92,7 @@ def Golem.step (t : Timing) (h : Circuit DIn.code DOut.code) {r : HwTy → Type}
   let ω coreResp := CacheResp.unpack (Hw.fst (Hw.snd (Hw.snd ar)));
   let co := Ctrl.step t cs (PortIn.unpack (Hw.snd (Hw.snd cr))) (PhyIn.unpack phyIn);
   let ω po := PortOut.unpack (Hw.fst (Hw.snd co));
-  let br := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb coreResp;
+  let br := GBus.route bs o0.valid o0.pend o0.we o0.addr o0.wdata o0.wstrb o0.aop o0.af5 coreResp;
   let ω toCore := GBus.Resp.unpack (Hw.snd (Hw.snd br));
   -- the core waits in reset for the calibration
   let rst := GBoard.coreReset btn po.calDone po.calFail;
@@ -139,3 +140,54 @@ def Golem.golem (t : Timing) (prog : List Nat) : Circuit GIn.code (HwTy.prod Ddr
 -- the conservative variant: the multi-cycle core at half rate (50 MHz effective)
 def Golem.golemMc (t : Timing) (prog : List Nat) : Circuit GIn.code (HwTy.prod Ddr3Pads.code GOut.code) :=
   Golem.board t (Circuit.half (doomSysCfg .false Doom.oled (Nat.add 3 (Doom.lo .false)) (Doom.oldCore prog)))
+
+--------------------------------------------------------------------------------
+-- Four harts: the shared DDR and board around `G4` (src/Rv/Golem/Four.wiz). The
+-- harts are enabled every other cycle (50 MHz effective); the bus, the DDR cache and
+-- the controller, the UART and the OLED stay at 100 MHz. `cfg.l1` selects the private
+-- L1 per hart; `G4.noL1` is the area cut (no L1, every DDR access one word).
+
+structure FSt (r : HwTy → Type) where
+  top : r (G4.St.code G4.wb G4.fl)
+  ctrl : r St.code
+  cache : r CSt.code
+  phy : r PhyIn.code
+  rstCnt : r W8
+  half : r W1
+  deriving Bundle
+
+def FSt.codeTy : HwTy := FSt.code
+
+def Golem.fourStep (t : Timing) (cfg : G4.Cfg) {r : HwTy → Type} [Hw r] (s : FSt r)
+    (sys4x sys4xDqs ref200 : r HwTy.clock) (locked : r W1) (rx : r W1) (btn : r B4) :
+    r (HwTy.prod FSt.codeTy (HwTy.prod Ddr3Pads.code GOut.code)) :=
+  let b := s;
+  let ω ts := G4.St.unpack G4.wb G4.fl b.top;
+  let ω cs := St.unpack b.ctrl;
+  -- the controller's status (the harts are held until calibration done or failed)
+  let co0 := Ctrl.step t cs (PortIn.mk U.lo U.lo (Hw.lit 24 0) (Hw.lit 128 0) (Hw.lit 16 0)) (PhyIn.unpack b.phy);
+  let ω po0 := PortOut.unpack (Hw.fst (Hw.snd co0));
+  let ddr : r B2 := Hw.cat po0.calFail po0.calDone;
+  let rst := GBoard.coreReset btn po0.calDone po0.calFail;
+  -- the request the shared DDR cache sees, then its answer
+  let a0 := G4.step cfg G4.wb ts b.half rst ddr (GBus.noResp (r := r)) rx;
+  let ω sel := CacheReq.unpack (Hw.snd a0);
+  let cr := C.step (CSt.unpack b.cache) (CReq.mk sel.valid sel.addr sel.we sel.wdata sel.wstrb) po0;
+  let ω resp := CResp.unpack (Hw.fst (Hw.snd cr));
+  let a := G4.step cfg G4.wb ts b.half rst ddr (CacheResp.mk resp.ready resp.rvalid resp.rdata) rx;
+  let ω ts' := G4.St.unpack G4.wb G4.fl (Hw.fst a);
+  let co := Ctrl.step t cs (PortIn.unpack (Hw.snd (Hw.snd cr))) (PhyIn.unpack b.phy);
+  let ω po := PortOut.unpack (Hw.fst (Hw.snd co));
+  let phyRst := GBoard.phyReset b.rstCnt;
+  let phy := Phy.io (PhyClk.mk sys4x sys4xDqs ref200) phyRst cs.rstN (Dfi.unpack (Hw.snd (Hw.snd co)));
+  let o := G4.out ts' po.calDone po.calFail;
+  Hw.pair (FSt.pack (FSt.mk (Hw.fst a) (Hw.fst co) (Hw.fst cr) (Hw.snd phy)
+      (Hw.mux phyRst (Hw.mux locked (inc b.rstCnt) b.rstCnt) b.rstCnt) (Hw.not b.half)))
+    (Hw.pair (Hw.fst phy) (GOut.pack (GOut.mk o.uart_tx o.led o.ja o.jb)))
+
+def Golem.four (t : Timing) (cfg : G4.Cfg) (prog : List Nat) : Circuit GIn.code (HwTy.prod Ddr3Pads.code GOut.code) :=
+  Circuit.mk FSt.codeTy (Bundle.toEl FSt.bundle (FSt.mk (G4.initSt G4.wb prog) (Ctrl.init t) C.init (HwTy.unpack PhyIn.code 0)
+    (BitVec.ofNat 8 0) (BitVec.ofNat 1 0)))
+    (fun s x =>
+      let ω i := GIn.unpack x;
+      Golem.fourStep t cfg (FSt.unpack s) i.sys4x i.sys4xDqs i.ref200 i.locked i.uart_rx i.btn)

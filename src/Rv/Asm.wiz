@@ -15,6 +15,7 @@ infixr:67 " :: " => List.cons
 inductive Asm where
   | label (l : String)
   | word (w : Nat)
+  | half (h : Nat)          -- a raw 16-bit encoding (for illegal-encoding tests)
   | lui (rd imm : Nat)
   | auipc (rd imm : Nat)
   | jal (rd : Nat) (l : String)
@@ -24,8 +25,37 @@ inductive Asm where
   | store (f3 rs2 rs1 : Nat) (imm : Int)
   | opi (f3 f7 rd rs1 : Nat) (imm : Int)
   | op (f3 f7 rd rs1 rs2 : Nat)
+  | amo (f5 rd rs1 rs2 : Nat)   -- RV32A: funct5 (2 LR.W, 3 SC.W, 0 ADD, 1 SWAP, …)
   | li (rd : Nat) (v : Int)
   | la (rd : Nat) (l : String)
+  -- the C extension (16-bit instructions)
+  | caddi4spn (rd : Nat) (imm : Nat)
+  | clw (rd rs1 : Nat) (imm : Nat)
+  | csw (rs2 rs1 : Nat) (imm : Nat)
+  | caddi (rd : Nat) (imm : Int)
+  | cli (rd : Nat) (imm : Int)
+  | clui (rd : Nat) (imm : Int)
+  | caddisp (imm : Int)
+  | cslli (rd sh : Nat)
+  | csrli (rd sh : Nat)
+  | csrai (rd sh : Nat)
+  | candi (rd : Nat) (imm : Int)
+  | csub (rd rs : Nat)
+  | cxor (rd rs : Nat)
+  | cor (rd rs : Nat)
+  | cand (rd rs : Nat)
+  | cj (l : String)
+  | cjal (l : String)
+  | cjr (rs1 : Nat)
+  | cjalr (rs1 : Nat)
+  | cmv (rd rs : Nat)
+  | cadd (rd rs : Nat)
+  | cbeqz (rs1 : Nat) (l : String)
+  | cbnez (rs1 : Nat) (l : String)
+  | clwsp (rd : Nat) (imm : Nat)
+  | cswsp (rs2 : Nat) (imm : Nat)
+  | cnop
+  | cebreak
 
 -- an integer as an `n`-bit two's complement number
 def Asm.tc (n : Nat) (i : Int) : Nat := match i with
@@ -51,6 +81,75 @@ def Enc.j (rd imm : Nat) : Nat :=
   Rv.bits imm 20 1 * Rv.pow2 31 + Rv.bits imm 1 10 * Rv.pow2 21 + Rv.bits imm 11 1 * Rv.pow2 20
     + Rv.bits imm 12 8 * 4096 + rd * 128 + Op.jal
 
+-- a 32-bit instruction as two halfwords (low first); the program image is halfwords
+def Asm.emit32 (w : Nat) : List Nat := .cons (Rv.bits w 0 16) (.cons (Rv.bits w 16 16) .nil)
+def Asm.emit16 (h : Nat) : List Nat := .cons (Rv.bits h 0 16) .nil
+
+-- The compressed encodings (RV32C). The register fields are written as the assembler
+-- asks them (x8 … x15 for the three-bit fields); `Asm.problems` rejects anything that
+-- does not fit. The mapping is the RISC-V manual's table.
+def CEnc.addi4spn (rd uimm : Nat) : Nat :=
+  Rv.bits (rd - 8) 0 3 * 4 + Rv.bits uimm 4 2 * 2048 + Rv.bits uimm 6 4 * 128
+    + Rv.bits uimm 2 1 * 64 + Rv.bits uimm 3 1 * 32
+def CEnc.lw (rd rs1 uimm : Nat) : Nat :=
+  2 * 8192 + Rv.bits (rd - 8) 0 3 * 4 + Rv.bits (rs1 - 8) 0 3 * 128
+    + Rv.bits uimm 3 3 * 1024 + Rv.bits uimm 2 1 * 64 + Rv.bits uimm 6 1 * 32
+def CEnc.sw (rs2 rs1 uimm : Nat) : Nat :=
+  6 * 8192 + Rv.bits (rs2 - 8) 0 3 * 4 + Rv.bits (rs1 - 8) 0 3 * 128
+    + Rv.bits uimm 3 3 * 1024 + Rv.bits uimm 2 1 * 64 + Rv.bits uimm 6 1 * 32
+def CEnc.addi (rd : Nat) (imm : Int) : Nat :=
+  let v := Asm.tc 6 imm;
+  Rv.bits v 5 1 * 4096 + rd * 128 + Rv.bits v 0 5 * 4 + 1
+def CEnc.li (rd : Nat) (imm : Int) : Nat :=
+  let v := Asm.tc 6 imm;
+  2 * 8192 + Rv.bits v 5 1 * 4096 + rd * 128 + Rv.bits v 0 5 * 4 + 1
+def CEnc.lui (rd : Nat) (imm : Int) : Nat :=
+  let v := Asm.tc 32 imm;
+  3 * 8192 + Rv.bits v 17 1 * 4096 + Rv.bits v 12 5 * 4 + rd * 128 + 1
+def CEnc.addisp (imm : Int) : Nat :=
+  let v := Asm.tc 10 imm;
+  3 * 8192 + Rv.bits v 9 1 * 4096 + 2 * 128 + Rv.bits v 5 1 * 4 + Rv.bits v 7 1 * 8
+    + Rv.bits v 8 1 * 16 + Rv.bits v 6 1 * 32 + Rv.bits v 4 1 * 64 + 1
+def CEnc.srli (rd sh : Nat) : Nat :=
+  4 * 8192 + Rv.bits sh 5 1 * 4096 + Rv.bits (rd - 8) 0 3 * 128
+    + Rv.bits sh 0 5 * 4 + 1
+def CEnc.srai (rd sh : Nat) : Nat :=
+  4 * 8192 + Rv.bits sh 5 1 * 4096 + 1024 + Rv.bits (rd - 8) 0 3 * 128
+    + Rv.bits sh 0 5 * 4 + 1
+def CEnc.andi (rd : Nat) (imm : Int) : Nat :=
+  let v := Asm.tc 6 imm;
+  4 * 8192 + Rv.bits v 5 1 * 4096 + 2048 + Rv.bits (rd - 8) 0 3 * 128
+    + Rv.bits v 0 5 * 4 + 1
+def CEnc.sub (f6 rd rs2 : Nat) : Nat :=
+  4 * 8192 + 3072 + f6 * 32 + Rv.bits (rs2 - 8) 0 3 * 4 + Rv.bits (rd - 8) 0 3 * 128 + 1
+def CEnc.joff (v : Nat) : Nat :=
+  Rv.bits v 11 1 * 4096 + Rv.bits v 4 1 * 2048 + Rv.bits v 9 1 * 1024
+    + Rv.bits v 8 1 * 512 + Rv.bits v 10 1 * 256 + Rv.bits v 6 1 * 128
+    + Rv.bits v 7 1 * 64 + Rv.bits v 3 1 * 32 + Rv.bits v 2 1 * 16
+    + Rv.bits v 1 1 * 8 + Rv.bits v 5 1 * 4
+def CEnc.j (imm : Int) : Nat := CEnc.joff (Asm.tc 12 imm) + 5 * 8192 + 1
+def CEnc.jal (imm : Int) : Nat := CEnc.joff (Asm.tc 12 imm) + 8192 + 1
+def CEnc.boff (v : Nat) : Nat :=
+  Rv.bits v 8 1 * 4096 + Rv.bits v 4 1 * 2048 + Rv.bits v 3 1 * 1024
+    + Rv.bits v 7 1 * 64 + Rv.bits v 6 1 * 32 + Rv.bits v 2 1 * 16
+    + Rv.bits v 1 1 * 8 + Rv.bits v 5 1 * 4
+def CEnc.beqz (rs1 : Nat) (imm : Int) : Nat :=
+  CEnc.boff (Asm.tc 9 imm) + Rv.bits (rs1 - 8) 0 3 * 128 + 6 * 8192 + 1
+def CEnc.bnez (rs1 : Nat) (imm : Int) : Nat :=
+  CEnc.boff (Asm.tc 9 imm) + Rv.bits (rs1 - 8) 0 3 * 128 + 7 * 8192 + 1
+def CEnc.slli (rd sh : Nat) : Nat :=
+  2 + Rv.bits sh 5 1 * 4096 + rd * 128 + Rv.bits sh 0 5 * 4
+def CEnc.lwsp (rd uimm : Nat) : Nat :=
+  2 * 8192 + 2 + rd * 128 + Rv.bits uimm 5 1 * 4096 + Rv.bits uimm 2 3 * 16
+    + Rv.bits uimm 6 2 * 4
+def CEnc.swsp (rs2 uimm : Nat) : Nat :=
+  6 * 8192 + 2 + rs2 * 4 + Rv.bits uimm 2 4 * 512 + Rv.bits uimm 6 2 * 128
+def CEnc.jr (rs1 : Nat) : Nat := 4 * 8192 + 2 + rs1 * 128
+def CEnc.jalr (rs1 : Nat) : Nat := 4 * 8192 + 4096 + 2 + rs1 * 128
+def CEnc.mv (rd rs2 : Nat) : Nat := 4 * 8192 + 2 + rd * 128 + rs2 * 4
+def CEnc.add (rd rs2 : Nat) : Nat := 4 * 8192 + 4096 + 2 + rd * 128 + rs2 * 4
+def CEnc.ebreak : Nat := 4 * 8192 + 4096 + 2
+
 -- `li`: LUI with the upper part, ADDI with the (sign-extended) lower twelve bits
 def Asm.liLo (v : Int) : Nat := Rv.bits (Asm.tc 32 v) 0 12
 def Asm.liHi (v : Int) : Nat :=
@@ -64,6 +163,34 @@ def Asm.size (i : Asm) : Nat := match i with
   | .label l => 0
   | .li rd v => 8
   | .la rd l => 8
+  | .half h => 2
+  | .caddi4spn rd imm => 2
+  | .clw rd rs1 imm => 2
+  | .csw rs2 rs1 imm => 2
+  | .caddi rd imm => 2
+  | .cli rd imm => 2
+  | .clui rd imm => 2
+  | .caddisp imm => 2
+  | .cslli rd sh => 2
+  | .csrli rd sh => 2
+  | .csrai rd sh => 2
+  | .candi rd imm => 2
+  | .csub rd rs => 2
+  | .cxor rd rs => 2
+  | .cor rd rs => 2
+  | .cand rd rs => 2
+  | .cj l => 2
+  | .cjal l => 2
+  | .cjr rs1 => 2
+  | .cjalr rs1 => 2
+  | .cmv rd rs => 2
+  | .cadd rd rs => 2
+  | .cbeqz rs1 l => 2
+  | .cbnez rs1 l => 2
+  | .clwsp rd imm => 2
+  | .cswsp rs2 imm => 2
+  | .cnop => 2
+  | .cebreak => 2
   | _ => 4
 def Asm.here (pc : Nat) (i : Asm) : List (String × Nat) := match i with
   | .label l => .cons (l, pc) .nil
@@ -83,18 +210,49 @@ def Asm.offset (env : List (String × Nat)) (pc : Nat) (l : String) : Int := mat
 
 def Asm.encode (env : List (String × Nat)) (pc : Nat) (i : Asm) : List Nat := match i with
   | .label l => .nil
-  | .word w => .cons w .nil
-  | .lui rd imm => .cons (Enc.u Op.lui rd imm) .nil
-  | .auipc rd imm => .cons (Enc.u Op.auipc rd imm) .nil
-  | .jal rd l => .cons (Enc.j rd (Asm.tc 21 (Asm.offset env pc l))) .nil
-  | .jalr rd rs1 imm => .cons (Enc.i Op.jalr 0 rd rs1 (Asm.tc 12 imm)) .nil
-  | .br f3 rs1 rs2 l => .cons (Enc.b f3 rs1 rs2 (Asm.tc 13 (Asm.offset env pc l))) .nil
-  | .load f3 rd rs1 imm => .cons (Enc.i Op.load f3 rd rs1 (Asm.tc 12 imm)) .nil
-  | .store f3 rs2 rs1 imm => .cons (Enc.s Op.store f3 rs1 rs2 (Asm.tc 12 imm)) .nil
-  | .opi f3 f7 rd rs1 imm => .cons (Enc.i Op.opimm f3 rd rs1 (f7 * 32 + Asm.tc 12 imm)) .nil
-  | .op f3 f7 rd rs1 rs2 => .cons (Enc.r Op.op f3 f7 rd rs1 rs2) .nil
-  | .li rd v => .cons (Enc.u Op.lui rd (Asm.liHi v)) (.cons (Enc.i Op.opimm 0 rd rd (Asm.liLo v)) .nil)
-  | .la rd l => .cons (Enc.u Op.auipc rd (Asm.liHi (Asm.offset env pc l))) (.cons (Enc.i Op.opimm 0 rd rd (Asm.liLo (Asm.offset env pc l))) .nil)
+  | .word w => Asm.emit32 w
+  | .half h => Asm.emit16 h
+  | .lui rd imm => Asm.emit32 (Enc.u Op.lui rd imm)
+  | .auipc rd imm => Asm.emit32 (Enc.u Op.auipc rd imm)
+  | .jal rd l => Asm.emit32 (Enc.j rd (Asm.tc 21 (Asm.offset env pc l)))
+  | .jalr rd rs1 imm => Asm.emit32 (Enc.i Op.jalr 0 rd rs1 (Asm.tc 12 imm))
+  | .br f3 rs1 rs2 l => Asm.emit32 (Enc.b f3 rs1 rs2 (Asm.tc 13 (Asm.offset env pc l)))
+  | .load f3 rd rs1 imm => Asm.emit32 (Enc.i Op.load f3 rd rs1 (Asm.tc 12 imm))
+  | .store f3 rs2 rs1 imm => Asm.emit32 (Enc.s Op.store f3 rs1 rs2 (Asm.tc 12 imm))
+  | .opi f3 f7 rd rs1 imm => Asm.emit32 (Enc.i Op.opimm f3 rd rs1 (f7 * 32 + Asm.tc 12 imm))
+  | .op f3 f7 rd rs1 rs2 => Asm.emit32 (Enc.r Op.op f3 f7 rd rs1 rs2)
+  | .amo f5 rd rs1 rs2 => Asm.emit32 (Enc.r Op.amo 2 (f5 * 4) rd rs1 rs2)
+  | .li rd v => List.append (Asm.emit32 (Enc.u Op.lui rd (Asm.liHi v)))
+      (Asm.emit32 (Enc.i Op.opimm 0 rd rd (Asm.liLo v)))
+  | .la rd l => List.append (Asm.emit32 (Enc.u Op.auipc rd (Asm.liHi (Asm.offset env pc l))))
+      (Asm.emit32 (Enc.i Op.opimm 0 rd rd (Asm.liLo (Asm.offset env pc l))))
+  | .caddi4spn rd imm => Asm.emit16 (CEnc.addi4spn rd imm)
+  | .clw rd rs1 imm => Asm.emit16 (CEnc.lw rd rs1 imm)
+  | .csw rs2 rs1 imm => Asm.emit16 (CEnc.sw rs2 rs1 imm)
+  | .caddi rd imm => Asm.emit16 (CEnc.addi rd imm)
+  | .cli rd imm => Asm.emit16 (CEnc.li rd imm)
+  | .clui rd imm => Asm.emit16 (CEnc.lui rd imm)
+  | .caddisp imm => Asm.emit16 (CEnc.addisp imm)
+  | .cslli rd sh => Asm.emit16 (CEnc.slli rd sh)
+  | .csrli rd sh => Asm.emit16 (CEnc.srli rd sh)
+  | .csrai rd sh => Asm.emit16 (CEnc.srai rd sh)
+  | .candi rd imm => Asm.emit16 (CEnc.andi rd imm)
+  | .csub rd rs => Asm.emit16 (CEnc.sub 0 rd rs)
+  | .cxor rd rs => Asm.emit16 (CEnc.sub 1 rd rs)
+  | .cor rd rs => Asm.emit16 (CEnc.sub 2 rd rs)
+  | .cand rd rs => Asm.emit16 (CEnc.sub 3 rd rs)
+  | .cj l => Asm.emit16 (CEnc.j (Asm.offset env pc l))
+  | .cjal l => Asm.emit16 (CEnc.jal (Asm.offset env pc l))
+  | .cjr rs1 => Asm.emit16 (CEnc.jr rs1)
+  | .cjalr rs1 => Asm.emit16 (CEnc.jalr rs1)
+  | .cmv rd rs => Asm.emit16 (CEnc.mv rd rs)
+  | .cadd rd rs => Asm.emit16 (CEnc.add rd rs)
+  | .cbeqz rs1 l => Asm.emit16 (CEnc.beqz rs1 (Asm.offset env pc l))
+  | .cbnez rs1 l => Asm.emit16 (CEnc.bnez rs1 (Asm.offset env pc l))
+  | .clwsp rd imm => Asm.emit16 (CEnc.lwsp rd imm)
+  | .cswsp rs2 imm => Asm.emit16 (CEnc.swsp rs2 imm)
+  | .cnop => Asm.emit16 1
+  | .cebreak => Asm.emit16 CEnc.ebreak
 
 def Asm.encodeAll (env : List (String × Nat)) : Nat → List Asm → List Nat
   | pc, .nil => .nil
@@ -117,15 +275,32 @@ def Asm.regsOk (c : Cfg) : List Nat → List String
 
 def Asm.immOk (n : Nat) (i : Int) : List String :=
   if Asm.fits n i then .nil else .cons ("immediate out of range for " ++ Asm.showNat n ++ " bits") .nil
+-- an unsigned field of `n` bits (a C offset that is not sign-extended)
+def Asm.unsignedOk (n : Nat) (i : Int) : List String := match i with
+  | .ofNat k => if Nat.lt k (Rv.pow2 n) then .nil
+    else .cons ("unsigned immediate out of range for " ++ Asm.showNat n ++ " bits") .nil
+  | .negSucc k => .cons ("unsigned immediate is negative") .nil
 
 def Asm.target (env : List (String × Nat)) (n : Nat) (pc : Nat) (l : String) : List String :=
   match Asm.lookup l env with
   | .some a => Asm.immOk n (Int.subNatNat a pc)
   | .none => .cons ("unknown label " ++ l) .nil
 
+-- the three-bit register fields of a C instruction name x8 … x15
+def Asm.compReg (c : Cfg) (r : Nat) : List String :=
+  if Bool.and (Nat.le 8 r) (Bool.and (Nat.lt r 16) (Rv.okReg c r)) then .nil
+  else .cons ("C instruction register out of x8 … x15: x" ++ Asm.showNat r) .nil
+def Asm.multiple (k : Nat) (i : Int) : Bool := Nat.beq (Nat.mod (Asm.tc 32 i) k) 0
+def Asm.alignOk (k : Nat) (i : Int) : List String :=
+  if Asm.multiple k i then .nil
+  else .cons ("immediate must be a multiple of " ++ Asm.showNat k) .nil
+def Asm.positiveOk (i : Int) : List String :=
+  if Nat.beq (Asm.tc 32 i) 0 then .cons "immediate must not be zero" .nil else .nil
+
 def Asm.problem (c : Cfg) (env : List (String × Nat)) (pc : Nat) (i : Asm) : List String := match i with
   | .label l => if Nat.beq (Asm.countLabel l env) 1 then .nil else .cons ("label defined twice: " ++ l) .nil
   | .word w => .nil
+  | .half h => .nil
   | .lui rd imm => Asm.regsOk c (.cons rd .nil)
   | .auipc rd imm => Asm.regsOk c (.cons rd .nil)
   | .jal rd l => List.append (Asm.regsOk c (.cons rd .nil)) (Asm.target env 21 pc l)
@@ -135,8 +310,59 @@ def Asm.problem (c : Cfg) (env : List (String × Nat)) (pc : Nat) (i : Asm) : Li
   | .store f3 rs2 rs1 imm => List.append (Asm.regsOk c (.cons rs2 (.cons rs1 .nil))) (Asm.immOk 12 imm)
   | .opi f3 f7 rd rs1 imm => List.append (Asm.regsOk c (.cons rd (.cons rs1 .nil))) (Asm.immOk 12 imm)
   | .op f3 f7 rd rs1 rs2 => Asm.regsOk c (.cons rd (.cons rs1 (.cons rs2 .nil)))
+  | .amo f5 rd rs1 rs2 => Asm.regsOk c (.cons rd (.cons rs1 (.cons rs2 .nil)))
   | .li rd v => Asm.regsOk c (.cons rd .nil)
   | .la rd l => List.append (Asm.regsOk c (.cons rd .nil)) (Asm.target env 32 pc l)
+  | .caddi4spn rd imm =>
+      List.append (Asm.compReg c rd) (List.append (Asm.alignOk 4 (Int.ofNat imm))
+        (List.append (Asm.positiveOk (Int.ofNat imm)) (Asm.unsignedOk 10 (Int.ofNat imm))))
+  | .clw rd rs1 imm =>
+      List.append (Asm.compReg c rd) (List.append (Asm.compReg c rs1)
+        (List.append (Asm.alignOk 4 (Int.ofNat imm)) (Asm.unsignedOk 7 (Int.ofNat imm))))
+  | .csw rs2 rs1 imm =>
+      List.append (Asm.compReg c rs2) (List.append (Asm.compReg c rs1)
+        (List.append (Asm.alignOk 4 (Int.ofNat imm)) (Asm.unsignedOk 7 (Int.ofNat imm))))
+  | .caddi rd imm => List.append (Asm.regsOk c (.cons rd .nil)) (Asm.immOk 6 imm)
+  | .cli rd imm => List.append (Asm.regsOk c (.cons rd .nil)) (Asm.immOk 6 imm)
+  | .clui rd imm =>
+      List.append (if Bool.or (Nat.beq rd 0) (Nat.beq rd 2) then .cons "C.LUI needs rd not x0/x2" .nil else .nil)
+        (List.append (Asm.regsOk c (.cons rd .nil))
+          (List.append (Asm.alignOk 4096 imm) (Asm.immOk 18 imm)))
+  | .caddisp imm =>
+      List.append (Asm.alignOk 16 imm) (List.append (Asm.positiveOk imm) (Asm.immOk 10 imm))
+  | .cslli rd sh => List.append (Asm.compReg c rd) (Asm.immOk 5 (Int.ofNat sh))
+  | .csrli rd sh => List.append (Asm.compReg c rd) (Asm.immOk 5 (Int.ofNat sh))
+  | .csrai rd sh => List.append (Asm.compReg c rd) (Asm.immOk 5 (Int.ofNat sh))
+  | .candi rd imm => List.append (Asm.compReg c rd) (Asm.immOk 6 imm)
+  | .csub rd rs => List.append (Asm.compReg c rd) (Asm.compReg c rs)
+  | .cxor rd rs => List.append (Asm.compReg c rd) (Asm.compReg c rs)
+  | .cor rd rs => List.append (Asm.compReg c rd) (Asm.compReg c rs)
+  | .cand rd rs => List.append (Asm.compReg c rd) (Asm.compReg c rs)
+  | .cj l => Asm.target env 12 pc l
+  | .cjal l => Asm.target env 12 pc l
+  | .cjr rs1 =>
+      List.append (Asm.regsOk c (.cons rs1 .nil))
+        (if Nat.beq rs1 0 then .cons "C.JR needs rs1 not x0" .nil else .nil)
+  | .cjalr rs1 =>
+      List.append (Asm.regsOk c (.cons rs1 .nil))
+        (if Nat.beq rs1 0 then .cons "C.JALR needs rs1 not x0" .nil else .nil)
+  | .cmv rd rs =>
+      List.append (Asm.regsOk c (.cons rd (.cons rs .nil)))
+        (if Bool.or (Nat.beq rd 0) (Nat.beq rs 0) then .cons "C.MV needs rd, rs2 not x0" .nil else .nil)
+  | .cadd rd rs =>
+      List.append (Asm.regsOk c (.cons rd (.cons rs .nil)))
+        (if Bool.or (Nat.beq rd 0) (Nat.beq rs 0) then .cons "C.ADD needs rd, rs2 not x0" .nil else .nil)
+  | .cbeqz rs1 l => List.append (Asm.compReg c rs1) (Asm.target env 9 pc l)
+  | .cbnez rs1 l => List.append (Asm.compReg c rs1) (Asm.target env 9 pc l)
+  | .clwsp rd imm =>
+      List.append (Asm.regsOk c (.cons rd .nil))
+        (List.append (if Nat.beq rd 0 then .cons "C.LWSP needs rd not x0" .nil else .nil)
+          (List.append (Asm.alignOk 4 (Int.ofNat imm)) (Asm.unsignedOk 8 (Int.ofNat imm))))
+  | .cswsp rs2 imm =>
+      List.append (Asm.regsOk c (.cons rs2 .nil))
+        (List.append (Asm.alignOk 4 (Int.ofNat imm)) (Asm.unsignedOk 8 (Int.ofNat imm)))
+  | .cnop => .nil
+  | .cebreak => .nil
 
 def Asm.problemsAll (c : Cfg) (env : List (String × Nat)) : Nat → List Asm → List String
   | pc, .nil => .nil
@@ -196,15 +422,69 @@ def A.div (rd a b : Nat) : Asm := Asm.op 4 1 rd a b
 def A.divu (rd a b : Nat) : Asm := Asm.op 5 1 rd a b
 def A.rem (rd a b : Nat) : Asm := Asm.op 6 1 rd a b
 def A.remu (rd a b : Nat) : Asm := Asm.op 7 1 rd a b
+-- RV32A (funct5: 2 LR.W, 3 SC.W, 0 AMOADD, 1 AMOSWAP, 4 AMOXOR, 8 AMOOR,
+-- 12 AMOAND, 16 AMOMIN, 20 AMOMAX, 24 AMOMINU, 28 AMOMAXU)
+def A.lrw (rd rs1 : Nat) : Asm := Asm.amo 2 rd rs1 0
+def A.scw (rd rs2 rs1 : Nat) : Asm := Asm.amo 3 rd rs1 rs2
+def A.amoaddw (rd rs2 rs1 : Nat) : Asm := Asm.amo 0 rd rs1 rs2
+def A.amoswapw (rd rs2 rs1 : Nat) : Asm := Asm.amo 1 rd rs1 rs2
+def A.amoxorw (rd rs2 rs1 : Nat) : Asm := Asm.amo 4 rd rs1 rs2
+def A.amoorw (rd rs2 rs1 : Nat) : Asm := Asm.amo 8 rd rs1 rs2
+def A.amoandw (rd rs2 rs1 : Nat) : Asm := Asm.amo 12 rd rs1 rs2
+def A.amominw (rd rs2 rs1 : Nat) : Asm := Asm.amo 16 rd rs1 rs2
+def A.amomaxw (rd rs2 rs1 : Nat) : Asm := Asm.amo 20 rd rs1 rs2
+def A.amominuw (rd rs2 rs1 : Nat) : Asm := Asm.amo 24 rd rs1 rs2
+def A.amomaxuw (rd rs2 rs1 : Nat) : Asm := Asm.amo 28 rd rs1 rs2
 def A.mv (rd rs : Nat) : Asm := Asm.opi 0 0 rd rs 0
 def A.nop : Asm := Asm.opi 0 0 0 0 0
 def A.li (rd : Nat) (v : Int) : Asm := Asm.li rd v
 def A.ecall : Asm := Asm.word 115
 def A.ebreak : Asm := Asm.word 1048691
+-- Zicsr: CSRRW/CSRRS/CSRRC and their immediate forms (`rs1` is the 5-bit zimm)
+def A.csr (f3 rd csr rs1 : Nat) : Asm := Asm.word (115 + rd * 128 + f3 * 4096 + rs1 * 32768 + csr * 1048576)
+def A.csrrw (rd csr rs1 : Nat) : Asm := A.csr 1 rd csr rs1
+def A.csrrs (rd csr rs1 : Nat) : Asm := A.csr 2 rd csr rs1
+def A.csrrc (rd csr rs1 : Nat) : Asm := A.csr 3 rd csr rs1
+def A.csrrwi (rd csr z : Nat) : Asm := A.csr 5 rd csr z
+def A.csrrsi (rd csr z : Nat) : Asm := A.csr 6 rd csr z
+def A.csrrci (rd csr z : Nat) : Asm := A.csr 7 rd csr z
+def A.mret : Asm := Asm.word 807403635
+def A.wfi : Asm := Asm.word 273678451
 def A.fence : Asm := Asm.word 267386895   -- fence iorw, iorw
+def A.fenceI : Asm := Asm.word 4111       -- fence.i
 def A.label (l : String) : Asm := Asm.label l
 def A.la (rd : Nat) (l : String) : Asm := Asm.la rd l
 def A.call (l : String) : Asm := Asm.jal 1 l
+
+-- the C extension
+def A.chalf (h : Nat) : Asm := Asm.half h
+def A.caddi4spn (rd : Nat) (imm : Nat) : Asm := Asm.caddi4spn rd imm
+def A.clw (rd : Nat) (imm : Nat) (rs1 : Nat) : Asm := Asm.clw rd rs1 imm
+def A.csw (rs2 : Nat) (imm : Nat) (rs1 : Nat) : Asm := Asm.csw rs2 rs1 imm
+def A.caddi (rd : Nat) (imm : Int) : Asm := Asm.caddi rd imm
+def A.cli (rd : Nat) (imm : Int) : Asm := Asm.cli rd imm
+def A.clui (rd : Nat) (imm : Int) : Asm := Asm.clui rd imm
+def A.caddisp (imm : Int) : Asm := Asm.caddisp imm
+def A.cslli (rd sh : Nat) : Asm := Asm.cslli rd sh
+def A.csrli (rd sh : Nat) : Asm := Asm.csrli rd sh
+def A.csrai (rd sh : Nat) : Asm := Asm.csrai rd sh
+def A.candi (rd : Nat) (imm : Int) : Asm := Asm.candi rd imm
+def A.csub (rd rs : Nat) : Asm := Asm.csub rd rs
+def A.cxor (rd rs : Nat) : Asm := Asm.cxor rd rs
+def A.cor (rd rs : Nat) : Asm := Asm.cor rd rs
+def A.cand (rd rs : Nat) : Asm := Asm.cand rd rs
+def A.cj (l : String) : Asm := Asm.cj l
+def A.cjal (l : String) : Asm := Asm.cjal l
+def A.cjr (rs1 : Nat) : Asm := Asm.cjr rs1
+def A.cjalr (rs1 : Nat) : Asm := Asm.cjalr rs1
+def A.cmv (rd rs : Nat) : Asm := Asm.cmv rd rs
+def A.cadd (rd rs : Nat) : Asm := Asm.cadd rd rs
+def A.cbeqz (rs1 : Nat) (l : String) : Asm := Asm.cbeqz rs1 l
+def A.cbnez (rs1 : Nat) (l : String) : Asm := Asm.cbnez rs1 l
+def A.clwsp (rd : Nat) (imm : Nat) : Asm := Asm.clwsp rd imm
+def A.cswsp (rs2 : Nat) (imm : Nat) : Asm := Asm.cswsp rs2 imm
+def A.cnop : Asm := Asm.cnop
+def A.cebreak : Asm := Asm.cebreak
 
 -- data: a string's bytes (newlines as CR LF), then a zero, in words (little-endian)
 def Asm.pack : List Nat → Nat → Nat → List Asm

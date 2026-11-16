@@ -6,13 +6,22 @@ import Hdl.Core
 --
 --   0x00000000  16 KB on-chip RAM: the boot ROM (the core's m0 … m3, wb = 12)
 --   0x40000000  256 MB DDR3 (through wiz-ddr3's cache and controller)
---   0x80000000  MMIO: UART, cycle counter, DDR status, performance counters
+--   0x80000000  MMIO: UART, hart id, cycle counter, DDR status, mip, performance counters
+--   0x80001000  the inter-hart mailbox and the boot ABI (src/Rv/Golem/Intc.wiz)
+--   0x80002000  the PLIC-style external interrupt controller
+--   0x80004000  the CLINT-like timer (`msip`, `mtimecmp`, `mtime`)
 --   0x81000000  the 96 × 64 RGB 565 framebuffer (12 KB, halfword stores)
 
 def GMap.ramBase : Nat := 0
 def GMap.ramBytes : Nat := 16384
 def GMap.ddrBase : Nat := 1073741824        -- 0x40000000
 def GMap.ddrBytes : Nat := 268435456        -- 256 MB
+-- the top 16 MB of DDR is the uncached shared aperture (`Core.uncBase`): every access
+-- is one bus request to the shared cache, never a private L1 line. The multicore
+-- mailbox data and the flags live here, so a flag write is visible to the other harts
+-- in program order at the single serialisation point.
+def GMap.uncBase : Nat := 1325400064        -- 0x4F000000
+def GMap.uncBytes : Nat := 16777216         -- 16 MB
 def GMap.mmioBase : Nat := 2147483648       -- 0x80000000
 def GMap.mmioBytes : Nat := 16777216        -- 16 MB: 0x80000000 … 0x80ffffff
 def GMap.fbBase : Nat := 2164260864         -- 0x81000000
@@ -22,6 +31,7 @@ def GMap.fbBytes : Nat := 12288             -- 96 * 64 * 2
 def GMap.uart : Nat := 0            -- read: the next byte or -1; write: send
 def GMap.uartStatus : Nat := 4      -- read: bit 0 the transmitter is idle,
                                     --       bit 1 a received byte is waiting
+def GMap.hartId : Nat := 8          -- read: this hart's `mhartid` (0 … 3)
 def GMap.timerLo : Nat := 16        -- the cycle counter, low word
 def GMap.timerHi : Nat := 20        -- and high word
 def GMap.sound : Nat := 48
@@ -29,6 +39,20 @@ def GMap.soundFree : Nat := 52
 def GMap.ddrStatus : Nat := 64      -- bit 0 calibration done, bit 1 it failed
 def GMap.perf : Nat := 80           -- the performance counters, 0x50 … 0x7c
 def GMap.cycles : Nat := 0x50       -- alias of GMap.perf's first counter (instructions)
+-- read-only: this hart's `mip` (MSIP/MTIP/MEIP), the same value as the `mip` CSR: how
+-- software written before the CSRs polls the interrupt inputs.
+def GMap.mip : Nat := 0x90
+
+-- the interrupt/timer blocks (offsets from GMap.mmioBase; the registers themselves are
+-- in src/Rv/Golem/Intc.wiz, and sw/golem.h mirrors them)
+def GMap.mbox : Nat := 4096         -- 0x1000: the inter-hart mailbox and boot entry
+def GMap.plic : Nat := 8192         -- 0x2000: the external interrupt controller
+def GMap.clint : Nat := 16384       -- 0x4000: msip, mtimecmp, mtime
+
+-- the 16-bit register offset the machine decodes in the I/O window (the blocks above
+-- are 256 bytes or more apart; the framebuffer at 0x81000000 is bit 24)
+def GMap.mmioOff {r : HwTy → Type} [Hw r] (a : r (HwTy.bits 32)) : r (HwTy.bits 16) :=
+  Hw.slice 0 16 a
 
 -- the framebuffer's shape
 def GMap.width : Nat := 96

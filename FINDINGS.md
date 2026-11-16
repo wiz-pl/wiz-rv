@@ -6,9 +6,11 @@ project does instead. Severity: **bug** (wrong behaviour), **gap** (something a
 hardware project needs and had to build or work around), **slow** (with timings;
 rough: one run each on a shared machine), **papercut** (works, but costs time).
 
-Toolchain: wiz master 50cd3e7 (2026-11-12) + PR #166 (agent/cohesion-hw-mem, memories)
-+ PR #199 (agent/hdl-sim-perf, the fast simulator), merged locally (one trivial conflict
-in Tests/ElabFix.lean); see README.md, "Toolchain".
+Toolchain: the states below were recorded with wiz master 50cd3e7 (2026-11-12) + PR #166
+(agent/cohesion-hw-mem, memories) + PR #199 (agent/hdl-sim-perf, the fast simulator),
+merged locally (one trivial conflict in Tests/ElabFix.lean). Both PRs are in master now,
+and `wiz-toolchain` pins `master@071a033a…`, the first snapshot release with both; see
+README.md, "Toolchain".
 
 ## Language and elaborator
 
@@ -309,6 +311,31 @@ placed at 88.95 MHz with nextpnr's default seed and 108.17 MHz with `--seed 2`
 (`SEED=2 sh .scratch/bitn.sh`). So until rv-pipeline's timing work lands, a build has to
 be checked and maybe placed again; a failing "Max frequency" is not to be loaded.
 
+### H13. The CSR file made `src/Rv/Proofs.wiz` blow up past 8 GB (slow, fixed)
+
+With the CSRs (agent/golem-csr) `wiz check src/Rv/Proofs.wiz` went over heavy's 6 GB and
+then 8 GB caps (8.40 GB at 642 s user time), so `grail build` failed on it. On the commit before the CSRs the misaligned-load claim
+alone already ran for more than 200 s, under 400 MB. Bisected
+under `light`: the glue and eleven claims were small; the three `Pf.x1is2` claims
+(misaligned load, store, jump) reached 2 GB in 5 s, and `#reduce` put it on one field
+after the decode cycle: `trap`, `tval`, `mepc`, `mcause` and `mstatus`, not `mscratch`.
+Two causes, both fixed with no claim changed:
+
+* The trap controls were `Hw.and inE …` (`trapE`, `intr`, and from them `stopTrap`,
+  `enterTrap`, `goE`). `Hw.and` is `UIntN.land`, strict in both inputs (H2), so in the
+  decode cycle, with `inE` 0, the kernel still normalised the trap code. For a load or
+  store that code depends on `mis`, the low bits of `sum` over the leftover latches,
+  which are symbolic. Before the CSRs only `trap` and `tval` read it; trap entry
+  (`mepc`, `mcause`, `mstatus`, the vector) multiplied the paths. They are `gate`s now,
+  the same AND for synthesis.
+* The glue (`Pf.ok`, `Pf.trapOk`, and in src/Rv/TrapProofs `Pf.entryOk`, `Pf.irqOk` and
+  the CSRRW claim) went through `Eq.trans (Eq.congrArg G h) hE` with the implicit
+  arguments inferred. It now goes through `Pf.glueO`/`Pf.glueG` (η plus congruence) and
+  a one-cycle `Pf.readQ`, with every implicit argument given: rv-c's fix, its H12.
+
+After: Proofs.wiz checks in 24 s and 511 MB. Under `light` each file in
+src/Rv/TrapProofs takes 6 to 35 s and at most 870 MB.
+
 ## Compiler and run time
 
 ### S1. A program that imports the core takes 12 to 15 minutes to compile (slow)
@@ -377,12 +404,102 @@ with a job that timed out: `grail test long --update` printed `✓ tests/long.wi
 (updated)` and recorded "error: timed out after 1800.000 s (its process group was
 killed), and printed nothing" as the expected output.
 
+### R2. wiz-rv master's `wiz-toolchain` pin could not be installed (bug, fixed by the merge of #3)
+
+Before 48c603b, master's `wiz-toolchain` read `agent/cohesion-hw-mem+agent/hdl-sim-perf@master-50cd3e7
+(local merge, see README)`: a description of a local merge, not a toolchain tower can
+install. `tower` tried to download a release snapshot for it, the URL was rejected,
+and `grail build` exited 1 before doing anything (seen on a4149a5). agent/golem-csr
+carried the pin `master@071a033a…` (the first snapshot with both branches the
+description named), and master has had it since #3 was merged. The pipe-proofs PR moves
+it to `master@677b6496…`.
+
 ## Assembler, in passing
 
 `Int.subNatNat m n` is `m - n`. (This project's own bug: branch offsets came out
 negated; the specification ran the wrong program happily. A lockstep against a second
 implementation would not have caught it either, since both run the same image: what
 caught it was a program whose output was known.)
+
+### H12. The C extension: one expansion, two fetch cases, and what it does to `rfl` (gap)
+
+The decoder is one function. `Rv.expand` (`src/Rv/Isa.wiz`) maps a 16-bit encoding to its
+32-bit equivalent; `Cx.expand` (`src/Rv/Core.wiz`) is the same table in gates, and
+`tests/spec.wiz` walks all 65536 encodings to check the two agree. `decode` is the only
+decode path: it expands a 16-bit word and both cores consume the expanded form. A
+program image is a list of 16-bit halfwords, so compressed and uncompressed instructions
+share one layout (`Asm.assemble`, `Rv.image`, `Core.lane`).
+
+The second fetch case is a 32-bit instruction at `pc[1] = 1` (legal with C): its first
+half is the upper half of the word at `pc` and its second is the lower half of the word
+at `pc + 2`. The multi-cycle core has a `J` phase for it; the pipeline holds D one cycle
+while F reads `pc + 2` (`Pp.dWord` assembles the two halves, `fe.al` is bit 1 of the
+instruction PC). `Rv.jump` now checks 2-byte alignment, so `Trap.jump` is unreachable
+through JAL/JALR/branch encodings (JALR clears bit 0; JAL/branch offsets are even); the
+old `trap_jump` fixture is now `jump2`, a C.J to the C.ADDI at 2.
+
+The two-cycle `rfl` proofs are about an aligned 32-bit instruction (the state's `al` is
+0). With the expansion in `decode`, `src/Rv/Proofs.wiz` stopped checking (over 5 GB),
+and for a while it was taken out of `grail build`. Two causes, both fixed, and the file
+is back in the library:
+
+* `need2` (the multi-cycle core's "second fetch" test) was `Hw.and s.al …`. With `al`
+  0 and a symbolic word this is `UIntN.land 0 x`, stuck (H2), so the decode cycle's
+  next phase and read address did not reduce. It is a `gate` now.
+* The glue (`Pf.ok`, for a symbolic instruction word) was one conversion: two cycles
+  of the core against two cycles with the read data replaced. Equality at a record
+  type is a record of equations (OTT), so inferring `Eq.trans`'s middle term, or
+  comparing the two sides, put both cycles with an unknown instruction in normal form,
+  and with the expansion that no longer fits. It goes through `Pf.glueG` now (for any
+  state and read data: η plus congruence, nothing evaluated) and `Pf.readQ` (one decode
+  cycle, only its read data compared), with every implicit argument of `Eq.trans` and
+  `Eq.congrArg` given. The whole file checks in seconds.
+
+One claim changed: `Pf.jump_trap` said that JALR to x1 = 2 traps with cause 4
+(misaligned jump), tval 2 and epc at the JALR. Without C a target must be a multiple of
+4, so 2 trapped. With C (`IALIGN` = 16) a target need only be a multiple of 2: 2 is the
+address of a halfword instruction, `Rv.jump` and the core's `misJ` test bit 0 only, and
+the JALR jumps there with no trap. No encoding can make cause 4 now (JALR clears bit 0;
+JAL and branch offsets are even), so there is no misaligned-jump claim left to prove.
+It is now `Pf.jump_half`: the same JALR leaves the core at the specification's PC, 2,
+with x0 still 0. The other thirteen claims are as they were.
+
+After the CSR/interrupt work (H13) the specification's step takes interrupts, and the
+interrupt-entry claims (src/Rv/TrapProofs) name the step at a given fetched word
+(`Pf.stepF`). With C the step reads the halfword first, so `Rv.step` is now
+`Rv.stepW c s (Rv.fetch c s)`: the four bytes at the PC, whose low halfword decides
+the length. That is the same step (the halfword is the low half of the fetch), and the
+claims about the fetched word go through unchanged.
+
+Reading four bytes for a 16-bit instruction is safe because instruction fetch cannot
+fault, in the specification or in either core. In the specification `Rv.fetch` is
+`Rv.load 4` over `Rv.byte`, which reads `s.mem` (a total function) at `Rv.maddr`:
+an on-chip address wraps modulo `2^mbits` and a DDR address is itself, so the bytes at
+PC + 2 and PC + 3 always exist, and reading them changes nothing in the state. No trap
+depends on the address: the causes are ECALL, EBREAK, illegal, a misaligned jump, a
+misaligned load or store, and interrupts. There is no instruction access fault, no
+fetch-side region or aperture check, no MMU and so no page boundary. If instruction access faults, PMP/PMA or an MMU are ever added, stepW must read the
+upper halfword only for 32-bit instructions. `stepW` uses the
+upper halfword only when the low two bits are 11 (a 32-bit instruction). For a 16-bit
+instruction it uses `f mod 65536`, so whatever is at PC + 2 cannot change the result.
+The cores read less. The multi-cycle core reads the aligned word that holds the PC and
+asks for PC + 2 only in J, which it enters only when `need2` is set (a 32-bit
+instruction at `pc[1] = 1`). The pipeline asks for its second fetch only when `h2need`
+is set, on the same condition. Neither core has a bus error input: on-chip RAM is
+indexed by `pc[wb+1:2]`, so it wraps as `Rv.maddr` does, and a DDR fetch fills the L1
+line that holds the PC. `tests/spec.wiz`, `lockstep.wiz` and `plockstep.wiz` test this
+case. In `Prog.cLast` a JALR goes to a C.JR in the last halfword of a 1024-byte memory,
+so the upper half wraps to the program's first word, a 32-bit LUI. In
+`Prog.cLastBreak` a C.EBREAK sits in the same place and the trap has epc 1022.
+
+The pipeline's second-fetch request (`h2need`) was first computed from D's word
+whatever D held. In the cycle after a taken branch D holds the squashed word (`fe.rdr`),
+and when that word's halfword looked like the first half of a 32-bit instruction at
+`pc[1] = 1`, `h2` was set for the branch target's fetch: the target's first halfword
+was then glued to the stale `w1`, and the compressed program retired a wrong
+instruction after C.BNEZ (x12 = 198 where the specification has 20). `h2need` is now
+gated by D being live (`fe.v`, `fz = 0`, not `fe.rdr`), and `tests/plockstep.wiz` runs
+the compressed program and its twin, both agreeing with the specification.
 
 ## Cache work (`agent/rv-cache`)
 

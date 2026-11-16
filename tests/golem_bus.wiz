@@ -20,17 +20,17 @@ def B.step (s : B.S) (k : Nat) : B.S :=
   let t := s.t;
   let cv : BitVec 1 := Bool.toBits (Nat.lt 5 k);
   let addr := BitVec.ofNat 32 1073741824;
-  let r0 := GBus.route t.bus cv cv (BitVec.ofNat 1 0) addr (BitVec.ofNat 32 0) (BitVec.ofNat 4 0) GBus.noResp;
+  let r0 := GBus.route t.bus cv cv (BitVec.ofNat 1 0) addr (BitVec.ofNat 32 0) (BitVec.ofNat 4 0) (BitVec.ofNat 2 0) (BitVec.ofNat 5 0) GBus.noResp;
   let q := CacheReq.unpack (Hw.fst (Hw.snd r0));
   let host : CacheReq HwTy.El := CacheReq.mk (Bool.toBits (Nat.lt k 5)) (BitVec.ofNat 28 0)
-    (Bool.toBits (Nat.lt k 5)) (BitVec.ofNat 32 24589) (BitVec.ofNat 4 15);
+    (Bool.toBits (Nat.lt k 5)) (BitVec.ofNat 32 24589) (BitVec.ofNat 4 15) (BitVec.ofNat 2 0) (BitVec.ofNat 5 0);
   let ar0 := GBus.arb t.arb q host GBus.noResp;
   let sel := CacheReq.unpack (Hw.fst (Hw.snd ar0));
   let dr := GBus.ramStep 16 t.ram sel;
   let resp := CacheResp.unpack (Hw.snd dr);
   let ar := GBus.arb t.arb q host resp;
   let coreResp := CacheResp.unpack (Hw.fst (Hw.snd (Hw.snd ar)));
-  let br := GBus.route t.bus cv cv (BitVec.ofNat 1 0) addr (BitVec.ofNat 32 0) (BitVec.ofNat 4 0) coreResp;
+  let br := GBus.route t.bus cv cv (BitVec.ofNat 1 0) addr (BitVec.ofNat 32 0) (BitVec.ofNat 4 0) (BitVec.ofNat 2 0) (BitVec.ofNat 5 0) coreResp;
   let toCore := GBus.Resp.unpack (Hw.snd (Hw.snd br));
   B.S.mk (B.T.mk (BusA.unpack (Hw.fst br)) (GBus.Arb.unpack (Hw.fst ar)) (GBus.Ram.unpack 16 (Hw.fst dr)))
     (toCore.rdata.toNat, toCore.err.toNat)
