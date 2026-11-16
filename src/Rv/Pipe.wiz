@@ -54,6 +54,8 @@ structure PpFe (r : HwTy → Type) where
   h2 : r W1       -- C: D holds a 32-bit instruction at pc[1] = 1; fetch its second word
   w1 : r B32      -- C: that instruction's first half (zero-extended)
   al : r W1       -- C: bit 1 of the instruction's pc (a register; the proofs take 0)
+  fa : r B32      -- the address of the fetch memories' last read (bits 31:2 count): with
+                  -- `h2`, the word at pc + 2, so D needs no adder for it
   deriving Bundle
 
 structure PpMem (ab wb : Nat) (r : HwTy → Type) where
@@ -142,7 +144,8 @@ structure PpE (r : HwTy → Type) where
   f2R : r W1
   lu : r W1       -- M will hold a load or product that E needs: E waits a cycle
   rsel : r B4     -- which result (decided in D): 0 sum, 1 slt, 2 sltu, 3 xor, 4 or, 5 and,
-                  -- 6 the shifter's, 7 the divider's, 8 imm, 9 pc + imm, 10 pc + 4
+                  -- 6 the shifter's, 7 the divider's, 8 imm, 9 pc + imm, 10 pc + 4 (or 2),
+                  -- 11 a CSR's old value
   kSub : r W1     -- the adder subtracts
   csr : r W1      -- a CSR instruction, and its register and write condition
   csrAddr : r B12
@@ -269,15 +272,15 @@ def Pp.tagOf {r : HwTy → Type} [Hw r] (wb : Nat) (a : r B32) : r (HwTy.bits (L
 def Pp.dWord {r : HwTy → Type} [Hw r] (ab wb : Nat) (s : PpSt ab wb r) : r B32 :=
   let ω ms := s.ms;
   let onwi : r B32 := Hw.cat ms.qi3 (Hw.cat ms.qi2 (Hw.cat ms.qi1 ms.qi0));
-  let pc2 := Hw.add s.fe.pc (Hw.lit 32 2);
+  let pc2 := s.fe.fa;
   let raw := Hw.mux (Pp.isDdr s.fe.pc) (Pp.lineWord ms.icq s.fe.pc) onwi;
-  -- C: the second word is the one the fetch just read at pc + 2
+  -- C: the second word is the one the fetch just read at pc + 2 (`fe.fa`)
   let raw2 := Hw.mux (Pp.isDdr pc2) (Pp.lineWord ms.icq pc2) onwi;
   Hw.mux s.fe.h2
     (Hw.cat (Hw.slice 0 16 raw2 : r B16) (Hw.slice 0 16 s.fe.w1 : r B16))
     (Hw.mux s.fe.al (Hw.cat (Hw.lit 16 0) (Hw.slice 16 16 raw : r B16)) raw)
 def Pp.dHit {r : HwTy → Type} [Hw r] (ab wb : Nat) (s : PpSt ab wb r) : r W1 :=
-  let pc2 := Hw.add s.fe.pc (Hw.lit 32 2);
+  let pc2 := s.fe.fa;
   let hitOf := fun (a : r B32) =>
     Hw.or (Hw.not (Pp.isDdr a)) (Hw.eq s.ms.itq (Pp.tagOf wb a));
   Hw.mux s.fe.h2 (hitOf pc2) (hitOf s.fe.pc)
@@ -544,8 +547,10 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
   let rb := fun (i : Nat) => (bitOf i e.rsel : r W1);
   let lo8 : r B32 := Hw.mux (rb 2) (Hw.mux (rb 1) (Hw.mux (rb 0) dres (Hw.lit 32 0)) (Hw.mux (rb 0) (Hw.and a b) (Hw.or a b)))
     (Hw.mux (rb 1) (Hw.mux (rb 0) (Hw.xor a b) (zext32 ult)) (Hw.mux (rb 0) (zext32 slt) sum));
-  let hi4 : r B32 := Hw.mux (rb 1) (Hw.mux (rb 0) (Hw.lit 32 0) pcInc) (Hw.mux (rb 0) pcImm e.imm);
-  let eRes : r B32 := Hw.mux e.csr csrOld (Hw.mux (rb 3) hi4 lo8);
+  -- (11: a CSR instruction's old value, in the tree rather than after it, off the adder's
+  -- path into m.res)
+  let hi4 : r B32 := Hw.mux (rb 1) (Hw.mux (rb 0) csrOld pcInc) (Hw.mux (rb 0) pcImm e.imm);
+  let eRes : r B32 := Hw.mux (rb 3) hi4 lo8;
   let io := bitOf 31 sum;
   ----------------------------------------------------------------- D
   let fz := fe.fz;
@@ -592,8 +597,8 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
   let kDivD : r W1 := if mx then gate d.md (bitOf 2 df3) else Hw.lit 1 0;
   let aluSel : r B4 := Hw.mux (isK df3 0) (Hw.lit 4 0) (Hw.mux (isK df3 2) (Hw.lit 4 1) (Hw.mux (isK df3 3) (Hw.lit 4 2)
     (Hw.mux (isK df3 4) (Hw.lit 4 3) (Hw.mux (isK df3 6) (Hw.lit 4 4) (Hw.mux (isK df3 7) (Hw.lit 4 5) (Hw.lit 4 6))))));
-  let rselD : r B4 := Hw.mux d.lui (Hw.lit 4 8) (Hw.mux d.auipc (Hw.lit 4 9) (Hw.mux (Hw.or d.jal d.jalr) (Hw.lit 4 10)
-    (Hw.mux kDivD (Hw.lit 4 7) aluSel)));
+  let rselD : r B4 := Hw.mux d.csr (Hw.lit 4 11) (Hw.mux d.lui (Hw.lit 4 8) (Hw.mux d.auipc (Hw.lit 4 9) (Hw.mux (Hw.or d.jal d.jalr) (Hw.lit 4 10)
+    (Hw.mux kDivD (Hw.lit 4 7) aluSel))));
   let kSubD := Hw.or d.branch (Hw.or (gate ar (Hw.or (isK df3 2) (isK df3 3))) (gate d.op (gate d.alt (isK df3 0))));
   let u2 := Hw.or (Hw.or d.branch d.store) (Hw.or d.op d.md);
   -- the next fetch address
@@ -727,7 +732,8 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
     redirect targetR
     (Hw.mux kill (Hw.lit 1 0) (Hw.mux h2need (Hw.lit 1 1) (Hw.mux (gate fe.h2 (gate (Hw.not fe.rdr) dHold)) (Hw.lit 1 1) (Hw.lit 1 0))))
     (Hw.mux h2need wD fe.w1)
-    (Hw.mux kill (Hw.lit 1 0) (Hw.mux pcEn (bitOf 1 nf) fe.al));
+    (Hw.mux kill (Hw.lit 1 0) (Hw.mux pcEn (bitOf 1 nf) fe.al))
+    (Hw.mux rdEn nfA fe.fa);
   Hw.pair
     (PpSt.pack ab wb (PpSt.mk feN msN wrN eN mN rN dvN buN (Hw.mux stopTrapR rr.trap s.trap)
       tvalE2 mepcN
@@ -747,7 +753,7 @@ def Pp.reset {r : HwTy → Type} [Hw r] (ab wb : Nat) (rst : r W1) (c : PpSt ab 
   let z := fun (x : r W1) => (Hw.mux rst (Hw.lit 1 0) x : r W1);
   PpSt.mk
     (PpFe.mk fe.pc (z fe.v) (Hw.mux rst (Hw.lit 2 3) fe.fz) (Hw.mux rst (Hw.lit 32 0) fe.rpc) (z fe.rdr) fe.rtgt
-      (z fe.h2) fe.w1 (z fe.al))
+      (z fe.h2) fe.w1 (z fe.al) fe.fa)
     c.ms c.wr
     (PpE.mk (z e.v) (z e.imiss) e.pc e.ins e.raw (z e.c) (z e.h2) e.imm e.a e.b e.lui e.auipc e.jal e.jalr e.branch e.load e.store e.arith e.op e.md
       e.legal e.ecall e.ebreak e.u1 e.u2 e.f1M e.f1R e.f2M e.f2R e.lu
@@ -774,7 +780,7 @@ def Pp.z (n : Nat) : BitVec n := BitVec.ofNat n 0
 
 def PpSt.init (ab wb : Nat) (prog : List Nat) : PpSt ab wb HwTy.El :=
   PpSt.mk
-    (PpFe.mk (Pp.z 32) (Pp.z 1) (BitVec.ofNat 2 3) (Pp.z 32) (Pp.z 1) (Pp.z 32) (Pp.z 1) (Pp.z 32) (Pp.z 1))
+    (PpFe.mk (Pp.z 32) (Pp.z 1) (BitVec.ofNat 2 3) (Pp.z 32) (Pp.z 1) (Pp.z 32) (Pp.z 1) (Pp.z 32) (Pp.z 1) (Pp.z 32))
     (PpMem.mk (Core.lane prog wb 0) (Core.lane prog wb 1) (Core.lane prog wb 2) (Core.lane prog wb 3)
       (Core.lane prog wb 0) (Core.lane prog wb 1) (Core.lane prog wb 2) (Core.lane prog wb 3)
       (Pp.z 8) (Pp.z 8) (Pp.z 8) (Pp.z 8) (Pp.z 8) (Pp.z 8) (Pp.z 8) (Pp.z 8)

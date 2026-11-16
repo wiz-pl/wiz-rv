@@ -30,7 +30,7 @@ def Qp.zm (aw dw : Nat) : BitVec aw → BitVec dw := fun (i : BitVec aw) => BitV
 -- stages behind it empty
 def Qp.at (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (ea eb mres rval : BitVec 32) : PpSt 4 9 HwTy.El :=
   PpSt.mk
-    (PpFe.mk a.pc (BitVec.ofNat 1 1) (Qp.b 2) (Qp.b 32) (Qp.b 1) (Qp.b 32) (Qp.b 1) (Qp.b 32) (Qp.b 1))
+    (PpFe.mk a.pc (BitVec.ofNat 1 1) (Qp.b 2) (Qp.b 32) (Qp.b 1) (Qp.b 32) (Qp.b 1) (Qp.b 32) (Qp.b 1) (Qp.b 32))
     (PpMem.mk m0 m1 m2 m3 m0 m1 m2 m3 (Qp.b8 w 0) (Qp.b8 w 1) (Qp.b8 w 2) (Qp.b8 w 3) (Qp.b 8) (Qp.b 8) (Qp.b 8) (Qp.b 8)
       (Qp.rf a) (Qp.rf a)
       (Qp.zm (L1.bits 9) 128) (Qp.zm (L1.bits 9) (L1.tagW 9)) (Qp.zm (L1.bits 9) (L1.tagW 9)) (Qp.b 128) (Qp.b (L1.tagW 9)) (Qp.b (L1.tagW 9))
