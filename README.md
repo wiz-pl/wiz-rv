@@ -312,7 +312,16 @@ cycles, and the front end waits for a miss or a restart in about a quarter. The 
 streamer's "odd" count rose by about 25 to 30 per 5 s, out of about 120 refreshes. It
 counts a refresh whose checksum changed with no framebuffer write since the last
 refresh, so a write during the previous refresh, after its pixel was sent, also counts.
-With Doom drawing faster, that artefact grows. It needs a look at the panel.
+With Doom drawing faster, that artefact grows. That was the panel's "odd refresh"
+artefact: tearing. A refresh takes about 31 of every 42 ms, Doom drew straight into the
+one framebuffer the streamer reads, and a frame drawn during a refresh came out with the
+rows already sent from the old frame and the rest from the new one (the SPI stream and
+the SSD1331's commands are otherwise right: `scripts/oled-sim.sh` checks them in Icarus
+Verilog over six refreshes and shows the torn one). The framebuffer now has two banks
+(src/Rv/OledFb.wiz): Doom draws into the bank not shown and asks for it through
+`FB_CTRL` (0x80000084), and the controller switches banks only when a refresh starts
+(`tests/oled_flip.wiz`). "odd" no longer counts a refresh that changed bank; with the
+banks it should stay at 0. An older doom.bin still runs, with one bank.
 
 Checked so far: the core's bus and the boot loader in the lockstep against the
 specification (with a DDR model), and compiled C (sw/ctest: gcc's output and newlib's

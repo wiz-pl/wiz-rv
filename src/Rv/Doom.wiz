@@ -1,4 +1,4 @@
-import Rv.Oled
+import Rv.OledFb
 import Rv.Board
 import Rv.Golem.Map
 import Rv.Golem.Intc
@@ -18,7 +18,10 @@ import Rv.Golem.Intc
 --   0x80001000  mailbox         inter-hart messages and the boot ABI (Intc.wiz)
 --   0x80002000  PLIC            the external interrupt controller (Intc.wiz)
 --   0x80004000  CLINT           msip, mtimecmp and mtime (Intc.wiz)
---   0x81000000  framebuffer    96 × 64 RGB 565, halfword stores (sw/hw.h)
+--   0x80000084  framebuffer    write: the bank to show from the next refresh (bit 0);
+--               control        read: 0xDB000000 + 2 × that + the bank shown (OledFb.wiz)
+--   0x81000000  framebuffer    96 × 64 RGB 565, halfword stores (sw/hw.h): bank 0, and
+--                              bank 1 at 0x81004000 (src/Rv/OledFb.wiz)
 --
 -- The sound FIFO is played at 11025 Hz (a sample every 4535 cycles) as 8-bit PWM on
 -- JB pin 1; the framebuffer is sent to the PmodOLEDrgb on JA continuously.
@@ -123,20 +126,7 @@ structure Snd (r : HwTy → Type) where
   free : r B32    -- 4096 - count, registered (a cycle stale; off the I/O read's path)
   deriving Bundle
 
-structure Fb (r : HwTy → Type) where
-  pix : r (HwTy.mem 13 16)
-  q : r B16       -- the read register (the pixel the OLED controller is at)
-  pre : r B4      -- the controller's clock enable: every 8th cycle (16th at the full rate)
-  bad : r W1      -- q was read while the core wrote the same pixel (a block RAM's read
-                  -- in a write to the same address is not defined across its two ports)
-  col : r B16     -- the last good read: what the controller sends
-  -- the core's write, registered: the block RAM is clocked at the full rate, so its write
-  -- enable, address and data come straight from registers (a combinational enable, even
-  -- one gated by the half-rate phase, wrote garbage between frames: FINDINGS.md, H7)
-  we : r W1
-  wa : r B13
-  wd : r B16
-  deriving Bundle
+-- (the framebuffer, `Fb`, is in src/Rv/OledFb.wiz)
 
 -- the bus at the edge of the half-rate part, in registers: the answer as it came in, the
 -- request's valid and pending as they go out (so that every path between the two
@@ -166,6 +156,7 @@ structure Perf (r : HwTy → Type) where
   lastFbw : r B32
   refreshes : r B32
   odd : r B32     -- refreshes whose checksum differed from the one before with no write between
+  lastBank : r W1 -- the framebuffer bank of the last complete refresh
   under : r B32   -- sound ticks with the FIFO empty
   deriving Bundle
 
@@ -215,8 +206,8 @@ def dSys (full : Bool) (cfg : RgbCfg) (ediv : Nat) (cc : Circuit CIn.code COut.c
     (Hw.mux (isK off 100) s.edge.hits (Hw.mux (isK off 104) s.edge.misses (Hw.mux (isK off 108) s.perf.fbw
     (Hw.mux (isK off 112) s.perf.refreshes (Hw.mux (isK off 116) s.perf.odd (Hw.mux (isK off 120) s.perf.lastSum (Hw.mux (isK off 124) s.perf.under (Hw.mux (isK off 128)
       (Hw.cat (Hw.lit 20 0) (Hw.cat s.oled.pins.pmoden (Hw.cat s.oled.pins.vccen (Hw.cat s.oled.pins.res
-        (Hw.cat s.oled.pins.dc (Hw.cat s.oled.pins.cs s.oled.sq.pc)))))) (Hw.mux (isK off GMap.mip)
-          mip (Intc.read s.intc isrc ioff))))))))))))))))))));
+        (Hw.cat s.oled.pins.dc (Hw.cat s.oled.pins.cs s.oled.sq.pc)))))) (Hw.mux (isK off 132) (fbCtl s.fb) (Hw.mux (isK off GMap.mip)
+          mip (Intc.read s.intc isrc ioff)))))))))))))))))))));
   let cr := Circuit.inst cc s.cpu (CIn.pack (CIn.mk (In.mk (Hw.and (txIdle s.tx) (Hw.not s.txGo)) ioIn s.edge.ready s.edge.rvalid s.edge.rdata
     (Intc.irqM mip) (Intc.irqT mip) (Intc.irqE mip)) rst));
   let ω co := COut.unpack (Hw.snd cr);
@@ -230,22 +221,27 @@ def dSys (full : Bool) (cfg : RgbCfg) (ediv : Nat) (cc : Circuit CIn.code COut.c
   let have := Hw.not (isK count 0);
   -- the OLED: the pixel at the controller's (x, y), read every cycle
   let ω ol := s.oled;
-  let y13 : r B13 := Hw.cat (Hw.lit 7 0) ol.gen.y;
-  let idx : r B13 := Hw.add (Hw.add (Hw.shl y13 6) (Hw.shl y13 5)) (Hw.cat (Hw.lit 6 0) ol.gen.x);
+  let idx : r B13 := oledIdx ol;
   let fw := Hw.and o.wr fbA;
+  -- a write of the framebuffer's control register: the bank to show
+  let fcw := Hw.and o.wr (Hw.and (isK off 132) (Hw.not fbA));
   -- the OLED controller's clock enable: every 2^ediv cycles (`ediv` = 0: every cycle,
   -- which is what the simulation uses to stream a frame in 1/16 of the cycles)
-  let en : r W1 := if Nat.beq ediv 0 then Hw.lit 1 1 else isK (Hw.slice 0 ediv s.fb.pre) 0;
-  let oledNext := rctlStep cfg RProg.tree ol s.fb.col;
+  let en : r W1 := oledEn ediv s.fb;
+  let ω ofb := oledFbStep cfg ediv s.fb ol fw (Hw.slice 1 14 o.ioa) (Hw.slice 0 16 o.iod) fcw (bitOf 0 o.iod);
   -- (the streamer's checksum: each pixel as it loads its first byte; a refresh ends when
   -- the controller's frame step starts the next)
   let ω rop := ROp.of (Rom.at 9 ol.sq.pc RProg.tree);
   let sready := spiReady ol.spi;
   let pixLoad := Hw.and en (Hw.and sready (Hw.and rop.pix (Hw.not ol.gen.half)));
-  let frameGo := Hw.and en (Hw.and sready (Hw.and rop.frame (Hw.and ol.fr.pend ol.pins.cs)));
+  let frameGo := Hw.and en (oledFrameGo ol);
   let pf := s.perf;
   let sumNext : r B32 := Hw.add (Hw.xor (Hw.cat (Hw.slice 0 31 pf.sum : r (HwTy.bits 31)) (bitOf 31 pf.sum)) (Hw.cat (Hw.lit 16 0) s.fb.col)) (Hw.cat (Hw.lit 19 0) idx);
-  let oddNow := Hw.and frameGo (Hw.and (Hw.not (Hw.eq pf.sum pf.lastSum)) (Hw.eq pf.fbw pf.lastFbw));
+  -- (a refresh is odd when its checksum differs from the last one's with no framebuffer
+  -- write and no change of bank between: a torn frame; `front` is still the bank of the
+  -- refresh that ends here)
+  let oddNow := Hw.and frameGo (Hw.and (Hw.not (Hw.eq pf.sum pf.lastSum))
+    (Hw.and (Hw.eq pf.fbw pf.lastFbw) (Hw.eq s.fb.front pf.lastBank)));
   Hw.pair
     (DSys.pack cfg.frameLog cc.st (DSys.mk
       -- (the answer is latched only while the core is in its bus phase, so a new access
@@ -268,14 +264,8 @@ def dSys (full : Bool) (cfg : RgbCfg) (ediv : Nat) (cc : Circuit CIn.code COut.c
         (Hw.mux tick (Hw.lit 14 0) (inc sn.div))
         (inc sn.pwm)
         sw (Hw.slice 0 8 o.iod) free)
-      (Fb.mk
-        (Hw.memWrite s.fb.pix s.fb.we s.fb.wa s.fb.wd)
-        (Hw.memRead s.fb.pix idx)
-        (inc s.fb.pre)
-        (Hw.and s.fb.we (Hw.eq s.fb.wa idx))
-        (Hw.mux s.fb.bad s.fb.col s.fb.q)
-        fw (Hw.slice 1 13 o.ioa) (Hw.slice 0 16 o.iod))
-      (RCtl.unpack cfg.frameLog (Hw.mux en oledNext (RCtl.pack cfg.frameLog ol)))
+      (Fb.unpack (Hw.fst ofb))
+      (RCtl.unpack cfg.frameLog (Hw.snd ofb))
       (Perf.mk (Hw.mux ev.instr (inc s.perf.instr) s.perf.instr)
         (Hw.mux ev.bus (inc s.perf.bus) s.perf.bus)
         (Hw.mux ev.mem (inc s.perf.mem) s.perf.mem)
@@ -287,6 +277,7 @@ def dSys (full : Bool) (cfg : RgbCfg) (ediv : Nat) (cc : Circuit CIn.code COut.c
         (Hw.mux frameGo pf.fbw pf.lastFbw)
         (Hw.mux frameGo (inc pf.refreshes) pf.refreshes)
         (Hw.mux oddNow (inc pf.odd) pf.odd)
+        (Hw.mux frameGo s.fb.front pf.lastBank)
         (Hw.mux (Hw.and tick (Hw.not have)) (inc pf.under) pf.under))
       (Hw.and o.wr uartA) o.byte))
     (DOut.pack (DOut.mk s.tx.line
@@ -306,11 +297,11 @@ def DSys.init (cfg : RgbCfg) (cc : Circuit CIn.code COut.code) : DSys cfg.frameL
     cc.init Sync.init Rx.init UTx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 65 0) Intc.init
     (Snd.mk (fun (a : BitVec 12) => BitVec.ofNat 8 128) (BitVec.ofNat 13 0) (BitVec.ofNat 13 0) (BitVec.ofNat 8 128)
       (BitVec.ofNat 8 128) (BitVec.ofNat 14 0) (BitVec.ofNat 9 0) (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 32 4096))
-    (Fb.mk (fun (a : BitVec 13) => BitVec.ofNat 16 0) (BitVec.ofNat 16 0) (BitVec.ofNat 4 0) (BitVec.ofNat 1 0) (BitVec.ofNat 16 0)
-      (BitVec.ofNat 1 0) (BitVec.ofNat 13 0) (BitVec.ofNat 16 0))
+    Fb.init
     (RCtl.init cfg)
     (Perf.mk (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0)
-      (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0))
+      (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0)
+      (BitVec.ofNat 32 0))
     (BitVec.ofNat 1 0) (BitVec.ofNat 8 0)
 
 def doomSysCfg (full : Bool) (cfg : RgbCfg) (ediv : Nat) (cc : Circuit CIn.code COut.code) : Circuit DIn.code DOut.code :=

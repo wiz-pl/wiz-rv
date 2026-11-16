@@ -72,7 +72,8 @@ byte is waiting); the Doom machine leaves that offset returning zero.
 | `0x47fffff0` | 16 B | the WAD's length, a little-endian `u32` (the boot loader's `rvload` writes it) |
 | `0x48000000` | 4 MB | the WAD (`doom1.wad`, shareware; `wad/` is not in the repository) |
 | `0x80000000` | page | I/O registers (below) |
-| `0x81000000` | 12 KB | the framebuffer: 96 × 64 RGB565 halfwords, row-major |
+| `0x81000000` | 12 KB | the framebuffer, bank 0: 96 × 64 RGB565 halfwords, row-major |
+| `0x81004000` | 12 KB | bank 1 (`FB_CTRL` picks the bank shown; src/Rv/OledFb.wiz) |
 
 The I/O registers (`sw/hw.h`):
 
@@ -85,6 +86,7 @@ The I/O registers (`sw/hw.h`):
 | `0x40` | read | the DDR controller's status: bit 0 calibrated, bit 1 failed |
 | `0x50` … `0x7c` | read | performance counters: instructions, bus cycles, load cycles, long cycles, refetches, cache hits/misses, framebuffer writes, OLED refreshes, odd refreshes, checksum, sound underruns |
 | `0x80` | read | the OLED controller's pins and program counter (debug) |
+| `0x84` | read/write | `FB_CTRL`: write the bank to show from the next refresh; read `0xDB000000` + 2 × that + the bank shown |
 
 The trap model: a load or store is an I/O access when bit 31 of its address is set
 (the core does not decode the map; `src/Rv/Pipe.wiz` sends `ioa` to the machine,

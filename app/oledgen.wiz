@@ -1,0 +1,21 @@
+import Rv.OledFb
+import Sys
+-- `oledgen`: write build/oled_fb.v, the OLED framebuffer and controller on their own
+-- (`OledFb.circuit`, src/Rv/OledFb.wiz) with the simulation's short waits and frames back
+-- to back, the controller stepping every cycle. sim/tb_oled.v drives it and decodes the
+-- SPI stream (scripts/oled-sim.sh).
+
+def say (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+def ensureDir (p : String) : EIO Unit := do
+  d ← EIO.lift (FS.isDir p);
+  match d with
+  | .true => EIO.pure ()
+  | .false => FS.createDir p
+
+def main : IO Unit := EIO.toIO (do
+  ensureDir "build";
+  let n := Circuit.netlist "oled_fb" (OledFb.circuit (RgbCfg.fast 0 1) 0);
+  say ("oled_fb: " ++ Nat.repr (List.length n.nodes) ++ " nodes, " ++ Nat.repr (List.length n.regs) ++ " registers, "
+    ++ Nat.repr (List.length n.mems) ++ " memories, errors: " ++ Nat.repr (List.length n.errors));
+  FS.writeFile "build/oled_fb.v" (Verilog.emit n))

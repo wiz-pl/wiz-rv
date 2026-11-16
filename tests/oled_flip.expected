@@ -1,0 +1,2 @@
+tests/oled_flip.wiz:112:1: info: "oled flip: a0 01 a0 02 a0 03 c15 c00 c5f c75 c00 c3f b0 04 b0 05 — PASS"
+tests/oled_flip.wiz:113:1: info: "oled stay: a0 01 a0 02 a0 03 c15 c00 c5f c75 c00 c3f a0 04 a0 05 — PASS"
