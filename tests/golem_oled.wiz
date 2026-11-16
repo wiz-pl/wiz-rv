@@ -1,0 +1,73 @@
+-- test: check
+import Rv.Golem.OledSim
+import Text
+-- golem's OLED streamer on its own (`OledSim`, src/Rv/Golem/OledSim.wiz): the
+-- framebuffer preloaded with three pixels and the SSD1331 controller at its `pixels`
+-- step. `Circuit.run` for 200 cycles; the SPI bytes decoded from JA: the first six are
+-- red, green and blue at (0,0), (1,0), (2,0), RGB 565, high byte first.
+--
+-- (Split from the boot check because the build cap is 5 GB; DESIGN.md, "Simulation".)
+
+def G.nthBit (v : Nat) (k : Nat) : Nat := Nat.mod (Nat.div v (Nat.pow 2 k)) 2
+
+def G.hexDigit (n : Nat) : Char :=
+  if Nat.lt n 10 then Char.mk (48 + n) else Char.mk (87 + n)
+
+def G.hex2 (n : Nat) : String :=
+  String.mk (.cons (G.hexDigit (Nat.div n 16)) (.cons (G.hexDigit (Nat.mod n 16)) .nil))
+
+def G.showBytes : List Nat → String
+  | .nil => ""
+  | .cons x xs => G.hex2 x ++ " " ++ G.showBytes xs
+
+def G.natsEq : List Nat → List Nat → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => Bool.and (Nat.beq a b) (G.natsEq as bs)
+  | _, _ => .false
+
+structure G.Spi where
+  prev : Nat
+  nbits : Nat
+  byte : Nat
+  dc : Nat
+  acc : List (Nat × Nat)     -- reverse order
+
+def G.spiGo : G.Spi → List Nat → G.Spi
+  | s, .nil => s
+  | s, .cons j js =>
+    let sclk := G.nthBit j 3;
+    let mosi := G.nthBit j 1;
+    let dc := G.nthBit j 4;
+    let rise := Bool.and (Nat.beq sclk 1) (Nat.beq s.prev 0);
+    if rise then
+      if Nat.beq s.nbits 0 then G.spiGo (G.Spi.mk sclk 1 mosi dc s.acc) js
+      else
+        let b := 2 * s.byte + mosi;
+        let nn := s.nbits + 1;
+        if Nat.beq nn 8 then G.spiGo (G.Spi.mk sclk 0 0 dc (.cons (dc, b) s.acc)) js
+        else G.spiGo (G.Spi.mk sclk nn b dc s.acc) js
+    else G.spiGo (G.Spi.mk sclk s.nbits s.byte s.dc s.acc) js
+
+def G.spiData (js : List Nat) : List Nat :=
+  List.map (fun (p : Nat × Nat) => p.2)
+    (List.filter (fun (p : Nat × Nat) => Nat.beq p.1 1)
+      (List.reverse (G.spiGo (G.Spi.mk 0 0 0 0 .nil) js).acc))
+
+def G.repBits : Nat → List (BitVec 1)
+  | .zero => .nil
+  | .succ k => .cons (BitVec.ofNat 1 1) (G.repBits k)
+
+def G.pixels : List Nat := .cons 63488 (.cons 2016 (.cons 31 .nil))
+
+def G.outs : List (HwTy.El OOut.code) :=
+  Circuit.run (OledSim.circuit (RgbCfg.fast 0 1) G.pixels) (G.repBits 200)
+
+def G.report : String :=
+  let ja : List Nat := Hdl.map (fun (o : HwTy.El OOut.code) => (Bundle.ofEl OOut.bundle o).ja.toNat) G.outs;
+  let data := G.spiData ja;
+  let pix := List.take 6 data;
+  let ok := G.natsEq pix (.cons 248 (.cons 0 (.cons 7 (.cons 224 (.cons 0 (.cons 31 .nil))))));
+  "golem oled: " ++ Nat.repr (List.length data) ++ " data bytes, first six "
+    ++ G.showBytes pix ++ (if ok then " — PASS" else " — FAIL")
+
+#eval G.report

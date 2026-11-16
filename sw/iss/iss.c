@@ -4,8 +4,18 @@
    (UART on stdout / from a key script, a cycle counter, the audio FIFO, written to a
    WAV file, the OLED framebuffer, written out as PPM images).
 
-   iss PROGRAM.bin WAD [-n INSTRUCTIONS] [-frames DIR] [-wav FILE] [-keys "TIME:KEY,..."]
-   The program is loaded at 0x40000000 and started there; the WAD at 0x48000000. */
+   iss PROGRAM.bin WAD [-n INSTRUCTIONS] [-maxframes N] [-frames DIR] [-wav FILE]
+       [-keys "TIME:KEY,..."] [-screen ADDR] [-lenient]
+   The program is loaded at 0x40000000 and started there; the WAD at 0x48000000.
+
+   The performance counters at 0x80000050 (sw/hw.h) are implemented so that the
+   program's own perf line measures the simulation: instructions retired, DDR
+   accesses (the ISS has no caches, so every DDR fetch or data access is counted as
+   one), load cycles, long (shift/multiply/divide) cycles, fetches from DDR,
+   framebuffer writes and refreshes. Cycle counts follow the multi-cycle core's model
+   (two cycles an instruction, one more for a load or store, the shift amount, 32 for
+   a divide); they are not the 100 MHz pipeline's. A frame boundary is the write of
+   pixel 96 x 64 - 1; each one prints its instructions and cycles on stderr. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +33,11 @@ static const char *keys;        /* "ms:c,ms:c,..." */
 static uint32_t screen_ptr;     /* -screen ADDR: the address of DG_ScreenBuffer (320 x 200 XRGB) */
 static int lenient;             /* -lenient: do misaligned accesses (and report where) */
 static uint32_t mis_pc[64]; static int mis_n; static uint64_t mis_total;
+/* the performance counters (0x80000050 …): what the program reads, counted here */
+static uint64_t bus_acc, mem_cycles, long_cycles, fetch_acc, frames_done, frames_prev_instr, frames_prev_cycles;
+static uint32_t fb_sum;
+static uint64_t underruns, fbw_total;
+static uint64_t maxframes;      /* -maxframes N: stop after N complete frames */
 static void misaligned(void) {
   mis_total++;
   for (int i = 0; i < mis_n; i++) if (mis_pc[i] == pc) return;
@@ -89,15 +104,29 @@ static uint32_t io_read(uint32_t a) {
   case 0x14: return (uint32_t)(cycles >> 32);
   case 0x34: {             /* free places: 4096 minus what is written and not yet played */
     uint64_t played = cycles * 11025 / 50000000;
-    if (snd_written < played) snd_written = played;   /* an underrun: silence was played */
+    if (snd_written < played) { underruns++; snd_written = played; }   /* an underrun */
     uint64_t used = snd_written - played;
     return used >= 4096 ? 0 : (uint32_t)(4096 - used);
   }
+  /* the performance counters (sw/hw.h): the program's perf line, in the simulation */
+  case 0x50: return (uint32_t)instret;
+  case 0x54: return (uint32_t)bus_acc;
+  case 0x58: return (uint32_t)mem_cycles;
+  case 0x5c: return (uint32_t)long_cycles;
+  case 0x60: return (uint32_t)fetch_acc;
+  case 0x64: return 0;     /* no cache in the ISS: hits */
+  case 0x68: return 0;     /* and misses */
+  case 0x6c: return (uint32_t)fbw_total;
+  case 0x70: return (uint32_t)frames_done;
+  case 0x74: return 0;     /* refreshes whose checksum changed with no write */
+  case 0x78: return fb_sum;
+  case 0x7c: return (uint32_t)underruns;
+  case 0x80: return 0;     /* the OLED controller's pins and program counter */
   default: return 0;
   }
 }
 
-static uint32_t fbw_pc[16]; static int fbw_n; static uint64_t fbw_total;
+static uint32_t fbw_pc[16]; static int fbw_n;
 static void io_write(uint32_t a, uint32_t v, int size) {
   if ((a >> 24) == 0x81) {
     fbw_total++;
@@ -105,7 +134,18 @@ static void io_write(uint32_t a, uint32_t v, int size) {
     uint32_t i = (a & 0xffffff) >> 1;
     if (i < 96 * 64 && size == 2) {
       oled[i] = (uint16_t)v;
-      if (i == 96 * 64 - 1) dump_frame();   /* the last pixel: a frame is done */
+      fb_sum = (fb_sum * 16777619u) ^ (uint16_t)v ^ i;
+      if (i == 96 * 64 - 1) {              /* the last pixel: a frame is done */
+        frames_done++;
+        uint64_t df = cycles - frames_prev_cycles;
+        fprintf(stderr, "[iss] frame %llu: %llu instructions, %llu cycles (%.3f s at 50 MHz), %.2f fps, %llu instr this frame\n",
+                (unsigned long long)frames_done, (unsigned long long)instret,
+                (unsigned long long)cycles, cycles / 50e6,
+                df ? 50e6 / (double)df : 0.0,
+                (unsigned long long)(instret - frames_prev_instr));
+        frames_prev_instr = instret; frames_prev_cycles = cycles;
+        dump_frame();
+      }
     }
   } else if ((a & 0xff) == 0x30) {
     snd_written++;
@@ -123,6 +163,7 @@ static int step(void) {
   uint8_t *ip = byte_at(pc);
   if (!ip || (pc & 3)) return 4;
   uint32_t w; memcpy(&w, ip, 4);
+  if ((pc >> 30) == 1) { bus_acc++; fetch_acc++; }   /* a fetch from DDR */
   uint32_t op = w & 127, rd = (w >> 7) & 31, f3 = (w >> 12) & 7, r1 = (w >> 15) & 31, r2 = (w >> 20) & 31, f7 = w >> 25;
   uint32_t a = x[r1], b = x[r2], npc = pc + 4, v = 0;
   int wr = 0;
@@ -151,6 +192,8 @@ static int step(void) {
     if (f3 == 3 || f3 > 5) return 3;
     if (ad & (size - 1)) { if (!lenient) return 5; misaligned(); }
     cycles += 1;
+    mem_cycles++;
+    if ((ad >> 30) == 1) bus_acc++;
     if (ad >> 31) v = io_read(ad);
     else {
       uint8_t *p = byte_at(ad); uint32_t t = 0; memcpy(&t, p, size);
@@ -164,6 +207,8 @@ static int step(void) {
     if (f3 > 2) return 3;
     if (ad & (size - 1)) { if (!lenient) return 6; misaligned(); }
     cycles += 1;
+    mem_cycles++;
+    if ((ad >> 30) == 1) bus_acc++;
     if (ad >> 31) io_write(ad, b, size);
     else memcpy(byte_at(ad), &b, size);
     break;
@@ -175,6 +220,7 @@ static int step(void) {
     if (op == 0x33 && f7 == 1) {
       int64_t sa = (int32_t)a, sb = (int32_t)b; uint64_t ua = a, ub = b;
       cycles += f3 >= 4 ? 32 : 1;
+      long_cycles += f3 >= 4 ? 32 : 1;
       switch (f3) {
       case 0: v = a * b; break;
       case 1: v = (uint32_t)((sa * sb) >> 32); break;
@@ -189,11 +235,11 @@ static int step(void) {
     }
     switch (f3) {
     case 0: v = alt && op == 0x33 ? a - c : a + c; break;
-    case 1: v = a << (c & 31); cycles += (c & 31) + 1; break;
+    case 1: v = a << (c & 31); cycles += (c & 31) + 1; long_cycles += (c & 31) + 1; break;
     case 2: v = (int32_t)a < (int32_t)c; break;
     case 3: v = a < c; break;
     case 4: v = a ^ c; break;
-    case 5: v = alt ? (uint32_t)((int32_t)a >> (c & 31)) : a >> (c & 31); cycles += (c & 31) + 1; break;
+    case 5: v = alt ? (uint32_t)((int32_t)a >> (c & 31)) : a >> (c & 31); cycles += (c & 31) + 1; long_cycles += (c & 31) + 1; break;
     case 6: v = a | c; break;
     case 7: v = a & c; break;
     }
@@ -225,6 +271,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "-frames")) frames = argv[i + 1];
     else if (!strcmp(argv[i], "-keys")) keys = argv[i + 1];
     else if (!strcmp(argv[i], "-lenient")) { lenient = 1; i--; }
+    else if (!strcmp(argv[i], "-maxframes")) maxframes = strtoull(argv[i + 1], 0, 10);
     else if (!strcmp(argv[i], "-screen")) screen_ptr = (uint32_t)strtoul(argv[i + 1], 0, 16);
     else if (!strcmp(argv[i], "-wav")) { wav = fopen(argv[i + 1], "wb"); fseek(wav, 44, SEEK_SET); }
   }
@@ -234,9 +281,10 @@ int main(int argc, char **argv) {
   memcpy(byte_at(0x47fffff0u), &n, 4);
   pc = 0x40000000u;
   int t = 0;
-  while (instret < limit && !(t = step())) {}
-  fprintf(stderr, "\n[iss] %s after %llu instructions, %llu cycles (%.1f s at 50 MHz), pc %08x, %d frames\n",
-          t ? "trap" : "stopped", (unsigned long long)instret, (unsigned long long)cycles, cycles / 50e6, pc, nframe);
+  while (instret < limit && !(t = step()) && (maxframes == 0 || frames_done < maxframes)) {}
+  fprintf(stderr, "\n[iss] %s after %llu instructions, %llu cycles (%.1f s at 50 MHz), pc %08x, %llu frames (%.2f fps average)\n",
+          t ? "trap" : "stopped", (unsigned long long)instret, (unsigned long long)cycles, cycles / 50e6, pc,
+          (unsigned long long)frames_done, frames_done ? 50e6 * (double)frames_done / (double)cycles : 0.0);
   if (t) {
     fprintf(stderr, "[iss] trap %d\n", t);
     for (int i = 0; i < 32; i++) fprintf(stderr, "x%d=%08x%s", i, x[i], i % 8 == 7 ? "\n" : " ");

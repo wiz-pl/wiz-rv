@@ -1,0 +1,9 @@
+import Rv.TrapProofs.Base
+-- Pf.csrrw_ok: the statement and its form are in src/Rv/TrapProofs/Base.wiz and docs/csr.md
+def Pf.csrrw_ok : (a : Arch) → (m0 m1 m2 m3 : BitVec 9 → BitVec 8) → (x1 x2 acc dv rm : BitVec 32) → (cnt srd : BitVec 5) → (sf3 : BitVec 3) → (slo : BitVec 2) → (sio : BitVec 1) →
+    Pf.fetchQ (Pf.withH a) m0 m1 m2 m3 = Pf.bytes (Pf.w (A.csrrw 3 Csr.aMscratch 1)) →
+    Pf.csrCore (Pf.stepX In.idle (Pf.stepX In.idle (Pf.atC (Pf.withH a) (Pf.w (A.csrrw 3 Csr.aMscratch 1)) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)))
+      = Pf.csrSpec (Rv.exec Pf.cfg (Pf.withH a) (Pf.w (A.csrrw 3 Csr.aMscratch 1))) :=
+  fun a m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio h =>
+    Pf.glueC (T := Pf.CsrObs) Pf.csrCore In.idle (Pf.withH a) (Pf.w (A.csrrw 3 Csr.aMscratch 1)) m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio
+      (Pf.csrSpec (Rv.exec Pf.cfg (Pf.withH a) (Pf.w (A.csrrw 3 Csr.aMscratch 1)))) rfl h

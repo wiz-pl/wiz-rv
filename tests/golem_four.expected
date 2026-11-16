@@ -1,0 +1,2 @@
+tests/golem_four.wiz:136:1: info: "golem four link: done [6 6 6 6 ], unique 24/24 — PASS"
+tests/golem_four.wiz:137:1: info: "golem four fair (cap 4): grants [32 32 29 28 ] — PASS"

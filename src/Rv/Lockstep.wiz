@@ -8,8 +8,11 @@ import Text
 -- code and PC; at the end, the bytes written to the output port and every byte of
 -- memory.
 
-def Ls.cfg (ab wb : Nat) : Cfg := Cfg.mk ab (wb + 2) .false
-def Ls.cfgM (ab wb : Nat) (mx : Bool) : Cfg := Cfg.mk ab (wb + 2) mx
+def Ls.cfg (ab wb : Nat) : Cfg := Cfg.mk ab (wb + 2) .false .false
+def Ls.cfgM (ab wb : Nat) (mx : Bool) : Cfg := Cfg.mk ab (wb + 2) mx .false
+-- the same with the A extension (the cores implement it unconditionally)
+def Ls.cfgA (ab wb : Nat) (mx : Bool) : Cfg := Cfg.mk ab (wb + 2) mx .true
+def Ls.cfgX (ab wb : Nat) (mx ax : Bool) : Cfg := Cfg.mk ab (wb + 2) mx ax
 
 def Ls.hw {ω ab wb : Nat} (v : HwTy.El (CoreSt.code ab wb)) : CoreSt ab wb HwTy.El := Bundle.ofEl (CoreSt.bundle ab wb) v
 
@@ -25,6 +28,20 @@ def Ls.regDiff (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (a : Arch) : Nat → Lis
       else .cons ("x" ++ Nat.repr i ++ ": core " ++ Nat.repr hwA ++ "/" ++ Nat.repr hwB ++ ", spec " ++ Nat.repr sp) .nil;
     List.append (Ls.regDiff ab wb s a k) here
 
+-- one CSR field that differs, as text
+def Ls.one (name : String) (h sp : Nat) : List String :=
+  if Nat.beq h sp then .nil else .cons (name ++ ": core " ++ Nat.repr h ++ ", spec " ++ Nat.repr sp) .nil
+
+-- the machine CSRs: mstatus, mie, mtvec, mscratch, mepc, mcause, mtval
+def Ls.csrDiff {ab wb : Nat} (s : CoreSt ab wb HwTy.El) (a : Arch) : List String :=
+  List.append (Ls.one "mstatus" s.csr.mstatus.toNat a.csr.mstatus.toNat)
+    (List.append (Ls.one "mie" s.csr.mie.toNat a.csr.mie.toNat)
+      (List.append (Ls.one "mtvec" s.csr.mtvec.toNat a.csr.mtvec.toNat)
+        (List.append (Ls.one "mscratch" s.csr.mscratch.toNat a.csr.mscratch.toNat)
+          (List.append (Ls.one "mepc" s.csr.mepc.toNat a.epc.toNat)
+            (List.append (Ls.one "mcause" s.csr.mcause.toNat a.csr.mcause.toNat)
+              (Ls.one "mtval" s.tval.toNat a.tval.toNat))))))
+
 def Ls.compare (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (a : Arch) : List String :=
   List.append (if Nat.beq s.pc.toNat a.pc.toNat then .nil
       else .cons ("pc: core " ++ Nat.repr s.pc.toNat ++ ", spec " ++ Nat.repr a.pc.toNat) .nil)
@@ -32,9 +49,7 @@ def Ls.compare (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (a : Arch) : List String
         else .cons ("trap: core " ++ Nat.repr s.trap.toNat ++ ", spec " ++ Nat.repr a.trap) .nil)
       (List.append (if Nat.beq s.tval.toNat a.tval.toNat then .nil
           else .cons ("tval: core " ++ Nat.repr s.tval.toNat ++ ", spec " ++ Nat.repr a.tval.toNat) .nil)
-        (List.append (if Nat.beq s.csr.toNat a.csr.toNat then .nil
-            else .cons ("csr: core " ++ Nat.repr s.csr.toNat ++ ", spec " ++ Nat.repr a.csr.toNat) .nil)
-          (Ls.regDiff ab wb s a (Rv.pow2 ab - 1)))))
+        (List.append (Ls.csrDiff s a) (Ls.regDiff ab wb s a (Rv.pow2 ab - 1)))))
 
 -- the core's byte at address `x`
 def Ls.byte (ab wb : Nat) (s : CoreSt ab wb HwTy.El) (x : Nat) : Nat :=
@@ -102,9 +117,17 @@ def Ls.ddrStore (m : BitVec 32 → BitVec 8) (a : BitVec 32) (d : BitVec 32) (st
     if Bool.and (Bool.not (Nat.lt x.toNat b)) (Bool.and (Nat.lt x.toNat (b + 4)) (Rv.bit st.toNat k))
     then BitVec.ofNat 8 (Rv.bits d.toNat (8 * k) 8) else m x
 
+-- the interrupt inputs at a cycle: `irq cyc` has mip's layout (MSIP bit 3, MTIP 7,
+-- MEIP 11); `Ls.noIrq` holds them low
+def Ls.noIrq : Nat → Nat := fun (c : Nat) => 0
+def Ls.irqPort (v : Nat) : BitVec 1 × BitVec 1 × BitVec 1 :=
+  (Bool.toBits (Rv.bit v Csr.msipBit), Bool.toBits (Rv.bit v Csr.mtipBit), Bool.toBits (Rv.bit v Csr.meipBit))
+
 -- `fuel` cycles at most; `a` is the specification's state for the instruction the core
--- is on (or will decode next)
-def Ls.go (ab wb : Nat) (mx : Bool) (prog : List Nat) :
+-- is on (or will decode next). The specification's interrupt inputs are the core's in
+-- the same cycle: the multi-cycle core decides an interrupt in E, where the
+-- specification takes its step, so the two see one value.
+def Ls.go (ab wb : Nat) (mx ax : Bool) (prog : List Nat) (irq : Nat → Nat) :
     Nat → Nat → List Nat → List Nat → (BitVec 32 → BitVec 8) → Nat → Nat → HwTy.El (CoreSt.code ab wb) → Arch → Ls.Result
   | cyc, ins, out, inp, ddr, lat, .zero, v, a => Ls.finish ab wb (Ls.hw (ab := ab) (wb := wb) v) a cyc ins out ddr (.cons "out of cycles" .nil)
   | cyc, ins, out, inp, ddr, lat, .succ fuel, v, a =>
@@ -124,22 +147,35 @@ def Ls.go (ab wb : Nat) (mx : Bool) (prog : List Nat) :
         let ω ioIn : BitVec 32 := (match inp with
           | .cons c cs => BitVec.ofNat 32 c
           | .nil => BitVec.ofNat 32 4294967295);
+        let ω iv := irq cyc;
+        let ω ip := Ls.irqPort iv;
         let ω port : In HwTy.El := In.mk (BitVec.ofNat 1 1) ioIn
-          (Bool.toBits ans) (Bool.toBits (Bool.and ans (Bool.not (BitVec.isTrue q.we)))) (Ls.ddrWord ddr q.addr);
+          (Bool.toBits ans) (Bool.toBits (Bool.and ans (Bool.not (BitVec.isTrue q.we)))) (Ls.ddrWord ddr q.addr)
+          ip.1 ip.2.1 ip.2.2;
         let ω r := coreStep (r := HwTy.El) ab wb mx s port;
         let ω o := Bundle.ofEl Out.bundle r.2;
         let ω out2 : List Nat := if BitVec.isTrue o.wr then .cons o.byte.toNat out else out;
-        let ω a2 := if Nat.beq ph Ph.e then Rv.step (Ls.cfgM ab wb mx) a else a;
+        let ω a2 := if Nat.beq ph Ph.e then Rv.step (Ls.cfgX ab wb mx ax) (Rv.setIrq a (Rv.w32 iv)) else a;
         let ω ins2 := if Nat.beq ph Ph.e then Nat.succ ins else ins;
         let ω ddr2 := if wr then Ls.ddrStore ddr q.addr q.wdata q.wstrb else ddr;
         let ω lat2 := if req then (if Nat.beq lat 0 then Ls.lat else lat - 1) else Ls.lat;
         let ω inp2 : List Nat := (match BitVec.isTrue o.rd, inp with
           | .true, .cons c cs => cs
           | _, _ => inp);
-        Ls.go ab wb mx prog (Nat.succ cyc) ins2 out2 inp2 ddr2 lat2 fuel r.1 a2
+        Ls.go ab wb mx ax prog irq (Nat.succ cyc) ins2 out2 inp2 ddr2 lat2 fuel r.1 a2
 
+def Ls.runIrqX (ab wb : Nat) (mx ax : Bool) (prog : List Nat) (input : List Nat) (irq : Nat → Nat) (fuel : Nat) : Ls.Result :=
+  Ls.go ab wb mx ax prog irq 0 0 .nil input (fun (x : BitVec 32) => BitVec.ofNat 8 0) Ls.lat fuel (Bundle.toEl (CoreSt.bundle ab wb) (CoreSt.init ab wb prog))
+    (Rv.setInp (Arch.start (Ls.cfgX ab wb mx ax) prog) input)
+def Ls.runInX (ab wb : Nat) (mx ax : Bool) (prog : List Nat) (input : List Nat) (fuel : Nat) : Ls.Result :=
+  Ls.runIrqX ab wb mx ax prog input Ls.noIrq fuel
+-- with the interrupt inputs driven by `irq` (cycle → mip bits)
+def Ls.runIrq (ab wb : Nat) (mx : Bool) (prog : List Nat) (irq : Nat → Nat) (fuel : Nat) : Ls.Result :=
+  Ls.runIrqX ab wb mx .false prog .nil irq fuel
 def Ls.runIn (ab wb : Nat) (mx : Bool) (prog : List Nat) (input : List Nat) (fuel : Nat) : Ls.Result :=
-  Ls.go ab wb mx prog 0 0 .nil input (fun (x : BitVec 32) => BitVec.ofNat 8 0) Ls.lat fuel (Bundle.toEl (CoreSt.bundle ab wb) (CoreSt.init ab wb prog))
-    (Rv.setInp (Arch.start (Ls.cfgM ab wb mx) prog) input)
+  Ls.runInX ab wb mx .false prog input fuel
 def Ls.run (ab wb : Nat) (mx : Bool) (prog : List Nat) (fuel : Nat) : Ls.Result :=
   Ls.runIn ab wb mx prog .nil fuel
+-- with the A extension in the specification
+def Ls.runA (ab wb : Nat) (mx : Bool) (prog : List Nat) (fuel : Nat) : Ls.Result :=
+  Ls.runInX ab wb mx .true prog .nil fuel

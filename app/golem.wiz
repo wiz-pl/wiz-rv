@@ -1,0 +1,314 @@
+import Rv.GolemBoard
+import Sys
+import Text
+-- The golem board flow: `golem COMMAND [--boot rom|loader] [--variant golem|mc|four|four_nol1|both]`.
+-- grail builds this program (and checks the library); it writes the Verilog and the
+-- constraints and runs the openXC7 tools as child processes (yosys, nextpnr-xilinx,
+-- fasm2frames, xc7frames2bit). scripts/golem-board.sh finds those tools in PATH or in
+-- the Nix store and sets the GOLEM_* variables below.
+--
+--   board      the configuration check (pins, clocks, reset domains); no netlist
+--   check      the same as `board`
+--   gen        build/golem.v, build/golem.xdc (and golem_mc.* with --variant both):
+--              the design in wiz-ddr3's PLL wrapper, checked against the pin table
+--   synth      gen, then yosys synth_xilinx: utilisation in build/NAME.stat
+--   bit        synth, then nextpnr-xilinx, fasm2frames, xc7frames2bit:
+--              build/a35t/NAME.bit, with the 100 MHz timing in build/a35t/NAME.timing
+--   timing     read the last place-and-route log: the clocks and the 100 MHz check
+--   dry        board + gen only, and print the hardware step (no FPGA tools needed)
+--   all        board, gen, synth, bit
+--
+-- There is no `flash`: the brief does not authorise hardware. The bitstream command is
+--   openFPGALoader -b arty_a7_35t build/a35t/golem.bit
+-- (SRAM only), then the UART's boot line: "wiz-rv boot" and "DDR ok" (the loader) or
+-- "golem boot … ddr ok" (--boot rom). LD0 is calibration done, LD1 calibration failed.
+--
+-- Environment: GOLEM_YOSYS, GOLEM_NEXTPNR, GOLEM_FASM2FRAMES, GOLEM_XC7FRAMES2BIT,
+-- GOLEM_CHIPDB (the directory holding xc7a35tcsg324.bin), GOLEM_DB (the directory
+-- holding artix7/).
+
+def say (s : String) : EIO Unit := EIO.lift (IO.println s)
+
+def unwords : List String → String
+  | .nil => ""
+  | .cons a as => a <+> " " <+> unwords as
+
+def EIO.forEach {A : Type} (f : A → EIO Unit) : List A → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons x xs => EIO.bind (f x) (fun u => EIO.forEach f xs)
+
+def tool (cmd : String) (args : List String) : EIO Unit := do
+  say ("$ " <+> cmd <+> " " <+> unwords args);
+  st ← Process.run cmd args;
+  match ExitStatus.success st with
+  | .true => EIO.pure ()
+  | .false => EIO.fail (cmd <+> ": " <+> ExitStatus.toString st)
+
+def toolOutput (cmd : String) (args : List String) : EIO String := do
+  say ("$ " <+> cmd <+> " " <+> unwords args);
+  o ← Process.output cmd args "";
+  match ExitStatus.success o.status with
+  | .true => EIO.pure o.stdout
+  | .false => EIO.fail (cmd <+> ": " <+> ExitStatus.toString o.status <+> "\n" <+> o.stdout <+> o.stderr)
+
+def ensureDir (p : String) : EIO Unit := do
+  d ← EIO.lift (FS.isDir p);
+  match d with
+  | .true => EIO.pure ()
+  | .false => FS.createDir p
+
+def build (file : String) : String := "build/" <+> file
+
+def envOf (k fallback : String) : EIO String := do
+  e ← EIO.lift (Env.get k);
+  match e with
+  | .some x => EIO.pure x
+  | .none => EIO.pure fallback
+
+def dirOf (k why : String) : EIO String := do
+  e ← EIO.lift (Env.get k);
+  match e with
+  | .some x => EIO.pure x
+  | .none => EIO.fail ("no $" <+> k <+> " (" <+> why <+> "; scripts/golem-board.sh sets it)")
+
+-- whether a tool is on PATH (or an executable path in GOLEM_*)
+def have (p : String) : EIO Bool := do
+  st ← Process.run "sh" (.cons "-c" (.cons ("command -v " <+> p <+> " >/dev/null 2>&1") .nil));
+  match ExitStatus.success st with
+  | .true => EIO.pure .true
+  | .false => EIO.pure .false
+
+def device : String := "a35t"
+def dev (file : String) : String := build (device <+> "/" <+> file)
+
+------------------------------------------------------------------------------------
+-- The configuration check: pins, clocks, reset domains
+
+def boardCheck : EIO Unit := do
+  say ("golem board: " <+> Hdl.show GBoard.pinCount <+> " pins, " <+> Hdl.show GBoard.portsCount
+    <+> " top ports, clocks " <+> GBoard.clockSummary);
+  say ("  pins: 48 DDR3 (wiz-ddr3 Ddr3.Board), clk E3, uart_rx A9/uart_tx D10, led H5 J5 T9 T10,"
+    <+> " ja G13 … K16, jb E15 … J15, btn D9 … B8");
+  say ("  clocks: clk 100 MHz -> PLL VCO " <+> Hdl.show (GBoard.vcoHz / 1000000) <+> " MHz: sys "
+    <+> Hdl.show (GBoard.coreHz / 1000000) <+> " MHz (golem), " <+> Hdl.show (GBoard.mcHz / 1000000)
+    <+> " MHz effective (golemMc and every hart of golem_four, every other cycle), sys4x "
+    <+> Hdl.show (GBoard.clkoutHz 1 / 1000000) <+> " MHz, sys4xDqs "
+    <+> Hdl.show (GBoard.clkoutHz 2 / 1000000) <+> " MHz at 90°, ref200 "
+    <+> Hdl.show (GBoard.clkoutHz 3 / 1000000) <+> " MHz");
+  say ("  reset: sys = BTN0 or !(calDone | calFail); phy = 255 cycles after LOCKED; ddr = the"
+    <+> " controller's rstN. LD0 calDone, LD1 calFail, LD2 core, LD3 bus");
+  say ("  boot: " <+> GBoard.Boot.name GBoard.defaultBoot <+> " (default; --boot rom for the self-test ROM)");
+  match GBoard.problems with
+  | .nil => say "  ok: every port has its pin, the clocks are the PLL's, the resets are the design's"
+  | es => EIO.fail ("golem board: FAIL: " <+> Hdl.sepBy "; " es)
+
+------------------------------------------------------------------------------------
+-- gen: netlist, constraints, checks
+
+def genOne (boot : GBoard.Boot) (v : GBoard.Variant) : EIO Unit := do
+  let name := GBoard.Variant.name v;
+  let n := GBoard.Variant.netlist v boot;
+  say (name <+> ": " <+> Hdl.show (Netlist.size n) <+> " netlist nodes, "
+    <+> Hdl.show (List.length n.regs) <+> " registers, " <+> Hdl.show (List.length n.mems) <+> " memories"
+    <+> " (boot " <+> GBoard.Boot.name boot <+> ")");
+  (match n.errors with
+    | .nil => EIO.pure ()
+    | es => EIO.fail ("netlist errors: " <+> unwords es));
+  (match Clocking.problems n GBoard.clocking with
+    | .nil => EIO.pure ()
+    | es => EIO.fail ("clocking: " <+> Hdl.sepBy "; " es));
+  let ω vn := Verilog.portIdents n;
+  say ("  ports: " <+> Hdl.show (List.length (List.append vn.ins vn.outs))
+    <+> " in the core, " <+> Hdl.show GBoard.portsCount <+> " on the board (the PLL drives four)");
+  (match Nat.beq (List.length (List.append vn.ins vn.outs)) GBoard.corePorts with
+    | .true => EIO.pure ()
+    | .false => EIO.fail ("golem: " <+> Hdl.show (List.length (List.append vn.ins vn.outs))
+        <+> " ports, expected " <+> Hdl.show GBoard.corePorts));
+  (match Xdc.check (GBoard.topNetlist n) GBoard.checkBoard with
+    | .nil => say "  ok: every board port has its pin and width"
+    | es => EIO.fail ("constraints: " <+> Hdl.sepBy "; " es));
+  FS.writeFile (build (name <+> ".v")) (Verilog.emitTop n GBoard.clocking);
+  FS.writeFile (build (name <+> ".xdc")) (GBoard.Variant.xdc v);
+  say ("  wrote " <+> build (name <+> ".v") <+> " and " <+> build (name <+> ".xdc"))
+
+def gen (vars : List GBoard.Variant) (boot : GBoard.Boot) : EIO Unit := do
+  ensureDir "build";
+  EIO.forEach (fun (v : GBoard.Variant) => genOne boot v) vars;
+  FS.writeFile (build "golem.boot") ("boot image: " <+> GBoard.Boot.name boot <+> "\n"
+    <+> "default: loader (Prog.boot); rom = GProg.golem\n"
+    <+> "calibration: the core is held until calDone | calFail; LD0 done, LD1 failed\n"
+    <+> "loader: rvload the C image or Doom after \"DDR ok\"\n")
+
+------------------------------------------------------------------------------------
+-- synth: yosys
+
+def lines (s : String) : List String := String.splitOn s "\n"
+def keep (p : String → Bool) : List String → List String
+  | .nil => .nil
+  | .cons l ls => match p l with
+    | .true => .cons l (keep p ls)
+    | .false => keep p ls
+def sayAll : List String → EIO Unit
+  | .nil => EIO.pure ()
+  | .cons l ls => EIO.bind (say ("  " <+> String.trim l)) (fun u => sayAll ls)
+def cellLine (l : String) : Bool :=
+  List.any (fun (c : String) => String.contains l c)
+    (.cons "LUT" (.cons "FD" (.cons "CARRY4" (.cons "RAMB" (.cons "DSP48E1" (.cons "RAM32" (.cons "RAM64"
+    (.cons "SRL" (.cons "MUXF" .nil)))))))))
+def timingLine (l : String) : Bool := String.contains l "Max frequency for clock"
+def lastOf : List String → List String
+  | .nil => .nil
+  | .cons l .nil => .cons l .nil
+  | .cons _ ls => lastOf ls
+
+def synth (name : String) : EIO Unit := do
+  y ← envOf "GOLEM_YOSYS" "yosys";
+  ok ← have y;
+  match ok with
+  | .false => say ("  yosys not found (" <+> y <+> "): synthesis skipped")
+  | .true => do
+    tool y (.cons "-q" (.cons "-l" (.cons (build (name <+> ".yosys.log")) (.cons "-p"
+      (.cons ("synth_xilinx -flatten -abc9 -arch xc7 -top " <+> name <+> "; tee -q -o " <+> build (name <+> ".stat")
+        <+> " stat; write_json " <+> build (name <+> ".json"))
+      (.cons (build (name <+> ".v")) .nil))))));
+    st ← FS.readFile (build (name <+> ".stat"));
+    say (name <+> ": utilisation (yosys)");
+    sayAll (keep cellLine (lines st))
+
+------------------------------------------------------------------------------------
+-- bit: nextpnr-xilinx, fasm2frames, xc7frames2bit
+
+structure Dirs where
+  chipdb : String   -- the directory holding xc7a35tcsg324.bin
+  db : String       -- the directory holding artix7/
+
+def dirs : EIO Dirs := do
+  c ← dirOf "GOLEM_CHIPDB" "the nextpnr chip database directory";
+  b ← dirOf "GOLEM_DB" "Project X-Ray's database (the directory holding artix7/)";
+  EIO.pure (Dirs.mk c b)
+
+def sysTiming (log : String) : Option String :=
+  match lastOf (keep (fun (l : String) => String.contains l "ck_CLKOUT0_g") (keep timingLine (lines log))) with
+  | .nil => .none
+  | .cons l _ => .some l
+
+def timingOk (target log : String) : Bool := match sysTiming log with
+  | .some l => String.contains l target
+  | .none => .false
+
+def timingTargetText (v : GBoard.Variant) : String :=
+  match v with
+  | .four => "50 MHz (20 ns; harts enabled every other cycle)"
+  | .fourNocache => "50 MHz (20 ns; harts enabled every other cycle)"
+  | .full => "100 MHz (10 ns)"
+  | .mc => "100 MHz (10 ns)"
+
+def timingReport (v : GBoard.Variant) : EIO Unit := do
+  let name := GBoard.Variant.name v;
+  p ← EIO.lift (FS.isFile (dev (name <+> ".nextpnr.log")));
+  match p with
+  | .false => EIO.fail ("no " <+> dev (name <+> ".nextpnr.log") <+> ": run `golem bit` first")
+  | .true => do
+    lg ← FS.readFile (dev (name <+> ".nextpnr.log"));
+    let tl := keep timingLine (lines lg);
+    say (name <+> " on the Arty A7-35T: timing (nextpnr)");
+    sayAll tl;
+    let ok := timingOk (GBoard.Variant.target v) lg;
+    FS.writeFile (dev (name <+> ".timing"))
+      (Hdl.concat (Hdl.map (fun (l : String) => "  " <+> String.trim l <+> "\n") tl)
+       <+> "target " <+> timingTargetText v <+> ": " <+> (if ok then "PASS" else "FAIL") <+> "\n");
+    say ("  wrote " <+> dev (name <+> ".timing") <+> ": target " <+> timingTargetText v
+      <+> " " <+> (if ok then "PASS" else "FAIL"));
+    match ok with
+    | .true => EIO.pure ()
+    | .false => EIO.fail ("timing: the " <+> timingTargetText v <+> " target did not pass ("
+        <+> dev (name <+> ".nextpnr.log") <+> ")")
+
+def pnrOne (d : Dirs) (v : GBoard.Variant) : EIO Unit := do
+  let name := GBoard.Variant.name v;
+  ensureDir (build device);
+  nx ← envOf "GOLEM_NEXTPNR" "nextpnr-xilinx";
+  f2 ← envOf "GOLEM_FASM2FRAMES" "fasm2frames";
+  xb ← envOf "GOLEM_XC7FRAMES2BIT" "xc7frames2bit";
+  tool nx (.cons "--chipdb" (.cons (d.chipdb <+> "/" <+> Arty.Device.chipdb .a35t <+> ".bin")
+    (.cons "--xdc" (.cons (build (name <+> ".xdc")) (.cons "--json" (.cons (build (name <+> ".json"))
+    (.cons "--fasm" (.cons (dev (name <+> ".fasm")) (.cons "--log" (.cons (dev (name <+> ".nextpnr.log"))
+    (.cons "--sdf" (.cons (dev (name <+> ".sdf")) (.cons "-q" .nil)))))))))))));
+  fr ← toolOutput f2 (.cons "--part" (.cons (Arty.Device.xrayPart .a35t)
+    (.cons "--db-root" (.cons (d.db <+> "/artix7") (.cons (dev (name <+> ".fasm")) .nil)))));
+  FS.writeFile (dev (name <+> ".frames")) fr;
+  tool xb (.cons "--part_file" (.cons (d.db <+> "/artix7/" <+> Arty.Device.xrayPart .a35t <+> "/part.yaml")
+    (.cons "--part_name" (.cons (Arty.Device.xrayPart .a35t) (.cons "--frm_file" (.cons (dev (name <+> ".frames"))
+    (.cons "--output_file" (.cons (dev (name <+> ".bit")) .nil))))))));
+  timingReport v
+
+def bitOne (d : Dirs) (boot : GBoard.Boot) (v : GBoard.Variant) : EIO Unit := do
+  let name := GBoard.Variant.name v;
+  synth name;
+  pnrOne d v;
+  FS.writeFile (dev (name <+> ".report"))
+    ("golem board report\n"
+     <+> "variant: " <+> name <+> "\n"
+     <+> "boot: " <+> GBoard.Boot.name boot <+> "\n"
+     <+> "part: XC7A35T (Arty A7-35T, xc7a35ticsg324-1L / xc7a35tcsg324-1)\n"
+     <+> "clock: " <+> GBoard.clockSummary <+> "\n"
+     <+> "ddr3: calibration done/fail on LD0/LD1; core held in reset until either\n"
+     <+> "timing: " <+> dev (name <+> ".timing") <+> "\n"
+     <+> "bitstream: " <+> dev (name <+> ".bit") <+> "\n"
+     <+> "load: openFPGALoader -b arty_a7_35t " <+> dev (name <+> ".bit") <+> "\n");
+  say ("  wrote " <+> dev (name <+> ".report"))
+
+def bit (vars : List GBoard.Variant) (boot : GBoard.Boot) : EIO Unit := do
+  d ← dirs;
+  EIO.forEach (fun (v : GBoard.Variant) => bitOne d boot v) vars
+
+------------------------------------------------------------------------------------
+-- The command line
+
+structure Opt where
+  words : List String
+  boot : GBoard.Boot
+  variant : String
+
+partial def parse : List String → Opt → Opt
+  | .nil, o => Opt.mk (List.reverse o.words) o.boot o.variant
+  | .cons w ws, o =>
+    if Hdl.strEq w "--boot" then
+      (match ws with
+       | .cons b bs => parse bs (Opt.mk o.words
+           (match GBoard.bootOf b with | .some x => x | .none => o.boot) o.variant)
+       | .nil => Opt.mk (List.reverse o.words) o.boot o.variant)
+    else if Hdl.strEq w "--variant" then
+      (match ws with
+       | .cons b bs => parse bs (Opt.mk o.words o.boot b)
+       | .nil => Opt.mk (List.reverse o.words) o.boot o.variant)
+    else parse ws (Opt.mk (.cons w o.words) o.boot o.variant)
+
+def usage : String :=
+  "usage: golem board | check | gen | synth | bit | timing | dry | all [--boot rom|loader] [--variant golem|mc|four|four_nol1|both]"
+
+def variants (o : Opt) : List GBoard.Variant :=
+  match GBoard.variantsOf o.variant with
+  | .some vs => vs
+  | .none => .cons .full .nil
+
+def run (o : Opt) : EIO Unit := match o.words with
+  | .cons "board" _ => boardCheck
+  | .cons "check" _ => boardCheck
+  | .cons "gen" _ => gen (variants o) o.boot
+  | .cons "synth" _ => EIO.bind (gen (variants o) o.boot) (fun u =>
+      EIO.forEach (fun (v : GBoard.Variant) => synth (GBoard.Variant.name v)) (variants o))
+  | .cons "bit" _ => EIO.bind (gen (variants o) o.boot) (fun u => bit (variants o) o.boot)
+  | .cons "timing" _ => EIO.forEach (fun (v : GBoard.Variant) => timingReport v) (variants o)
+  | .cons "dry" _ => EIO.bind boardCheck (fun u => EIO.bind (gen (variants o) o.boot) (fun u => do
+      say "dry run: no synthesis or place-and-route (the Verilog and XDC are written)";
+      say ("hardware step: openFPGALoader -b arty_a7_35t " <+> dev "golem.bit")))
+  | .cons "all" _ => EIO.bind boardCheck (fun u => EIO.bind (gen (variants o) o.boot) (fun u =>
+      EIO.bind (EIO.forEach (fun (v : GBoard.Variant) => synth (GBoard.Variant.name v)) (variants o))
+        (fun u => bit (variants o) o.boot)))
+  | _ => EIO.fail usage
+
+def main : IO Unit := EIO.toIO (do
+  args ← EIO.lift IO.args;
+  let o := parse args (Opt.mk .nil GBoard.defaultBoot "golem");
+  run o)

@@ -65,10 +65,15 @@ void DG_SleepMs(uint32_t ms) {
 void DG_SetWindowTitle(const char *title) { (void)title; }
 
 /* Keys: from the UART only (w a s d: arrows, f: fire, space: use, enter, escape, y, n,
-   digits); a key is held for 150 ms. With nothing typed Doom plays its demos. */
-static unsigned char uart_key;
-static uint32_t uart_until;
-static int told;
+   digits); a key is held for 150 ms. With nothing typed Doom plays its demos.
+   The machine's UART holds one received byte, and DG_GetKey is called once a frame, so
+   every call drains what has arrived into a short queue: a byte typed while a key is
+   still held is not lost. */
+static unsigned char keyq[16];
+static int qhead, qtail;
+static unsigned char held_key;
+static uint32_t held_until;
+static int key_down;
 
 static unsigned char from_uart(int c) {
   switch (c) {
@@ -81,15 +86,25 @@ static unsigned char from_uart(int c) {
   }
 }
 
+static void keys_drain(void) {
+  int c;
+  while ((c = (int)UART_DATA) >= 0) {
+    unsigned char k = from_uart(c);
+    if (k && (qtail + 1) % 16 != qhead) { keyq[qtail] = k; qtail = (qtail + 1) % 16; }
+  }
+}
+
 int DG_GetKey(int *pressed, unsigned char *key) {
   uint32_t now = DG_GetTicksMs();
-  if (!told) {
-    int c = (int)UART_DATA;
-    unsigned char k = c < 0 ? 0 : from_uart(c);
-    if (k) { uart_key = k; uart_until = now + 150; *pressed = 1; *key = k; told = 1; return 1; }
-    return 0;
+  keys_drain();
+  if (key_down) {                      /* the release, then the next key next call */
+    if (now < held_until) return 0;
+    key_down = 0; *pressed = 0; *key = held_key; return 1;
   }
-  if (now >= uart_until) { told = 0; *pressed = 0; *key = uart_key; return 1; }
+  if (qhead != qtail) {
+    held_key = keyq[qhead]; qhead = (qhead + 1) % 16;
+    key_down = 1; held_until = now + 150; *pressed = 1; *key = held_key; return 1;
+  }
   return 0;
 }
 

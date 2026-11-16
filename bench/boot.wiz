@@ -1,0 +1,41 @@
+-- The boot flow, end to end, in the executable lockstep (sw/README.md). Run it with
+--   wiz check -I src bench/boot.wiz
+-- (it is outside tests/ because grail's per-test timeout is 300 s, and a cold check
+-- of the lockstep can take longer than that; with a warm elaboration cache it is
+-- seconds).
+import Rv.Lockstep
+import Rv.Progs
+import Rv.CBoot
+--
+--   1. the machine starts at 0 in the 16 KB on-chip RAM, which holds the boot
+--      loader (`Prog.boot`, src/Rv/Progs.wiz); it prints "wiz-rv boot", waits for
+--      the DDR calibration (0x80000040) and prints "DDR ok";
+--   2. it reads a load record from the UART ('L', address, length, bytes) and
+--      writes the payload into DDR at 0x40000000, then a 'G' record ('G',
+--      address), and jumps there;
+--   3. the payload is a compiled C program (sw/ctest/boothello.c, freestanding,
+--      built for DDR by sw/ctest/benchcrt0.S + sw/link.ld and encoded by
+--      app/bin2wiz.wiz as CBoot.hex): it prints "c ok". It is kept small because
+--      the kernel evaluates every instruction of the load; the larger benchmark
+--      (sw/ctest/bench.c, CBench.hex) is measured in sw/iss/iss.c and on the
+--      board (sw/README.md).
+--
+-- The specification models every I/O load as the UART's, so the boot loader's read
+-- of the DDR status takes the first input byte (1: calibrated, "DDR ok"). The
+-- lockstep checks the PC and every register at every instruction; at the end the
+-- trap, the output and memory, so the line below is the boot loader's and the
+-- program's output, and its instructions/cycles are the measured boot cost.
+
+def lines : List String → String
+  | .nil => ""
+  | .cons s ss => "; " ++ s ++ lines ss
+
+def bootBench : String :=
+  (fun (r : Ls.Result) => Nat.repr r.instrs ++ " instructions, " ++ Nat.repr r.cycles ++ " cycles, trap "
+    ++ Nat.repr r.trap ++ ", out \"" ++ String.mk (List.map Char.mk r.out) ++ "\" "
+    ++ (match r.problems with
+      | .nil => "agrees"
+      | ps => "DISAGREES" ++ lines ps))
+    (Ls.runIn 5 12 .true (Asm.assemble Prog.boot)
+      (.cons 1 (Boot.session (Hex.words CBoot.hex))) 20000)
+#eval bootBench
