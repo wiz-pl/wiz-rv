@@ -1,0 +1,1 @@
+tests/golem_bus.wiz:51:1: info: "golem bus: host wrote 0x600d, core read 24589, err 0 — PASS"

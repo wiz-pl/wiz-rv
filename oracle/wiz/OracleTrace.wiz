@@ -1,0 +1,160 @@
+import Rv.Isa
+import IO
+import Text
+-- The trace format shared by the oracle's sides (Wiz, the Python reference, Sail,
+-- Spike): `S <step> <pc> <trap> <x0> … <x31> <mem bytes>`.
+--
+-- `step` counts instructions, `pc` and the registers are the architectural state
+-- *before* instruction `step`, and the memory bytes are
+-- `[mem_base, mem_base + mem_count)`.  A line `# …` is a comment.  An ISA trace has
+-- `steps + 1` state lines (one initial state and one after each instruction); a core
+-- trace is projected from the core at its E phase, one line per instruction.
+--
+-- The fixtures are plain text (see oracle/fixtures/README.md):
+--
+--     <name>
+--     <cfg> <mbits> <steps> <mem_base> <mem_count>
+--     <instruction words, 8 hex digits, at address 0>
+--
+-- Nothing here is part of the core: this is verification infrastructure.
+
+------------------------------------------------------------------------------------
+-- Hex
+
+def Ox.digit (n : Nat) : Char :=
+  if Nat.lt n 10 then Char.mk (Nat.add 48 n) else Char.mk (Nat.add 87 n)
+
+def Ox.pad : Nat → Nat → List Char
+  | .zero, _ => .nil
+  | .succ k, n =>
+    List.append (Ox.pad k (Nat.div n 16)) (.cons (Ox.digit (Nat.mod n 16)) .nil)
+
+def Ox.hex (width n : Nat) : String := String.ofChars (Ox.pad width n)
+
+def Ox.val (c : Char) : Nat :=
+  let n := Char.code c;
+  if Nat.le 48 n then
+    (if Nat.le n 57 then Nat.sub n 48
+     else (if Nat.le 97 n then Nat.sub n 87 else Nat.sub n 55))
+  else 0
+
+def Ox.parseGo : Nat → List Char → Nat
+  | acc, .nil => acc
+  | acc, .cons c cs => Ox.parseGo (Nat.add (Nat.mul acc 16) (Ox.val c)) cs
+
+def Ox.parse (s : String) : Nat := Ox.parseGo 0 (String.chars (String.trim s))
+
+------------------------------------------------------------------------------------
+-- Fixtures
+
+structure Fx where
+  name : String
+  cfg : String
+  mbits : Nat
+  steps : Nat
+  mbase : Nat
+  mcount : Nat
+  words : List Nat
+
+def Fx.keep (l : String) : Bool :=
+  Bool.and (Bool.not (String.isEmpty (String.trim l)))
+    (Bool.not (String.startsWith (String.trim l) "#"))
+
+def Fx.lines (s : String) : List String :=
+  List.filter Fx.keep (String.splitOn s "\n")
+
+def Fx.tok (i : Nat) (l : List String) : Nat :=
+  match List.head (List.drop i l) with
+  | .some s => (match String.parseNat (String.trim s) with
+                | .some n => n
+                | .none => 0)
+  | .none => 0
+
+-- A fixture line is an instruction in hexadecimal: 8 digits is a 32-bit instruction
+-- (two halfwords, low first), 4 digits is a 16-bit (C) instruction. The image is
+-- halfwords, the same layout `Asm.assemble` produces.
+def Fx.halves1 (s : String) : List Nat :=
+  let n := Ox.parse s;
+  if Nat.le (List.length (String.chars (String.trim s))) 4 then .cons n .nil
+  else .cons (Rv.bits n 0 16) (.cons (Rv.bits n 16 16) .nil)
+def Fx.halves : List String → List Nat
+  | .nil => .nil
+  | .cons s ss => List.append (Fx.halves1 s) (Fx.halves ss)
+
+
+def Fx.ofLines : List String → Option Fx
+  | .nil => .none
+  | .cons name rest =>
+    (match rest with
+     | .nil => .none
+     | .cons hdr ws =>
+       let toks := String.splitOn (String.trim hdr) " ";
+       let cfg := match List.head toks with
+         | .some s => String.trim s
+         | .none => "rv32i";
+       .some (Fx.mk (String.trim name) cfg (Fx.tok 1 toks) (Fx.tok 2 toks) (Fx.tok 3 toks)
+         (Fx.tok 4 toks) (Fx.halves ws)))
+
+------------------------------------------------------------------------------------
+-- State lines
+
+def Tr.regsGo : Nat → Nat → (Nat → Nat) → List String
+  | .zero, _, _ => .nil
+  | .succ k, i, get =>
+    List.append (.cons (Ox.hex 8 (get i)) .nil) (Tr.regsGo k (Nat.succ i) get)
+
+def Tr.memGo : Nat → Nat → (Nat → Nat) → List String
+  | .zero, _, _ => .nil
+  | .succ k, a, get =>
+    List.append (.cons (Ox.hex 2 (get a)) .nil) (Tr.memGo k (Nat.succ a) get)
+
+def Tr.line (k pc trap : Nat) (regs mem : List String) : String :=
+  String.intercalate " " (.cons "S"
+    (.cons (Nat.repr k) (.cons (Ox.hex 8 pc)
+      (.cons (Ox.hex 8 trap) (List.append regs mem)))))
+
+-- The trap-state line: cause, tval, epc after the instruction of state `k` (the ISA's
+-- `trap`/`tval`/`epc`, the core's latched trap state). Optional: a backend that has no
+-- trap state (Sail, Spike) emits none, and the comparison skips it.
+def Tr.trapLine (k cause tval epc : Nat) : String :=
+  String.intercalate " " (.cons "T"
+    (.cons (Nat.repr k) (.cons (Ox.hex 8 cause)
+      (.cons (Ox.hex 8 tval) (.cons (Ox.hex 8 epc) .nil)))))
+
+def Tr.header (fx : Fx) (mode : String) : List String :=
+  .cons "# rv-oracle-trace v1"
+    (.cons ("# fixture " ++ fx.name)
+      (.cons ("# trace " ++ mode)
+        (.cons ("# cfg " ++ fx.cfg ++ " mbits " ++ Nat.repr fx.mbits
+          ++ " steps " ++ Nat.repr fx.steps ++ " mem_base " ++ Nat.repr fx.mbase
+          ++ " mem_count " ++ Nat.repr fx.mcount) .nil)))
+
+def Tr.say : List String → IO Unit
+  | .nil => IO.pure ()
+  | .cons s ss => IO.bind (IO.println s) (fun u => Tr.say ss)
+
+------------------------------------------------------------------------------------
+-- The ISA (`Rv.Isa`) trace
+
+def Tr.isaLine (c : Cfg) (fx : Fx) (k : Nat) (s : Arch) : String :=
+  Tr.line k s.pc.toNat s.trap
+    (Tr.regsGo 32 0 (fun i => (Rv.reg s i).toNat))
+    (Tr.memGo fx.mcount fx.mbase (fun a => Rv.byte c s (Rv.w32 a)))
+
+def Tr.isaTrap (k : Nat) (s : Arch) : String :=
+  Tr.trapLine k s.trap s.tval.toNat s.epc.toNat
+
+def Tr.isaGo (c : Cfg) (fx : Fx) : Nat → Nat → Arch → List String
+  | .zero, k, s => .cons (Tr.isaLine c fx k s) (.cons (Tr.isaTrap k s) .nil)
+  | .succ f, k, s =>
+    List.append (List.append (.cons (Tr.isaLine c fx k s) .nil) (.cons (Tr.isaTrap k s) .nil))
+      (Tr.isaGo c fx f (Nat.succ k) (Rv.step c s))
+
+def Tr.isaMain (path : String) : IO Unit :=
+  IO.bind (IO.readFile path) (fun text =>
+    match Fx.ofLines (Fx.lines text) with
+    | .none => IO.println ("oracle: bad fixture " ++ path)
+    | .some fx =>
+      let c := Cfg.mk 5 fx.mbits .false;
+      Tr.say (List.append (Tr.header fx "isa")
+        (Tr.isaGo c fx fx.steps 0 (Arch.start c fx.words))))

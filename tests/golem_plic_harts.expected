@@ -1,0 +1,1 @@
+tests/golem_plic_harts.wiz:117:1: info: "golem plic harts: 144 cycles; hart 0 [2 2147483659 2 100 0 ] hart 1 [2 2147483659 3 101 1 ] hart 2 [2 2147483659 5 102 2 ] hart 3 [2 2147483659 6 103 3 ]; pending 0 — PASS"

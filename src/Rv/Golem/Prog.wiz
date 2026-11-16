@@ -1,0 +1,84 @@
+import Rv.Asm
+import Rv.Progs
+-- The golem boot ROM: a tiny program at address 0 that boots the SoC, checks the
+-- DDR3 and the host loader, draws three pixels into the framebuffer (which the OLED
+-- controller then streams), copies a routine into DDR and calls it there, and prints
+-- a line per step on the UART. It is the simulation's program (tests/golem.wiz); the
+-- same image is what a board would have in the on-chip RAM.
+--
+-- Registers: x15 the UART's address, x11 the DDR's, x1 the return address, x10 the
+-- string, x5 … x7 scratch. No M-extension instruction, so it runs on any core.
+
+-- print the zero-terminated string at x10 (the UART store stalls until it is sent)
+def GProg.puts : List Asm :=
+  A.label "g.puts" :: A.lbu 5 0 10 :: A.beqz 5 "g.puts.e" :: A.sb 5 0 15 :: A.addi 10 10 1 ::
+  A.j "g.puts" :: A.label "g.puts.e" :: A.ret :: .nil
+
+-- copy the image `hs` to x11 + 256 + 2k, one store per halfword (an assembled image is
+-- halfwords since the C extension, as `D.copyWords` has it)
+def GProg.copy : Nat → List Nat → List Asm
+  | _, .nil => .nil
+  | k, .cons h hs =>
+    A.li 7 (Int.ofNat h) :: A.sh 7 (Int.ofNat (256 + 2 * k)) 11 :: GProg.copy (Nat.succ k) hs
+
+-- the DDR routine (adds 7 to x5, doubles it, returns): copied and called from DDR
+def GProg.ddrRoutine : List Nat := D.routine
+
+-- the banner, the DDR status, the host's word (0: no loader) and the timer
+def GProg.head : List Asm :=
+  A.lui 15 524288 ::                              -- x15 = 0x80000000 (the UART)
+  A.la 10 "g.banner" :: A.call "g.puts" ::
+  -- the calibration (the simulated stub is always done; on a board this waits)
+  A.label "g.wait" :: A.lw 5 64 15 :: A.beqz 5 "g.wait" ::
+  -- the host loader wrote 0x600d to DDR[0]; 0 means no loader
+  A.lui 11 262144 :: A.lw 6 0 11 :: A.beqz 6 "g.hostok" :: A.li 7 24589 :: A.bne 6 7 "g.fail" ::
+  A.label "g.hostok" :: A.la 10 "g.host" :: A.call "g.puts" ::
+  -- the cycle counter must have counted
+  A.lw 6 16 15 :: A.beqz 6 "g.fail" ::
+  A.la 10 "g.timer" :: A.call "g.puts" :: .nil
+
+-- three pixels: red, green, blue at (0, 0), (1, 0), (2, 0)
+def GProg.pixels : List Asm :=
+  A.lui 1 528384 ::
+  A.li 2 63488 :: A.sh 2 0 1 ::
+  A.li 2 2016 :: A.sh 2 2 1 ::
+  A.li 2 31 :: A.sh 2 4 1 ::
+  A.la 10 "g.fb" :: A.call "g.puts" :: .nil
+
+def GProg.start : List Asm := List.append GProg.head GProg.pixels
+
+def GProg.ddrPart : List Asm :=
+  List.append (GProg.copy 0 GProg.ddrRoutine)
+    (A.addi 5 0 10 :: A.jalr 1 11 256 ::
+     A.li 6 34 :: A.bne 5 6 "g.fail" ::
+     A.la 10 "g.ddr" :: A.call "g.puts" :: A.j "g.done" :: .nil)
+
+def GProg.tail : List Asm :=
+  A.label "g.fail" :: A.la 10 "g.fail.s" :: A.call "g.puts" ::
+  A.label "g.done" :: A.ebreak :: .nil
+
+def GProg.strings : List Asm :=
+  List.append (A.string "g.banner" "golem boot\n")
+    (List.append (A.string "g.host" "host ok\n")
+    (List.append (A.string "g.timer" "timer ok\n")
+    (List.append (A.string "g.fb" "framebuffer\n")
+    (List.append (A.string "g.ddr" "ddr ok\n")
+    (A.string "g.fail.s" "FAIL\n")))))
+
+def GProg.golem : List Asm :=
+  List.append GProg.start (List.append GProg.ddrPart (List.append GProg.tail
+    (List.append GProg.puts GProg.strings)))
+
+-- the same without the framebuffer stores: the specification (Rv.step) sends every
+-- store with bit 31 set to the output port, so a lockstep run would see the pixels as
+-- UART bytes; the OLED has its own simulation (src/Rv/Golem/OledSim.wiz)
+def GProg.simStrings : List Asm :=
+  List.append (A.string "g.banner" "golem boot\n")
+  (List.append (A.string "g.host" "host ok\n")
+  (List.append (A.string "g.timer" "timer ok\n")
+  (List.append (A.string "g.ddr" "ddr ok\n")
+  (A.string "g.fail.s" "FAIL\n"))))
+
+def GProg.sim : List Asm :=
+  List.append GProg.head (List.append GProg.ddrPart (List.append GProg.tail
+    (List.append GProg.puts GProg.simStrings)))

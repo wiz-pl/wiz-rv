@@ -1,0 +1,50 @@
+-- test: check
+import Hdl.Core
+import Rv.Golem.CohModel
+import Text
+-- The 4-hart mailbox ring in the coherence model (src/Rv/Golem/CohModel.wiz), the
+-- cases from tests/golem_litmus.wiz that touch MMIO flags. Each hart writes its data
+-- in DDR, then posts an MMIO flag (`.stu`), and the next hart waits on that flag
+-- (`.guardU`) before reading the data. Under the multi-cycle mode (`CM.core`: no store
+-- buffer, write-through incoherent L1, MMIO flags uncached) the only outcome must be
+-- the sequential one, [4,1,2,3]; every hart is a separate 16-byte line, so the test
+-- does not rely on the L1's line size. A weak outcome or a deadlock (99) fails.
+--
+-- The RTL/MMIO version of the same ring is tests/golem_four_ring.wiz.
+
+def L.headOr0 : List Nat → Nat
+  | .nil => 0
+  | .cons x _ => x
+
+def L.show (xs : List Nat) : String :=
+  "[" ++ Hdl.concat (List.map (fun (k : Nat) => Nat.repr k ++ " ") xs) ++ "]"
+
+def L.ring0 : List Op := .cons (.st 64 1) (.cons (.stu 16 1) (.cons (.guardU 19 1) (.cons (.ld 256) .nil)))
+def L.ring1 : List Op := .cons (.guardU 16 1) (.cons (.ld 64) (.cons (.st 128 2) (.cons (.stu 17 1) .nil)))
+def L.ring2 : List Op := .cons (.guardU 17 1) (.cons (.ld 128) (.cons (.st 192 3) (.cons (.stu 18 1) .nil)))
+def L.ring3 : List Op := .cons (.guardU 18 1) (.cons (.ld 192) (.cons (.st 256 4) (.cons (.stu 19 1) .nil)))
+
+def L.ringOut (s : St) : List Nat :=
+  List.map (fun (h : Hart) => L.headOr0 h.regs) s.harts
+
+def L.isRing (o : List Nat) : Bool :=
+  Hdl.natsEq o (.cons 4 (.cons 1 (.cons 2 (.cons 3 .nil))))
+
+def L.count (p : List Nat → Bool) : List (List Nat) → Nat
+  | .nil => 0
+  | .cons x xs => Nat.add (if p x then 1 else 0) (L.count p xs)
+
+def L.eqLL : List (List Nat) → List (List Nat) → Bool
+  | .nil, .nil => .true
+  | .cons x xs, .cons y ys => Bool.and (Hdl.natsEq x y) (L.eqLL xs ys)
+  | _, _ => .false
+
+def L.report : String :=
+  let progs : List (List Op) := .cons L.ring0 (.cons L.ring1 (.cons L.ring2 (.cons L.ring3 .nil)));
+  let core := CM.outcomes CM.core progs L.ringOut;
+  let sc := CM.outcomes CM.sc progs L.ringOut;
+  let ok := Bool.and (Nat.beq (L.count L.isRing core) 1) (L.eqLL core sc);
+  "golem four ring (CM.core): " ++ Hdl.concat (List.map (fun (o : List Nat) => L.show o ++ " ") core)
+    ++ "— " ++ (if ok then "PASS" else "FAIL")
+
+#eval L.report

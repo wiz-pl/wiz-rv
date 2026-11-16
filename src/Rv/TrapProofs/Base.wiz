@@ -1,0 +1,161 @@
+import Rv.Proofs
+-- The definitions and glue for the trap-entry theorem (docs/csr.md); each claim is its
+-- own file in src/Rv/TrapProofs, so `grail build` checks each in its own job (one
+-- process per claim keeps the memory per check bounded).
+-- Outside grail: scripts/trap-proofs.sh.
+-- Kernel-checked trap-entry, interrupt, MRET, WFI and CSR claims for the multi-cycle
+-- RV32E core (16 registers, 2 KB), in the style of src/Rv/Proofs.wiz: the core starts
+-- in its decode phase on an instruction word, with its CSR file, mtval and register
+-- file holding the architectural state's; after two cycles (decode, execute) what it
+-- holds is what the specification's step says. The theorem and what is (not) covered:
+-- docs/csr.md, "The trap-entry theorem".
+--
+-- What stays symbolic: the PC, every register, memory, mepc, mtval, mscratch and mcause's
+-- old values, the ports, and the core's other leftovers (the latches `Pf.at` takes).
+-- What is concrete: `mstatus`, `mie`, `mtvec` and the interrupt inputs, because trap
+-- entry computes `mstatus` and the vector from them with bit operations that the
+-- core's gates and the specification's `Rv.setBit` only meet at values (the same
+-- bridge as rv-core-proofs.md §6 item 1, for `BitVec.add`).
+
+-- the handler's address (mtvec, direct mode)
+def Pf.H : Nat := 256
+
+-- the core's CSR file for an architectural state (mepc is `epc`, mtval is `tval`)
+def Pf.csrOf (a : Arch) : CsrFile HwTy.El :=
+  CsrFile.mk a.csr.mstatus a.csr.mie a.csr.mtvec a.csr.mscratch a.epc a.csr.mcause
+
+-- the core in decode on `w` at `a`, CSRs and mtval included
+def Pf.atC (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32) (cnt srd : BitVec 5)
+    (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) : CoreSt 4 9 HwTy.El :=
+  Pf.atX a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio a.tval (Pf.csrOf a)
+
+-- the CSR states: running with a handler (mstatus MIE, mie MTIE and MEIE, mtvec H), and
+-- inside a handler (MIE clear, MPIE set)
+def Pf.csrRun (a : Arch) : Csr := Csr.mk (Rv.w32 6152) (Rv.w32 2176) (Rv.w32 Pf.H) a.csr.mscratch a.csr.mcause
+def Pf.csrIn (a : Arch) : Csr := Csr.mk (Rv.w32 6272) (Rv.w32 2176) (Rv.w32 Pf.H) a.csr.mscratch a.csr.mcause
+
+-- running, a handler installed, no interrupt pending
+def Pf.withH (a : Arch) : Arch :=
+  Arch.mk a.pc a.regs a.mem 0 a.tval a.epc (Pf.csrRun a) (Rv.w32 0) a.out a.inp a.res
+-- the same with the timer interrupt pending (MTIP)
+def Pf.withIrq (a : Arch) : Arch :=
+  Arch.mk a.pc a.regs a.mem 0 a.tval a.epc (Pf.csrRun a) (Rv.w32 128) a.out a.inp a.res
+-- inside the handler, no interrupt pending
+def Pf.inH (a : Arch) : Arch :=
+  Arch.mk a.pc a.regs a.mem 0 a.tval a.epc (Pf.csrIn a) (Rv.w32 0) a.out a.inp a.res
+
+-- the core's inputs: idle, or idle with MTIP high
+def Pf.mtip : In HwTy.El :=
+  In.mk (BitVec.ofNat 1 1) (BitVec.ofNat 32 4294967295) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
+    (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 1) (BitVec.ofNat 1 0)
+
+def Pf.stepX (x : In HwTy.El) (s : CoreSt 4 9 HwTy.El) : CoreSt 4 9 HwTy.El :=
+  Bundle.ofEl (CoreSt.bundle 4 9) (coreStep (r := HwTy.El) 4 9 .false s x).1
+
+-- what is compared: the PC, the trap CSRs, mtval and the halted cause
+structure Pf.Entry where
+  pc : BitVec 32
+  mepc : BitVec 32
+  mcause : BitVec 32
+  mstatus : BitVec 32
+  mtval : BitVec 32
+  trap : Nat
+
+def Pf.entryCore (s : CoreSt 4 9 HwTy.El) : Pf.Entry :=
+  Pf.Entry.mk s.pc s.csr.mepc s.csr.mcause s.csr.mstatus s.tval s.trap.toNat
+def Pf.entryOf (a : Arch) : Pf.Entry :=
+  Pf.Entry.mk a.pc a.epc a.csr.mcause a.csr.mstatus a.tval a.trap
+
+-- the glue (as `Pf.ok`, through `Pf.glueO`): the decode cycle from `Pf.atC` reads
+-- memory at the PC (one cycle; only the read data compared)
+def Pf.readQC (x : In HwTy.El) (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
+    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) :
+    ((Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q0, (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q1,
+     (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q2, (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)).q3) = Pf.fetchQ a m0 m1 m2 m3 := rfl
+
+-- any observation `F` of the two cycles, given `F` of them with the word's bytes read
+def Pf.glueC {0 T : Type} (F : CoreSt 4 9 HwTy.El → T) (x : In HwTy.El) (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
+    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) (o : T)
+    (hE : F (Pf.stepX x (Pf.setQ (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) (Pf.bytes w))) = o)
+    (h : Pf.fetchQ a m0 m1 m2 m3 = Pf.bytes w) :
+    F (Pf.stepX x (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio))) = o :=
+  Pf.glueO (T := T) (fun (s : CoreSt 4 9 HwTy.El) => F (Pf.stepX x s))
+    (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) (Pf.bytes w) o
+    (Pf.readW (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) (Pf.fetchQ a m0 m1 m2 m3) w
+      (Pf.readQC x a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio) h)
+    hE
+
+def Pf.entryOk (x : In HwTy.El) (a : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
+    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1) (o : Pf.Entry)
+    (hE : Pf.entryCore (Pf.stepX x (Pf.setQ (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) (Pf.bytes w))) = o)
+    (h : Pf.fetchQ a m0 m1 m2 m3 = Pf.bytes w) :
+    Pf.entryCore (Pf.stepX x (Pf.stepX x (Pf.atC a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio))) = o :=
+  Pf.glueC (T := Pf.Entry) Pf.entryCore x a w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio o hE h
+
+------------------------------------------------------------------------------------
+-- (1) Exception entry: from a state with a handler, ECALL / EBREAK / an illegal word
+-- enter it: pc = mtvec, mepc = the PC, mcause the standard code, mtval, mstatus (MPIE =
+-- MIE, MIE = 0, MPP = M), still running.
+
+def Pf.EnterClaimAt (p : Arch → Arch) (w : Nat) : Prop :=
+  (a : Arch) → (m0 m1 m2 m3 : BitVec 9 → BitVec 8) → (x1 x2 acc dv rm : BitVec 32) → (cnt srd : BitVec 5) → (sf3 : BitVec 3) → (slo : BitVec 2) → (sio : BitVec 1) →
+  Pf.fetchQ (p a) m0 m1 m2 m3 = Pf.bytes w →
+  Pf.entryCore (Pf.stepX In.idle (Pf.stepX In.idle (Pf.atC (p a) w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)))
+    = Pf.entryOf (Rv.exec Pf.cfg (p a) w)
+def Pf.EnterClaim (w : Nat) : Prop := Pf.EnterClaimAt Pf.withH w
+
+------------------------------------------------------------------------------------
+-- (2) MRET: from inside the handler, pc = mepc, MIE = MPIE, MPIE = 1; nothing else of
+-- the trap state moves.
+
+------------------------------------------------------------------------------------
+-- (3) Interrupt entry: with MIE and MTIE set and MTIP pending, the instruction in
+-- decode (any fixed word but WFI) is not executed: the core enters the handler with
+-- mepc = its PC, mcause 0x80000007, mtval 0, and the specification's `Rv.step` (which
+-- fetches the same word) does the same. `hs` is the specification's fetch.
+
+-- `Rv.step` with the fetched word given
+def Pf.stepF (c : Cfg) (s : Arch) (w : Nat) : Arch := Rv.stepW c s w
+
+def Pf.IrqClaim (x : In HwTy.El) (p : Arch → Arch) (w : Nat) : Prop :=
+  (a : Arch) → (m0 m1 m2 m3 : BitVec 9 → BitVec 8) → (x1 x2 acc dv rm : BitVec 32) → (cnt srd : BitVec 5) → (sf3 : BitVec 3) → (slo : BitVec 2) → (sio : BitVec 1) →
+  Pf.fetchQ (p a) m0 m1 m2 m3 = Pf.bytes w → Rv.fetch Pf.cfg (p a) = w →
+  Pf.entryCore (Pf.stepX x (Pf.stepX x (Pf.atC (p a) w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)))
+    = Pf.entryOf (Rv.step Pf.cfg (p a))
+
+-- the glue on the specification's side: `Rv.step` is `Pf.stepF` at the fetched word
+def Pf.stepAt (c : Cfg) (s : Arch) (w : Nat) (hs : Rv.fetch c s = w) :
+    Pf.entryOf (Rv.step c s) = Pf.entryOf (Pf.stepF c s w) :=
+  Eq.congrArg (A := Nat) (B := Pf.Entry) (fun (v : Nat) => Pf.entryOf (Pf.stepF c s v)) (a := Rv.fetch c s) (b := w) hs
+
+def Pf.irqOk (x : In HwTy.El) (b : Arch) (w : Nat) (m0 m1 m2 m3 : BitVec 9 → BitVec 8) (x1 x2 acc dv rm : BitVec 32)
+    (cnt srd : BitVec 5) (sf3 : BitVec 3) (slo : BitVec 2) (sio : BitVec 1)
+    (hE : Pf.entryCore (Pf.stepX x (Pf.setQ (Pf.stepX x (Pf.atC b w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)) (Pf.bytes w))) = Pf.entryOf (Pf.stepF Pf.cfg b w))
+    (h : Pf.fetchQ b m0 m1 m2 m3 = Pf.bytes w) (hs : Rv.fetch Pf.cfg b = w) :
+    Pf.entryCore (Pf.stepX x (Pf.stepX x (Pf.atC b w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio)))
+      = Pf.entryOf (Rv.step Pf.cfg b) :=
+  Eq.trans (A := Pf.Entry)
+    (a := Pf.entryCore (Pf.stepX x (Pf.stepX x (Pf.atC b w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio))))
+    (b := Pf.entryOf (Pf.stepF Pf.cfg b w)) (c := Pf.entryOf (Rv.step Pf.cfg b))
+    (Pf.entryOk x b w m0 m1 m2 m3 x1 x2 acc dv rm cnt srd sf3 slo sio (Pf.entryOf (Pf.stepF Pf.cfg b w)) hE h)
+    (Eq.symm (A := Pf.Entry) (a := Pf.entryOf (Rv.step Pf.cfg b)) (b := Pf.entryOf (Pf.stepF Pf.cfg b w)) (Pf.stepAt Pf.cfg b w hs))
+
+-- the interrupt taken before an ADD (the word does not matter but must be fixed)
+
+------------------------------------------------------------------------------------
+-- (4) WFI: with MTIP pending and enabled it completes (pc + 4) and is not interrupted
+-- (the interrupt is taken on the next instruction); with nothing pending it stalls
+-- (the core stays in E on it, nothing moves, and the specification's step is the
+-- identity).
+
+------------------------------------------------------------------------------------
+-- (5) A CSR instruction: CSRRW x3, mscratch, x1 reads the old mscratch into x3 and
+-- writes x1 to it (both symbolic).
+
+structure Pf.CsrObs where
+  pc : BitVec 32
+  rd : BitVec 32
+  mscratch : BitVec 32
+
+def Pf.csrCore (s : CoreSt 4 9 HwTy.El) : Pf.CsrObs := Pf.CsrObs.mk s.pc (s.rfa (BitVec.ofNat 4 3)) s.csr.mscratch
+def Pf.csrSpec (a : Arch) : Pf.CsrObs := Pf.CsrObs.mk a.pc (Rv.reg a 3) a.csr.mscratch

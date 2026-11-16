@@ -1,0 +1,42 @@
+-- test: check
+import Rv.Isa
+import Rv.Golem.Prog
+import Text
+-- The golem boot ROM (`GProg.sim`, src/Rv/Golem/Prog.wiz) as a program run on the ISA
+-- specification (`Rv.run`): the banner, the DDR status wait, the host word in DDR[0]
+-- (0: no loader), the cycle counter, and a routine copied into DDR and called there.
+-- The output bytes must be the expected text and the machine must stop with trap 2
+-- (EBREAK).
+--
+-- The core itself is the multi-cycle one the rest of the project checks against this
+-- same specification (tests/lockstep.wiz); this file checks the golem ROM and its
+-- machine-level program. The three golem checks are separate because each kernel run's
+-- state is large and the compiled machine is over the build cap (DESIGN.md,
+-- "Simulation").
+
+def G.out : List Nat → String
+  | .nil => ""
+  | .cons c cs => if Nat.beq c 13 then G.out cs
+    else String.mk (.cons (Char.mk c) .nil) ++ G.out cs
+
+def G.run : Arch :=
+  Rv.run (Cfg.rv32im 14) 3000
+    (Rv.setInp (Arch.start (Cfg.rv32im 14) (Asm.assemble GProg.sim)) (.cons 1 .nil))
+
+def G.expected : String := "golem boot\nhost ok\ntimer ok\nddr ok\n"
+
+-- The verdict on a final state. It takes the state as a parameter so that checking it
+-- evaluates nothing: a `let` of `G.run` with a native operation on it (`Nat.beq
+-- G.run.trap 2`) is evaluated by the kernel when the definition is checked, running all
+-- the steps in the kernel (a space leak of several MB per step), before `#eval` runs
+-- them again in the interpreter.
+def G.verdict (r : Arch) : String :=
+  let s := G.out (List.reverse r.out);
+  let ok := Bool.and (String.beq s G.expected) (Nat.beq r.trap 2);
+  "golem boot: trap " ++ Nat.repr r.trap ++ ", pc " ++ Nat.repr r.pc.toNat
+    ++ ", out \"" ++ s ++ "\", "
+    ++ (if ok then "PASS" else "FAIL")
+
+def G.report : String := G.verdict G.run
+
+#eval G.report
