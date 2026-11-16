@@ -446,7 +446,12 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
   let tvalE : r B32 := Hw.mux intrE (Hw.cat (Hw.lit 28 0) irqCode) (Hw.mux (Hw.not e.legal) e.raw
     (Hw.mux e.ecall (Hw.lit 32 0) (Hw.mux e.ebreak (Hw.lit 32 0)
     (Hw.mux misJ target (Hw.mux (gate e.load mis) sum (Hw.mux (gate e.store mis) sum (Hw.lit 32 0)))))));
-  let eOk := gate eV (isK code 0);
+  -- E completes without a trap (`code` 0), for a CSR instruction or MRET only: neither is
+  -- a jump, branch, load or store, so only an interrupt, an illegal encoding, ECALL or
+  -- EBREAK can make it trap. (Not `isK code 0`: through that, the forwarded operands'
+  -- branch compare and the misalignment checks reached the CSR file's enables, and
+  -- doom_top placed at 69 MHz.)
+  let eOkSys := gate eV (Hw.and (Hw.and (Hw.not intrE) e.legal) (Hw.and (Hw.not e.ecall) (Hw.not e.ebreak)));
   -- M: the partial products (unsigned 16 × 16), the sign correction of the high word
   let aL : r B32 := Hw.cat (Hw.lit 16 0) (Hw.slice 0 16 a : r B16);
   let aH : r B32 := Hw.cat (Hw.lit 16 0) (Hw.slice 16 16 a : r B16);
@@ -494,9 +499,9 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
     (Hw.mux (Hw.or (isK f3 2) (isK f3 6)) (Hw.or csrOld csrSrc)
       (Hw.and csrOld (Hw.not csrSrc)));
   let csrW := coreCsrWarl e.csrAddr csrNew;
-  let csrWe := gate e.csr (gate advE (gate eOk e.csrWrite));
+  let csrWe := gate e.csr (gate advE (gate eOkSys e.csrWrite));
   let csrAt := fun (k : Nat) => (gate csrWe (isK e.csrAddr k) : r W1);
-  let retE := gate e.mret (gate advE eOk);
+  let retE := gate e.mret (gate advE eOkSys);
   -- a trap taken at R: mepc, mcause (bit 31 and the code for an interrupt, the standard
   -- code for an exception), mtval; mstatus only when it enters the handler (a halt
   -- leaves it, as `Rv.stop` does)
@@ -511,7 +516,7 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
   let mcauseN := Hw.mux rTrapV causeR (Hw.mux (csrAt Csr.aMcause) csrW s.csr.mcause);
   let tvalE2 := Hw.mux rIntr (Hw.lit 32 0)
     (Hw.mux rTrapV rr.tval (Hw.mux (csrAt Csr.aMtval) csrW s.tval));
-  let redirect := gate advE (gate eV (Hw.or jump (gate e.mret eOk)));
+  let redirect := gate advE (gate eV (Hw.or jump (gate e.mret eOkSys)));
   let targetR := Hw.mux e.mret s.csr.mepc (Hw.mux e.jalr jalrT pcImm);
   let rdNZ := Hw.not (isK rdE 0);
   let weE := gate eV (gate rdNZ (Hw.or (Hw.or (Hw.or e.lui e.auipc) (Hw.or e.jal e.jalr))
