@@ -1,1 +1,1 @@
-tests/golem.wiz:35:1: info: "golem boot: trap 2, pc 164, out \"golem boot\nhost ok\ntimer ok\nddr ok\n\", PASS"
+tests/golem.wiz:42:1: info: "golem boot: trap 2, pc 200, out \"golem boot\nhost ok\ntimer ok\nddr ok\n\", PASS"
