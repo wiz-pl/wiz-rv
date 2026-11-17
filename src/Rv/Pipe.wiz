@@ -378,7 +378,8 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
   -- an I/O access waits for an older DDR store to leave the store buffer before it is
   -- performed (otherwise an MMIO flag can pass a pending data store: the `ring pipe`
   -- anomaly in the coherence note); an I/O store also waits for the UART
-  let ioStall := gate m.io (Hw.or bu.sbv (gate m.store (Hw.not x.txReady)));
+  -- (`m.io` is bit 31 of E's adder for every instruction: only loads and stores wait)
+  let ioStall := gate m.io (Hw.or (gate (Hw.or m.load m.store) bu.sbv) (gate m.store (Hw.not x.txReady)));
   let stallM := gate mOk (Hw.or (gate m.store (gate m.ddr bu.sbv)) ioStall);
   let goM := gate mOk (Hw.and (Hw.not kill) (Hw.not stallM));
   let goSt := gate goM m.store;
@@ -645,10 +646,14 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
   let f1Mn := gate nMwe (Hw.eq nMrd rs1n);
   let f2Mn := gate nMwe (Hw.eq nMrd rs2n);
   let luN := gate nMlate (Hw.or (gate (ek e.u1 u1) f1Mn) (gate (ek e.u2 u2) f2Mn));
+  -- (the instruction after a taken branch or jump is squashed in the cycle `fe.rdr` is set;
+  -- if E is held then, by a stall in M, its valid and I-miss bits must be cleared too, or
+  -- it runs once the branch leaves M: an I-miss bubble there refetches the fall-through)
   let eVn : r W1 := Hw.mux fe.rdr (Hw.lit 1 0)
     (Hw.mux eHold e.v (gate advE (gate fD (gate ihit (Hw.not h2need)))));
-  let ω eN := PpE.mk eVn
-    (Hw.mux eHold e.imiss (gate advE (gate fD (Hw.not ihit))))
+  let eImn : r W1 := Hw.mux fe.rdr (Hw.lit 1 0)
+    (Hw.mux eHold e.imiss (gate advE (gate fD (Hw.not ihit))));
+  let ω eN := PpE.mk eVn eImn
     (Hw.mux eHold e.pc fe.pc) (Hw.mux eHold e.ins d.iw)
     (Hw.mux eHold e.raw (Hw.mux d.c (Hw.cat (Hw.lit 16 0) (Hw.slice 0 16 wD : r B16)) wD))
     (Hw.mux eHold e.c d.c) (Hw.mux eHold e.h2 fe.h2)

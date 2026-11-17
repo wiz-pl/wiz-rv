@@ -356,7 +356,7 @@ structure Dec (r : HwTy → Type) where
   f5 : r B5       -- A: the operation
   csr : r W1      -- a CSR instruction (CSRRW/CSRRS/CSRRC and their immediates)
   csrAddr : r B12
-  csrWrite : r W1 -- it writes the CSR (CSRRW, or rs1/zimm not zero)
+  csrWrite : r W1 -- it writes the CSR (CSRRW, CSRRWI, or rs1/zimm not zero)
   mret : r W1
   wfi : r W1
   c : r W1        -- a 16-bit (C) instruction: the PC advances by 2
@@ -548,7 +548,7 @@ def decodeX {r : HwTy → Type} [Hw r] (ab : Nat) (mx : Bool) (c : r W1) (we : r
   let csrAddr : r B12 := Hw.slice 20 12 we;
   let csrKind := Hw.and sysOp (Hw.or (Hw.or (isK f3 1) (isK f3 2)) (Hw.or (isK f3 3)
     (Hw.or (isK f3 5) (Hw.or (isK f3 6) (isK f3 7)))));
-  let csrWrite := Hw.or (isK f3 1) (Hw.not (isK r1 0));
+  let csrWrite := Hw.or (Hw.or (isK f3 1) (isK f3 5)) (Hw.not (isK r1 0));
   let csrLegal := Hw.and csrKind (Hw.and (coreCsrExists csrAddr)
     (Hw.or (Hw.not csrWrite) (coreCsrWritable csrAddr)));
   let mret := isK we 807403635;
