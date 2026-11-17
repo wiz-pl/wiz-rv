@@ -85,6 +85,31 @@ still a clash). Here: renamed (`CoreSt`, `UTx`, `W1`, `W8`). Wanted: module-qual
 names, or at least identical re-definitions accepted, or an import that hides or
 renames.
 
+### L8. A `let` of a closed `Bool` is evaluated when the definition is checked (slow)
+
+```
+def C.timer : Nat × Nat := …           -- 163 steps of `Rv.step` (tests/golem_intc.wiz)
+def R : String := let ok := Nat.beq C.timer.1 5; "a"     -- 0.98 GB, 24 s
+def R : String := let n := C.timer.1; Nat.repr n         -- 0.40 GB, 5 s (179 steps)
+```
+
+`wiz check` of a definition (no `#eval` in the file) runs the value of a `let` whose
+type is `Bool` and whose value is closed, here 131 to 191 steps of the specification: it
+costs the same with `let ω`, with `let ok : Bool`, and when `ok` is unused. A `let` of
+a `Nat` or a `List Nat` with the same value is not run, and neither is the same
+expression used directly (`if Nat.beq C.timer.1 5 then …`). It is not the `#eval`
+interpreter, and far slower: the same runs take about 2 s under `#eval`.
+tests/golem_intc.wiz had `let ok := T.all (…)` over every result in `T.report`, so
+checking `T.report` ran the whole test (250 timer ticks and two 200-step core runs)
+before `#eval` ran it again: 4.47 GB and 186 s on a cold cache, which is what killed
+`grail test` under a 3 GB cap. With `ok` as a function of the results (`T.ok`, passed
+straight to `T.verdict`) the test module checks in about 2 s at the imports' 0.40 GB,
+with the same output. tests/golem_plic_harts.wiz has the same shape (`let ω ok` in
+`H.report`) but its 67 s are the `#eval` itself: without the `#eval` it checks in 4 s.
+Wanted: a `let` is not run while its definition is checked, whatever its type.
+(Measured at the `wiz-toolchain` pin, master@071a033a, under `light` with a private
+cache.)
+
 ## The HDL library
 
 ### H1. Memories (#166) and the fast simulator (#199) do not compose (bug, between PRs)

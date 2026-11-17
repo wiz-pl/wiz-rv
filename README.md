@@ -214,6 +214,37 @@ Build memory, measured at 408a249 (wiz master@071a033a, each command under `heav
   is probably one of the other executables (doomgen, rv, pgen, rvload, bin2wiz). The
   memory the full build needs is not yet known.
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request into master and every push to
+master. Every job uses the toolchain `wiz-toolchain` pins: wiz and grail from the wiz
+flake at that commit, substituted from the `badlydrawnwizards` Cachix cache, or built
+once by the `toolchain` job and kept in the Actions cache. wiz-ddr3's master is checked
+out next to the repository, where `grail.wiz` expects it. The jobs are:
+
+* **wiz check**: `scripts/ci-check.sh` checks every module under src/ and app/,
+  including the multi-cycle core's proofs (src/Rv/Proofs.wiz, src/Rv/TrapProofs/).
+* **oracle**: `oracle.py build`, then the selftest (`isa` and `core` against the
+  Python reference on every fixture) and the rvfi wrapper (Icarus lint, and its beats
+  against the Python reference on the five base fixtures).
+* **grail test (lockstep, plockstep, spec)**: both cores against the specification.
+* **grail test (golem)**: every tests/golem*.wiz, with `--test-timeout 600`. On a
+  cold elaboration cache, golem_intc needs about 4.5 GB. GitHub's 16 GB runners hold
+  that; a smaller runner needs at least 6 GB for this job.
+
+CI does not cover these:
+
+* the pipelined core's proofs (proofs/PipeProofs, `scripts/pipe-proofs.sh`, about 20
+  minutes each);
+* tests/long.wiz, which cannot pass at this pin because of the fixed 60 s program limit;
+* Sail, Spike and riscv-formal (`run-oracle.sh run`, `run-rvfi.sh --sby`);
+* any synthesis, place and route or Fmax. The Artix-7 flow needs nextpnr-xilinx and an
+  xc7a35t chip database, and neither is in nixpkgs or Cachix;
+* the boards.
+
+The elaboration cache (`~/.cache/wiz`) is kept per job in the Actions cache, so a run
+that leaves a test's imports unchanged pays the cold cost once.
+
 ## golem, the SoC
 
 `src/Rv/Golem.wiz` is the first top level that puts the pieces together: the pipelined

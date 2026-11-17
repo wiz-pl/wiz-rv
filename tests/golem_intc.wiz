@@ -266,19 +266,14 @@ def C.ext : Nat × Nat :=
   (C.word s 0, C.word s 4)
 
 
-def T.report : String :=
-  let t := T.timer;
-  let c := T.csr;
-  let u := T.uartPath;
-  let m := T.mboxPath;
-  let q := T.mbox0;
-  let x := T.ctxPath;
-  let y := T.uartCtx;
-  let z := T.extPath;
-  let b := T.boot;
-  let ct := C.timer;
-  let ce := C.ext;
-  let ok := T.all (.cons (Nat.beq t.1 100)
+-- every check. `ok` is a function of the results, and `T.report` passes it straight to
+-- `T.verdict`: a `let` of a closed `Bool` is evaluated when the definition is
+-- checked, so `let ok := …` in `T.report` ran the whole test while checking it, before
+-- `#eval` ran it again (FINDINGS.md, L8)
+def T.ok (t : Nat × Nat × Nat × Nat) (c : Nat × Nat) (u : Nat × Nat × Nat × Nat)
+    (m : Nat × Nat × Nat × Nat × Nat) (q x y z : List Nat) (b : Nat × Nat × Nat)
+    (ct ce : Nat × Nat) : Bool :=
+  T.all (.cons (Nat.beq t.1 100)
     (.cons (Nat.beq t.2.1 1)
     (.cons (Nat.beq t.2.2.1 Intc.mtiCause)
     (.cons (Nat.beq t.2.2.2 0)
@@ -305,7 +300,22 @@ def T.report : String :=
     (.cons (Nat.beq ct.2 6272)
     (.cons (Nat.beq ce.1 2147483659)
     (.cons (Nat.beq ce.2 6272)
-    .nil))))))))))))))))))))))))));
+    .nil))))))))))))))))))))))))))
+
+def T.verdict (ok : Bool) : String := if ok then " — PASS" else " — FAIL"
+
+def T.report : String :=
+  let t := T.timer;
+  let c := T.csr;
+  let u := T.uartPath;
+  let m := T.mboxPath;
+  let q := T.mbox0;
+  let x := T.ctxPath;
+  let y := T.uartCtx;
+  let z := T.extPath;
+  let b := T.boot;
+  let ct := C.timer;
+  let ce := C.ext;
   "golem intc: timer mtip at tick " ++ Nat.repr t.1 ++ ", taken " ++ Nat.repr t.2.1
     ++ ", cause " ++ Nat.repr t.2.2.1 ++ ", rearmed " ++ Nat.repr t.2.2.2
     ++ ", csr " ++ Nat.repr c.1 ++ "/" ++ Nat.repr c.2
@@ -320,6 +330,6 @@ def T.report : String :=
     ++ " entry " ++ Nat.repr b.2.2
     ++ "; core timer mcause " ++ Nat.repr ct.1 ++ " mstatus " ++ Nat.repr ct.2
     ++ "; core external mcause " ++ Nat.repr ce.1 ++ " mstatus " ++ Nat.repr ce.2
-    ++ (if ok then " — PASS" else " — FAIL")
+    ++ T.verdict (T.ok t c u m q x y z b ct ce)
 
 #eval T.report
