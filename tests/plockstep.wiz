@@ -58,6 +58,8 @@ def irqStressE : String := reportIrq 4 Prog.irqStress Prog.pulseAt 3000
 -- RV32I: x16 is a register
 def ddrE : String := report 4 Prog.ddr 600
 def ioE : String := report 4 Prog.ioload 100
+-- a taken branch held in M by the store buffer, its fall-through an I-miss (Prog.sbvBranch)
+def sbvBrE : String := report 4 Prog.sbvBranch 2000
 def x16I : String := report 5 Prog.x16 50
 def aluI : String := report 5 Prog.alu 400
 -- RV32IM: the M extension (and without it, MUL is illegal)
@@ -92,7 +94,7 @@ def say : List String → IO Unit
 def all : List String :=
   List.append (sumE :: aluE :: shiftE :: memE :: branchE :: sortE :: .nil)
     (List.append trapsE
-      (List.append (csrE :: csrImmE :: irqE :: irqStressE :: ddrE :: ioE :: x16I :: aluI :: mulI :: mulIM :: .nil)
+      (List.append (csrE :: csrImmE :: irqE :: irqStressE :: ddrE :: ioE :: sbvBrE :: x16I :: aluI :: mulI :: mulIM :: .nil)
         (List.append (cE :: cUE :: .nil)
           (List.append cBadE (bootE :: ctestE :: .nil)))))
 
