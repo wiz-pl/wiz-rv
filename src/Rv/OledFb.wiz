@@ -1,0 +1,125 @@
+import Rv.Oled
+-- The framebuffer behind the PmodOLEDrgb controller (src/Rv/Oled.wiz), double-buffered.
+--
+-- The controller sends the whole 96 × 64 frame on every refresh (a refresh takes about
+-- 75 % of the frame period). With one buffer, a frame that software draws while a
+-- refresh is under way shows torn: the rows the refresh has already sent come from the
+-- old frame and the rest from the new one, and the next refresh then shows the whole new
+-- frame. That is the "odd refresh" the perf line counted on the board (README.md, "Doom";
+-- FINDINGS.md, H7): about 25 to 30 per 5 s with Doom at about 15 frames a second.
+--
+-- So the memory holds two banks of 8192 pixels (6144 used each), the bank in address bit
+-- 13 (bytes 0x81000000 and 0x81004000). `front` is the bank the controller sends; it is
+-- taken from `show`, which software writes, only at the start of a refresh (the
+-- controller's `frame` step). Software draws into the bank that is not shown, writes
+-- its number to `show`, and before drawing into the other bank waits until `front` has
+-- followed (`fbCtl` reads both). After reset both are 0, so software that knows nothing
+-- of this draws into bank 0 and sees one buffer, as before.
+
+def B13f : HwTy := HwTy.bits 13
+def B14 : HwTy := HwTy.bits 14
+
+structure Fb (r : HwTy → Type) where
+  pix : r (HwTy.mem 14 16)
+  q : r B16       -- the read register (the pixel the OLED controller is at)
+  pre : r B4      -- the controller's clock enable: every 8th cycle (16th at the full rate)
+  bad : r W1      -- q was read while the core wrote the same pixel (a block RAM's read
+                  -- in a write to the same address is not defined across its two ports)
+  col : r B16     -- the last good read: what the controller sends
+  -- the core's write, registered: the block RAM is clocked at the full rate, so its write
+  -- enable, address and data come straight from registers (a combinational enable, even
+  -- one gated by the half-rate phase, wrote garbage between frames: FINDINGS.md, H7)
+  we : r W1
+  wa : r B14
+  wd : r B16
+  front : r W1    -- the bank the controller sends in this refresh
+  show : r W1     -- the bank software asked for: `front` takes it at the next refresh
+  deriving Bundle
+
+def Fb.init : Fb HwTy.El :=
+  Fb.mk (fun (a : BitVec 14) => BitVec.ofNat 16 0) (BitVec.ofNat 16 0) (BitVec.ofNat 4 0) (BitVec.ofNat 1 0)
+    (BitVec.ofNat 16 0) (BitVec.ofNat 1 0) (BitVec.ofNat 14 0) (BitVec.ofNat 16 0) (BitVec.ofNat 1 0)
+    (BitVec.ofNat 1 0)
+
+-- the pixel index (row-major, in a bank) of the controller's (x, y)
+def oledIdx {r : HwTy → Type} [Hw r] {ω fl : Nat} (ol : RCtl fl r) : r B13f :=
+  let y13 : r B13f := Hw.cat (Hw.lit 7 0) ol.gen.y;
+  Hw.add (Hw.add (Hw.shl y13 6) (Hw.shl y13 5)) (Hw.cat (Hw.lit 6 0) ol.gen.x)
+
+-- the controller's clock enable: every 2^ediv cycles (`ediv` = 0: every cycle)
+def oledEn {r : HwTy → Type} [Hw r] (ediv : Nat) (s : Fb r) : r W1 :=
+  if Nat.beq ediv 0 then Hw.lit 1 1 else isK (Hw.slice 0 ediv s.pre) 0
+
+-- the controller starts a refresh in this step (its `frame` step lowers CS), not gated by
+-- the clock enable
+def oledFrameGo {r : HwTy → Type} [Hw r] {ω fl : Nat} (ol : RCtl fl r) : r W1 :=
+  let ω op := ROp.of (Rom.at 9 ol.sq.pc RProg.tree);
+  band (spiReady ol.spi) (band op.frame (band ol.fr.pend ol.pins.cs))
+
+-- the control register (I/O offset 0x84): read 0xDB000000 + 2 show + front (the high
+-- byte tells software that the banks exist; older machines read something else there)
+def fbCtlId : Nat := 0xDB000000
+def fbCtl {r : HwTy → Type} [Hw r] (s : Fb r) : r B32 :=
+  Hw.cat (Hw.lit 30 (Nat.div fbCtlId 4)) (Hw.cat s.show s.front)
+
+-- one cycle of the framebuffer and the controller: `fw`/`fa`/`fd` a pixel write (`fa`:
+-- bank and index), `cw`/`cd` a write of `show`
+def oledFbStep {r : HwTy → Type} [Hw r] (cfg : RgbCfg) (ediv : Nat) (s : Fb r) (ol : RCtl cfg.frameLog r)
+    (fw : r W1) (fa : r B14) (fd : r B16) (cw : r W1) (cd : r W1) :
+    r (HwTy.prod Fb.code (RCtl.code cfg.frameLog)) :=
+  let en := oledEn ediv s;
+  let go := band en (oledFrameGo ol);
+  let idx : r B14 := Hw.cat s.front (oledIdx ol);
+  Hw.pair
+    (Fb.pack (Fb.mk
+      (Hw.memWrite s.pix s.we s.wa s.wd)
+      (Hw.memRead s.pix idx)
+      (inc s.pre)
+      (Hw.and s.we (Hw.eq s.wa idx))
+      (Hw.mux s.bad s.col s.q)
+      fw fa fd
+      (Hw.mux go s.show s.front)
+      (Hw.mux cw cd s.show)))
+    (Hw.mux en (rctlStep cfg RProg.tree ol s.col) (RCtl.pack cfg.frameLog ol))
+
+------------------------------------------------------------------------------------
+-- The framebuffer and the controller on their own, for simulation (tests/oled_flip.wiz,
+-- and in Verilog through app/oledgen.wiz and sim/tb_oled.v): every input is a port.
+
+structure OFbIn (r : HwTy → Type) where
+  we : r W1
+  wa : r B14
+  wd : r B16
+  cw : r W1
+  cd : r W1
+  deriving Bundle
+
+structure OFbOut (r : HwTy → Type) where
+  ja : r W8       -- the PmodOLEDrgb's pins, as on the board
+  front : r W1
+  show : r W1
+  deriving Bundle
+
+structure OFbSt (fl : Nat) (r : HwTy → Type) where
+  fb : Fb r
+  oled : RCtl fl r
+  deriving Bundle
+
+-- JA as the board drives it: PMODEN, VCCEN, RES, D/C, SCLK, 0, MOSI, CS (bit 7 … 0)
+def oledJa {r : HwTy → Type} [Hw r] {ω fl : Nat} (ol : RCtl fl r) : r W8 :=
+  Hw.cat ol.pins.pmoden (Hw.cat ol.pins.vccen (Hw.cat ol.pins.res (Hw.cat ol.pins.dc
+    (Hw.cat ol.spi.sclk (Hw.cat (Hw.lit 1 0) (Hw.cat ol.spi.mosi ol.pins.cs))))))
+
+def OledFb.step (cfg : RgbCfg) (ediv : Nat) {r : HwTy → Type} [Hw r] (s : OFbSt cfg.frameLog r) (x : OFbIn r) :
+    r (HwTy.prod (OFbSt.code cfg.frameLog) OFbOut.code) :=
+  let ω ol := s.oled;
+  let ω n := oledFbStep cfg ediv s.fb ol x.we x.wa x.wd x.cw x.cd;
+  Hw.pair
+    (OFbSt.pack cfg.frameLog (OFbSt.mk (Fb.unpack (Hw.fst n)) (RCtl.unpack cfg.frameLog (Hw.snd n))))
+    (OFbOut.pack (OFbOut.mk (oledJa ol) s.fb.front s.fb.show))
+
+def OledFb.circuitFrom (cfg : RgbCfg) (ediv : Nat) (st : OFbSt cfg.frameLog HwTy.El) : Circuit OFbIn.code OFbOut.code :=
+  Circuit.bundled (OFbSt.bundle cfg.frameLog) OFbIn.bundle OFbOut.bundle st (OledFb.step cfg ediv)
+
+def OledFb.circuit (cfg : RgbCfg) (ediv : Nat) : Circuit OFbIn.code OFbOut.code :=
+  OledFb.circuitFrom cfg ediv (OFbSt.mk Fb.init (RCtl.init cfg))

@@ -37,7 +37,12 @@
 #define PERF_UNDER    IO(0x7c)             /* sound ticks with the FIFO empty */
 #define PERF_OLED     IO(0x80)             /* the OLED controller: pins (11..7: PMODEN VCCEN RES DC CS), program counter */
 
-#define OLED_FB       ((volatile uint16_t *)0x81000000u)   /* 96 x 64 RGB565, row-major */
+#define FB_CTRL       IO(0x84)             /* framebuffer banks: write the bank to show from the next
+                                              refresh; read FB_CTRL_ID + 2 * that + the bank shown */
+#define FB_CTRL_ID    0xDB000000u          /* (machines without banks read something else) */
+
+#define OLED_FB       ((volatile uint16_t *)0x81000000u)   /* 96 x 64 RGB565, row-major: bank 0 */
+#define OLED_BANK     8192                 /* bank 1 at OLED_FB + OLED_BANK (0x81004000) */
 #define OLED_W        96
 #define OLED_H        64
 
@@ -52,6 +57,7 @@ _Static_assert(WAD_LEN_ADDR + 16 <= WAD_BASE, "WAD length page ends at the WAD")
 _Static_assert(WAD_BASE + 4 * 1024 * 1024 <= DDR_BASE + DDR_SIZE, "a 4 MB WAD fits in DDR");
 _Static_assert((WAD_BASE & 0xfff) == 0 && (WAD_LEN_ADDR & 3) == 0, "WAD alignment");
 _Static_assert(0x81000000u + OLED_W * OLED_H * 2 <= 0x82000000u, "96 x 64 RGB565 fits one frame");
+_Static_assert(OLED_W * OLED_H <= OLED_BANK, "a frame fits one bank");
 _Static_assert((IO_BASE & 0xfff) == 0, "I/O page aligned");
 
 static inline uint64_t hw_cycles(void) {
