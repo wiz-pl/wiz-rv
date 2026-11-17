@@ -1,0 +1,269 @@
+import Rv.Core
+import Ddr3.Cache
+-- A direct-mapped L1 data cache in front of the controller's native port, with the
+-- core's 32-bit request/answer (`Ddr3.Cache.CReq`/`CResp`, one request at a time) and
+-- the controller's 128-bit line port (`Ddr3.Ctrl.PortIn`/`PortOut`). It is the RTL of
+-- `Rv.Cache`'s model, at the production geometry (512 lines of 16 bytes): `wbMode`
+-- selects write-back (a store dirties its line and a miss writes the victim back first)
+-- or write-through (a store updates its line, clean, and writes the line to memory);
+-- `alloc` selects write-allocate (a store miss fills the line, then merges) or
+-- write-no-allocate (a store miss writes the word through). Reads always allocate.
+--
+-- The state machine (as wiz-ddr3's 8 KB cache, which is the write-back, allocate case):
+--
+--   0 idle       accept a request: read the line and its tag (a registered RAM read)
+--   1 compare    hit: answer, and on a write merge the bytes (dirty for write-back);
+--                miss: write the victim back if it is dirty, else read the line
+--   2 writeback  the victim line to the controller; then read the new line
+--   3 fill       the new line from the controller; then wait for its data
+--   4 wait       the line arrived: write it and its tag
+--   5 reread     read the line again (a write during the cycle of the fill's read is
+--                not visible through the RAM's registered read)
+--   6 writethru  a write-through line or word; the request completes when the
+--                controller accepts it
+--
+-- The data and tag memories have one write port and a registered read, so they map to
+-- block RAM. `RC.Ram` is the behavioural line memory the tests use; `RC.Tb` is the
+-- random check against a flat reference memory.
+
+structure RC.St (r : HwTy → Type) where
+  data : r (HwTy.mem 9 128)
+  tags : r (HwTy.mem 9 17)  -- bit 16 valid, bit 15 dirty, 14..0 the tag
+  st : r (B 3)              -- 0 idle, 1 compare, 2 writeback, 3 fill, 4 wait, 5 reread,
+                            -- 6 write-through
+  addr : r (B 28)
+  we : r W1
+  wdata : r (B 32)
+  wstrb : r (B 4)
+  line : r B128             -- the RAMs' read registers: the line and tag at `addr`
+  tagw : r (B 17)
+  full : r W1               -- the pending write-through is a whole line (else a word)
+  wline : r B128            -- and this is the line
+  hits : r (B 32)
+  misses : r (B 32)
+  evictions : r (B 32)
+  deriving Bundle
+
+def RC.idx {r : HwTy → Type} [Hw r] (a : r (B 28)) : r (HwTy.bits 9) := Hw.slice 4 9 a
+def RC.tag {r : HwTy → Type} [Hw r] (a : r (B 28)) : r (HwTy.bits 15) := Hw.slice 13 15 a
+def RC.wordOf {r : HwTy → Type} [Hw r] (a : r (B 28)) : r (B 2) := Hw.slice 2 2 a
+
+-- the 16-bit byte mask of a 32-bit word write, at word `w` of the line
+def RC.wmask {r : HwTy → Type} [Hw r] (w : r (B 2)) (strb : r (B 4)) : r (B 16) :=
+  U.ofBits (fun (p : Nat) =>
+    Hw.mux (U.band (U.isLit w (Nat.div p 4)) (U.bit strb (Nat.mod p 4))) U.hi U.lo) 16
+
+-- the word write placed in its line, the other bytes zero (and masked off)
+def RC.wordLine {r : HwTy → Type} [Hw r] (w : r (B 2)) (d : r (B 32)) (strb : r (B 4)) : r B128 :=
+  C.merge (Hw.lit 128 0) w d strb
+
+def RC.step (wbMode alloc : Bool) {r : HwTy → Type} [Hw r]
+    (s : RC.St r) (q : CReq r) (ddr : PortOut r) :
+    r (HwTy.prod RC.St.code (HwTy.prod CResp.code PortIn.code)) :=
+  let wbBit : r W1 := if wbMode then Hw.lit 1 1 else Hw.lit 1 0;
+  let wtBit : r W1 := if wbMode then Hw.lit 1 0 else Hw.lit 1 1;
+  let noAllocBit : r W1 := if alloc then Hw.lit 1 0 else Hw.lit 1 1;
+  let idle := U.isLit s.st 0;
+  let cmp := U.isLit s.st 1;
+  let wb := U.isLit s.st 2;
+  let fill := U.isLit s.st 3;
+  let wait := U.isLit s.st 4;
+  let again := U.isLit s.st 5;
+  let wt := U.isLit s.st 6;
+  let start := U.band idle q.valid;
+  let idx := RC.idx s.addr;
+  let tg := RC.tag s.addr;
+  let valid := U.bit s.tagw 16;
+  let dirty := U.bit s.tagw 15;
+  let hit := U.band valid (Hw.eq (Hw.slice 0 15 s.tagw) tg);
+  let hitNow := U.band cmp hit;
+  let missNow := U.band cmp (U.bnot hit);
+  let evictNow := U.band missNow (U.band valid (U.band dirty (U.bnot (U.band s.we noAllocBit))));
+  let w := RC.wordOf s.addr;
+  let merged := C.merge s.line w s.wdata s.wstrb;
+  -- the tag stored by a fill, by a write-back store's merge, and by a write-through
+  let tagClean := Hw.cat U.hi (Hw.cat U.lo tg);
+  let tagDirty := Hw.cat U.hi (Hw.cat U.hi tg);
+  -- the controller's request: write the victim back, read the new line, or write
+  -- through; a full-line write carries `wline`, a word write its lane and mask
+  let oldLine := Hw.cat (Hw.slice 0 15 s.tagw) idx;
+  let newLine := Hw.cat tg idx;
+  let doWb := wb;
+  let doFill := fill;
+  let doWt := wt;
+  let reqAddr := Hw.mux doWb oldLine (Hw.mux doFill newLine (Hw.mux doWt newLine (Hw.lit 24 0)));
+  let reqData := Hw.mux doWb s.line (Hw.mux doWt (Hw.mux s.full s.wline (RC.wordLine w s.wdata s.wstrb)) (Hw.lit 128 0));
+  let reqMask := Hw.mux doWb (Hw.lit 16 65535) (Hw.mux doWt (Hw.mux s.full (Hw.lit 16 65535) (RC.wmask w s.wstrb)) (Hw.lit 16 0));
+  let dreq := PortIn.mk (U.bor doWb (U.bor doFill doWt)) (U.bor doWb doWt) reqAddr reqData reqMask;
+  let acc := U.band dreq.valid ddr.ready;
+  let got := U.band wait ddr.rvalid;
+  -- the write to the data and tag RAMs: a write hit's merge, or a fill. One write port
+  -- each, so a merge and a fill never coincide.
+  let hitWrite := U.band hitNow s.we;
+  let dataW := Hw.memWrite s.data (U.bor hitWrite got) idx (Hw.mux got ddr.rdata merged);
+  let tagW := Hw.memWrite s.tags (U.bor hitWrite got) idx
+    (Hw.mux got tagClean (Hw.mux (U.band hitWrite wtBit) tagClean tagDirty));
+  -- on a write-through hit the merged line is the one written through; on a no-allocate
+  -- store miss it is the word
+  let fullN := Hw.mux hitNow (Hw.mux s.we U.hi s.full) (Hw.mux missNow (Hw.mux s.we U.lo s.full) s.full);
+  let wlineN := Hw.mux (U.band hitNow s.we) merged (Hw.mux (U.band missNow s.we) s.line s.wline);
+  let st :=
+    Hw.mux start (Hw.lit 3 1)
+    (Hw.mux hitNow (Hw.mux (U.band s.we wtBit) (Hw.lit 3 6) (Hw.lit 3 0))
+    (Hw.mux missNow
+      (Hw.mux (U.band s.we noAllocBit) (Hw.lit 3 6)
+        (Hw.mux (U.band valid dirty) (Hw.lit 3 2) (Hw.lit 3 3)))
+    (Hw.mux (U.band doWb acc) (Hw.lit 3 3)
+    (Hw.mux (U.band doFill acc) (Hw.lit 3 4)
+    (Hw.mux got (Hw.lit 3 5)
+    (Hw.mux (U.band doWt acc) (Hw.lit 3 0)
+    (Hw.mux again (Hw.lit 3 1) s.st)))))));
+  let qIdx := RC.idx q.addr;
+  let rdIdx := Hw.mux start qIdx idx;
+  let ns := RC.St.mk dataW tagW st
+    (Hw.mux start q.addr s.addr) (Hw.mux start q.we s.we) (Hw.mux start q.wdata s.wdata)
+    (Hw.mux start q.wstrb s.wstrb)
+    (Hw.memRead s.data rdIdx) (Hw.memRead s.tags rdIdx)
+    fullN wlineN
+    (Hw.mux hitNow (U.inc s.hits) s.hits) (Hw.mux missNow (U.inc s.misses) s.misses)
+    (Hw.mux evictNow (U.inc s.evictions) s.evictions);
+  let readyW := Hw.or (U.band hitNow (U.bnot s.we))
+    (Hw.or (U.band hitNow (U.band s.we wbBit)) (U.band doWt acc));
+  let resp := CResp.mk readyW (U.band hitNow (U.bnot s.we)) (C.word s.line w);
+  Hw.pair (RC.St.pack ns) (Hw.pair (CResp.pack resp) (PortIn.pack dreq))
+
+def RC.init : HwTy.El RC.St.code :=
+  Bundle.toEl RC.St.bundle (RC.St.mk
+    (fun (a : BitVec 9) => BitVec.ofNat 128 0)
+    (fun (a : BitVec 9) => BitVec.ofNat 17 0)
+    (BitVec.ofNat 3 0) (BitVec.ofNat 28 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0) (BitVec.ofNat 4 0)
+    (BitVec.ofNat 128 0) (BitVec.ofNat 17 0) (BitVec.ofNat 1 0) (BitVec.ofNat 128 0)
+    (BitVec.ofNat 32 0) (BitVec.ofNat 32 0) (BitVec.ofNat 32 0))
+
+def RC.circuit (wbMode alloc : Bool) : Circuit (HwTy.prod CReq.code PortOut.code) (HwTy.prod CResp.code PortIn.code) :=
+  Circuit.mk RC.St.code RC.init (fun s x =>
+    RC.step wbMode alloc (RC.St.unpack s) (CReq.unpack (Hw.fst x)) (PortOut.unpack (Hw.snd x)))
+
+------------------------------------------------------------------------------------
+-- A behavioural line memory: one request at a time, `ready` in the cycle it is
+-- presented, the data two cycles later; byte masks.
+
+structure RC.Ram (r : HwTy → Type) where
+  m : r (HwTy.mem 10 128)
+  paddr : r (HwTy.bits 10)
+  pwe : r W1
+  pdata : r B128
+  pdm : r (B 16)
+  wait : r B2      -- 0 idle, 1 accepted, 2 returning
+  deriving Bundle
+
+def RC.ramOut {r : HwTy → Type} [Hw r] (s : RC.Ram r) : PortOut r :=
+  PortOut.mk (U.isLit s.wait 0) (U.band (U.isLit s.wait 2) (U.bnot s.pwe))
+    (Hw.memRead s.m s.paddr) U.lo U.lo (Hw.lit 5 0) (Hw.lit 5 0) (Hw.lit 3 0) (Hw.lit 3 0)
+    (Hw.lit 5 0) (Hw.lit 256 0) (Hw.lit 256 0) (Hw.lit 4 0)
+
+def RC.mergeLine {r : HwTy → Type} [Hw r] (old new : r B128) (mask : r (B 16)) : r B128 :=
+  U.ofBits (fun (p : Nat) => Hw.mux (U.bit mask (Nat.div p 8)) (U.bit new p) (U.bit old p)) 128
+
+def RC.ramStep {r : HwTy → Type} [Hw r] (s : RC.Ram r) (q : PortIn r) :
+    r (HwTy.prod RC.Ram.code PortOut.code) :=
+  let go := U.band q.valid (U.isLit s.wait 0);
+  let ix : r (HwTy.bits 10) := Hw.slice 0 10 q.addr;
+  let wr := U.band (U.isLit s.wait 1) s.pwe;
+  let old := Hw.memRead s.m s.paddr;
+  let m' := Hw.memWrite s.m wr s.paddr (RC.mergeLine old s.pdata s.pdm);
+  let ns := RC.Ram.mk m' (Hw.mux go ix s.paddr) (Hw.mux go q.we s.pwe)
+    (Hw.mux go q.wdata s.pdata) (Hw.mux go q.wmask s.pdm)
+    (Hw.mux go (Hw.lit 2 1) (Hw.mux (U.isLit s.wait 0) s.wait
+      (Hw.mux (U.isLit s.wait 1) (Hw.lit 2 2) (Hw.lit 2 0))));
+  Hw.pair (RC.Ram.pack ns) (PortOut.pack (RC.ramOut ns))
+
+def RC.ramInit : HwTy.El RC.Ram.code :=
+  Bundle.toEl RC.Ram.bundle (RC.Ram.mk (fun (a : BitVec 10) => BitVec.ofNat 128 0) (BitVec.ofNat 10 0)
+    (BitVec.ofNat 1 0) (BitVec.ofNat 128 0) (BitVec.ofNat 16 0) (BitVec.ofNat 2 0))
+
+------------------------------------------------------------------------------------
+-- The random check: a generator (the model's LFSR and operation mapping), the cache,
+-- the line memory, and a flat reference memory updated by every completed write. A read
+-- is compared with the reference; `bad` counts mismatches. The final reference memory
+-- is an output, so a test can compare it with the model's `CM.flat`.
+
+structure RC.Gen (r : HwTy → Type) where
+  lfsr : r (B 32)
+  ops : r (B 16)
+  bad : r (B 16)
+  deriving Bundle
+
+def RG.addr {r : HwTy → Type} [Hw r] (x : r (B 32)) : r (B 28) :=
+  Hw.cat (Hw.lit 14 0) (Hw.cat (U.bit x 7) (Hw.cat (Hw.lit 5 0)
+    (Hw.cat (Hw.slice 3 4 x) (Hw.cat (Hw.slice 0 2 x) (Hw.lit 2 0)))))
+def RG.we {r : HwTy → Type} [Hw r] (x : r (B 32)) : r W1 := U.bit x 2
+def RG.data {r : HwTy → Type} [Hw r] (x : r (B 32)) : r (B 32) := x
+def RG.strb {r : HwTy → Type} [Hw r] (x : r (B 32)) : r (B 4) :=
+  Hw.mux (U.isLit (U.bit x 2) 0) (Hw.lit 4 15) (Hw.slice 4 4 x)
+def RG.next {r : HwTy → Type} [Hw r] (x : r (B 32)) : r (B 32) :=
+  Hw.slice 0 32 (Hw.add (Hw.mul x (Hw.lit 32 1664525)) (Hw.lit 32 1013904223))
+
+def RC.mergeWord {r : HwTy → Type} [Hw r] (old new : r (B 32)) (strb : r (B 4)) : r (B 32) :=
+  U.ofBits (fun (p : Nat) => Hw.mux (U.bit strb (Nat.div p 8)) (U.bit new p) (U.bit old p)) 32
+
+structure RC.TbSt (r : HwTy → Type) where
+  cache : r RC.St.code
+  ram : r RC.Ram.code
+  gen : r RC.Gen.code
+  ref : r (HwTy.mem 12 32)
+  deriving Bundle
+
+structure RC.TbOut (r : HwTy → Type) where
+  ops : r (B 16)
+  bad : r (B 16)
+  hits : r (B 32)
+  misses : r (B 32)
+  evictions : r (B 32)
+  ref : r (HwTy.mem 12 32)
+  deriving Bundle
+
+def RC.Tb.step (wbMode alloc : Bool) {r : HwTy → Type} [Hw r] (s : RC.TbSt r) :
+    r (HwTy.prod RC.TbSt.code RC.TbOut.code) :=
+  let g := RC.Gen.unpack s.gen;
+  let q := CReq.mk U.hi (RG.addr g.lfsr) (RG.we g.lfsr) (RG.data g.lfsr) (RG.strb g.lfsr);
+  let po0 := RC.ramOut (RC.Ram.unpack s.ram);
+  let cr := RC.step wbMode alloc (RC.St.unpack s.cache) q po0;
+  let resp := CResp.unpack (Hw.fst (Hw.snd cr));
+  let dq := PortIn.unpack (Hw.snd (Hw.snd cr));
+  let rr := RC.ramStep (RC.Ram.unpack s.ram) dq;
+  let done := Hw.or resp.ready resp.rvalid;
+  let wr := U.band done q.we;
+  let rd := resp.rvalid;
+  let ix : r (HwTy.bits 12) := Hw.slice 2 12 q.addr;
+  let expected := Hw.memRead s.ref ix;
+  let mismatch := U.band rd (U.bnot (Hw.eq resp.rdata expected));
+  let ref' := Hw.memWrite s.ref wr ix (RC.mergeWord expected q.wdata q.wstrb);
+  let opsN := Hw.mux done (U.inc g.ops) g.ops;
+  let badN := Hw.mux mismatch (U.inc g.bad) g.bad;
+  let gn := RC.Gen.mk (Hw.mux done (RG.next g.lfsr) g.lfsr) opsN badN;
+  let cs := RC.St.unpack (Hw.fst cr);
+  Hw.pair
+    (RC.TbSt.pack (RC.TbSt.mk (Hw.fst cr) (Hw.fst rr) (RC.Gen.pack gn) ref'))
+    (RC.TbOut.pack (RC.TbOut.mk opsN badN cs.hits cs.misses cs.evictions ref'))
+
+def RC.Tb.init (seed : Nat) : HwTy.El RC.TbSt.code :=
+  Bundle.toEl RC.TbSt.bundle (RC.TbSt.mk RC.init RC.ramInit
+    (Bundle.toEl RC.Gen.bundle (RC.Gen.mk (BitVec.ofNat 32 seed) (BitVec.ofNat 16 0) (BitVec.ofNat 16 0)))
+    (fun (a : BitVec 12) => BitVec.ofNat 32 0))
+
+def RC.Tb.circuit (wbMode alloc : Bool) (seed : Nat) : Circuit Bit RC.TbOut.code :=
+  Circuit.mk RC.TbSt.code (RC.Tb.init seed) (fun s x => RC.Tb.step wbMode alloc (RC.TbSt.unpack s))
+
+def RC.lastOut {A : Type} (d : A) : List A → A
+  | .nil => d
+  | .cons x .nil => x
+  | .cons _ xs => RC.lastOut d xs
+
+def RC.inputs : Nat → List (HwTy.El Bit)
+  | .zero => .nil
+  | .succ k => .cons (BitVec.ofNat 1 0) (RC.inputs k)
+
+def RC.Tb.run (wbMode alloc : Bool) (seed n : Nat) : HwTy.El RC.TbOut.code :=
+  RC.lastOut (HwTy.unpack RC.TbOut.code 0)
+    (Circuit.run (RC.Tb.circuit wbMode alloc seed) (RC.inputs n))

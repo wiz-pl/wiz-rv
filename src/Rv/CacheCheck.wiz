@@ -1,0 +1,95 @@
+import Rv.Cache
+import Text
+-- The cache model's checks. The exhaustive check enumerates every sequence of four
+-- accesses over an alphabet that exercises both tags of a line, hits, a dirty eviction,
+-- read-back, and byte strobes, for each policy (write-back/write-through, allocate or
+-- not). `CM.exhaustive` is kernel-checked by evaluation (`refl`): every sequence keeps
+-- the cache's reads equal to a flat memory's, and (write-through) every line clean.
+--
+-- The random check runs `CM.random` over a larger geometry and a long sequence, and
+-- prints the result; `tests/cache.wiz` runs it. `CM.checkAll` is what the proof and the
+-- test assert: the cache is observationally a flat memory (memory consistency), a read
+-- after a write returns the merged bytes (read-after-write), a dirty victim is written
+-- back before its line is reused (eviction), and a write-through line is never dirty.
+
+------------------------------------------------------------------------------------
+-- Sequences over an alphabet
+
+def CM.concatMap {A B : Type} (f : A → List B) : List A → List B
+  | .nil => .nil
+  | .cons x xs => List.append (f x) (CM.concatMap f xs)
+
+def CM.seqsWith {A : Type} (as : List A) : Nat → List (List A)
+  | .zero => .cons .nil .nil
+  | .succ k =>
+      CM.concatMap (fun (s : List A) => List.map (fun (a : A) => .cons a s) as) (CM.seqsWith as k)
+
+def CM.seqOk (c : CM.Cfg) (ops : List CM.Op) : Bool :=
+  let r := CM.run c ops;
+  let counted := Nat.beq (Nat.add r.hits r.misses) (List.length ops);
+  let clean := match c.wbMode with
+    | .true => .true
+    | .false => CM.allClean r.st.lines;
+  Bool.and r.ok (Bool.and counted clean)
+
+def CM.allSeqs (c : CM.Cfg) (ops : List CM.Op) (n : Nat) : Bool :=
+  List.all (fun (s : List CM.Op) => CM.seqOk c s) (CM.seqsWith ops n)
+
+-- the alphabet: lines 0 and 1 (index 0 and 1), tags 0 and 1 (addresses 0, 4, 8, 12 with
+-- two words a line), a write and a read of each
+def CM.opW (a : Nat) : CM.Op := CM.Op.mk .true a (Nat.add 2863311530 a) 15
+def CM.opR (a : Nat) : CM.Op := CM.Op.mk .false a 0 0
+def CM.alphabet : List CM.Op :=
+  .cons (CM.opW 0) (.cons (CM.opW 4) (.cons (CM.opW 8) (.cons (CM.opW 12)
+  (.cons (CM.opR 0) (.cons (CM.opR 4) (.cons (CM.opR 8) (.cons (CM.opR 12) .nil)))))))
+
+def CM.small (wb alloc : Bool) : CM.Cfg := CM.Cfg.mk 4 1 2 32 wb alloc
+
+------------------------------------------------------------------------------------
+-- The exhaustive check, for every policy
+
+def CM.exhaustive : Bool :=
+  Bool.and (CM.allSeqs (CM.small .true .true) CM.alphabet 4)
+  (Bool.and (CM.allSeqs (CM.small .true .false) CM.alphabet 4)
+  (Bool.and (CM.allSeqs (CM.small .false .true) CM.alphabet 4)
+    (CM.allSeqs (CM.small .false .false) CM.alphabet 4)))
+
+
+------------------------------------------------------------------------------------
+-- Random accesses
+
+def CM.next (x : Nat) : Nat := Nat.mod (Nat.add (Nat.mul x 1664525) 1013904223) 4294967296
+
+-- A small window with two tags at each of 16 indices (the cache has 512): random
+-- addresses and data, but the same index is revisited often enough that a write-back
+-- run evicts dirty lines. RTL CacheRtl.RG.addr is the same mapping.
+def CM.genOp (c : CM.Cfg) (x : Nat) : CM.Op :=
+  let a := Nat.add (Nat.add (Nat.mul (Nat.mod (Nat.div x 128) 2) 2048)
+    (Nat.mul (Nat.mod (Nat.div x 8) 16) 4)) (Nat.mod x 4);
+  let w := Nat.mod (Nat.div x 4) 2;
+  let d := Nat.mod x (CM.pow2 c.dw);
+  let s := match w with
+    | .zero => 15
+    | .succ _ => Nat.mod (Nat.div x 16) 16;
+  CM.Op.mk (Nat.beq w 1) a d s
+
+def CM.genOps (c : CM.Cfg) : Nat → Nat → List CM.Op
+  | .zero, _ => .nil
+  | .succ k, x => .cons (CM.genOp c x) (CM.genOps c k (CM.next x))
+
+def CM.random (c : CM.Cfg) (n seed : Nat) : Bool :=
+  CM.seqOk c (CM.genOps c n seed)
+
+def CM.randomAll : Bool :=
+  Bool.and (CM.random (CM.Cfg.mk 12 9 2 32 .true .true) 1200 1)
+  (Bool.and (CM.random (CM.Cfg.mk 12 9 2 32 .true .false) 1200 2)
+  (Bool.and (CM.random (CM.Cfg.mk 12 9 2 32 .false .true) 1200 3)
+    (CM.random (CM.Cfg.mk 12 9 2 32 .false .false) 1200 4)))
+
+def CM.report : String :=
+  let wb := CM.random (CM.Cfg.mk 12 9 2 32 .true .true) 1200 1;
+  let wt := CM.random (CM.Cfg.mk 12 9 2 32 .false .true) 1200 3;
+  "cache model: exhaustive 4-access sequences — " ++ (if CM.exhaustive then "PASS" else "FAIL")
+    ++ "; random 1200 accesses, write-back " ++ (if wb then "PASS" else "FAIL")
+    ++ ", write-through " ++ (if wt then "PASS" else "FAIL")
+

@@ -525,3 +525,52 @@ was then glued to the stale `w1`, and the compressed program retired a wrong
 instruction after C.BNEZ (x12 = 198 where the specification has 20). `h2need` is now
 gated by D being live (`fe.v`, `fz = 0`, not `fe.rdr`), and `tests/plockstep.wiz` runs
 the compressed program and its twin, both agreeing with the specification.
+
+## Cache work (`agent/rv-cache`)
+
+Building the L1 data-cache model and RTL (`CACHE.md`) added these.
+
+### C1. A behavioural memory must cover every line the test uses (bug, in a test)
+
+The first golem cache integration used a 512-line line-memory (9 address bits). The
+cache has 512 lines and 2 tags in the 1024-line window (12 word bits); line 512 and line
+0 both map to RAM line 0, so after the eviction the "read line 0" returned the evicting
+line's word. The integration read 0x0abcdef1 instead of 0x12345678. The memory window is
+now 1024 lines (10 bits); the test's address window is 4096 words (1024 lines). A
+behavioural memory has to cover the *addresses*, not just the cache's line count.
+
+### C2. A test's counters were the pre-edge value (bug, in a test)
+
+`RC.Tb`'s `ops` and `bad` outputs were `g.ops`/`g.bad`, the values before the cycle's
+`done`/`mismatch`, so the last completed operation was not counted. The model then ran
+one fewer operation than the RTL and the final memories differed. Output the next-state
+values (`opsN`/`badN`).
+
+### C3. `A.sw`'s immediate is 12-bit signed (papercut, in a test)
+
+`A.sw 7 8192 11` assembles as offset 0: 8192 is out of the S-type immediate's range; the
+assembler masks it. The eviction test needs a second base (`A.lui 12 262146` for
+0x40002000). A real assembler would reject the immediate.
+
+### C4. One namespace: `MSt` clashes between `Rv.Golem.Mini` and `Ddr3.Model` (gap)
+
+`src/Rv/Golem/CacheSim.wiz` imports `Rv.Golem.Mini` and `Rv.CacheRtl`; the latter imports
+`Ddr3.Cache`, which imports `Ddr3.Ctrl`. `Ddr3.Tb` also imports `Ddr3.Model`, which
+defines another `MSt`, and importing both is "declared by both modules". The cache RTL
+does not import `Ddr3.Tb`; it has its own `lastOut`/`inputs`. This is the L7/B2
+one-namespace issue again: the workaround is to keep `Ddr3.Model` out of the cache's
+imports, not to qualify names.
+
+### C5. Auto-share panics on a projected `Bundle` state (bug, known)
+
+A test `let`-binding a `Circuit`/state and projecting a field (`s.st.cache.st`) panicked
+with `vApp: ill-typed application` (`autoshare-illkinded-panic`). The workaround is the
+existing one: `let ω`, or (here) expose the values the test needs as debug outputs
+(`Golem.golemCacheSimDbg`), so the test never projects a state.
+
+### C6. Uniform random addresses do not evict (test design)
+
+With a uniform 12-bit word address and a 512-line cache, 70–100 operations produced no
+evictions at all (a pair must differ by exactly 2048 words). The generator now keeps two
+tags at each of 16 indices; the same runs evict 17 and 8 dirty lines in write-back. The
+model and the RTL use the same generator, so the comparison still holds.

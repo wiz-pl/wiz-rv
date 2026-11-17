@@ -1,0 +1,1 @@
+tests/cache.wiz:65:1: info: "cache model: exhaustive 4-access sequences — PASS; random 1200 accesses — PASS; RTL write-back, allocate: 69 ops, 17 evictions — PASS; RTL write-back, no-allocate: 93 ops, 8 evictions — PASS; RTL write-through, allocate: 70 ops, 0 evictions — PASS; RTL write-through, no-allocate: 95 ops, 0 evictions — PASS"
