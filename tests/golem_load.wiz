@@ -1,0 +1,153 @@
+-- test: check
+import Rv.Isa
+import Rv.Uart
+import Rv.Golem.Loader
+import Rv.Asm
+import Text
+-- The golem ROM loader (`GLoad.boot`, src/Rv/Golem/Loader.wiz) at the machine's program
+-- level: the frame goes through the UART receiver model (`Rx`, src/Rv/Uart.wiz) as 8N1
+-- bits at 4 cycles a bit, the decoded bytes are fed to the ISA specification (`Rv.run`,
+-- as tests/golem.wiz and the lockstep boot case do), and the loader's output is read
+-- back. This is the "Mini/Doom-level" check the brief asks for without compiling the
+-- whole machine: the core's value simulation is the one `tests/lockstep.wiz` checks
+-- against this same specification.
+--
+-- The payload's first word is an `ebreak` (so a loader that jumped to the image base
+-- instead of the entry would stop with no "OK"), and its entry, at base + 4, prints
+-- "OK" on the UART and `ebreak`s. Three frames: a good one (trap 2, the decoded frame
+-- equal to the sent one, "run" and "OK"), a frame with one payload byte changed and the
+-- old CRC ("crc error", trap 0: no jump) and one over the 1 MiB cap ("length error",
+-- trap 0). The image must also stay at most 256 words (512 of the halfwords `Asm.assemble`
+-- yields), i.e. a small BRAM init.
+
+def U.rep : Nat → Nat → List Nat
+  | _, .zero => .nil
+  | v, .succ k => .cons v (U.rep v k)
+
+def U.bit (v k : Nat) : Nat := Nat.mod (Nat.div v (Nat.pow 2 k)) 2
+
+-- one 8N1 byte, LSB first, each bit four cycles (the receiver's divider is 4)
+def U.bits : Nat → Nat → List Nat
+  | _, .zero => .nil
+  | b, .succ k => List.append (U.rep (U.bit b (Nat.sub 7 k)) 4) (U.bits b k)
+
+def U.byteBits (b : Nat) : List Nat := List.append (U.rep 0 4) (List.append (U.bits b 8) (U.rep 1 4))
+
+def U.stream : List Nat → List Nat
+  | .nil => .nil
+  | .cons b bs => List.append (U.byteBits b) (List.append (U.rep 1 40) (U.stream bs))
+
+def U.le32 (v : Nat) : List Nat :=
+  .cons (Nat.mod v 256) (.cons (Nat.mod (Nat.div v 256) 256)
+  (.cons (Nat.mod (Nat.div v 65536) 256) (.cons (Nat.mod (Nat.div v 16777216) 256) .nil)))
+
+-- CRC32: reflected, poly 0xEDB88320, init and final xor 0xFFFFFFFF (zlib's `crc32`)
+def U.crcBit : Nat → Nat → Nat
+  | .zero, c => c
+  | .succ k, c =>
+    let c' := if Nat.beq (Nat.mod c 2) 1 then Nat.xor (Nat.div c 2) 0xEDB88320 else Nat.div c 2
+    U.crcBit k c'
+
+def U.crcBytes : Nat → List Nat → Nat
+  | c, .nil => c
+  | c, .cons b bs => U.crcBytes (U.crcBit 8 (Nat.xor c b)) bs
+
+def U.crc32 (bs : List Nat) : Nat := Nat.xor (U.crcBytes 0xFFFFFFFF bs) 0xFFFFFFFF
+
+-- the frame: "GLDR", version 1, flags/reserved 0, length, CRC, entry, payload
+def U.frame (len crc entry : Nat) (payload : List Nat) : List Nat :=
+  List.append (.cons 71 (.cons 76 (.cons 68 (.cons 82 .nil))))
+  (List.append (.cons 1 (.cons 0 (.cons 0 (.cons 0 .nil))))
+  (List.append (U.le32 len) (List.append (U.le32 crc) (List.append (U.le32 entry) payload))))
+
+def U.ddrBase : Nat := 1073741824
+def U.ddrEntry : Nat := 1073741828
+
+-- the payload: `ebreak` at the base; at the entry `lui x5, 0x80000000` (the UART), the
+-- two characters 'O' and 'K', and `ebreak`
+def U.payload : List Nat := Asm.assemble
+  (A.ebreak :: A.lui 5 524288 :: A.li 6 79 :: A.sb 6 0 5 :: A.li 6 75 :: A.sb 6 0 5 ::
+   A.ebreak :: .nil)
+
+-- the image's bytes: `Asm.assemble` yields halfwords (since the C extension)
+def U.le16 (v : Nat) : List Nat := .cons (Nat.mod v 256) (.cons (Nat.mod (Nat.div v 256) 256) .nil)
+
+def U.payloadBytes : List Nat := List.concat (List.map U.le16 U.payload)
+
+def U.good : List Nat := U.frame (List.length U.payloadBytes) (U.crc32 U.payloadBytes) U.ddrEntry U.payloadBytes
+
+-- the same frame with one payload byte changed and the old CRC: it must not run
+def U.badCrc : List Nat :=
+  let bs := U.payloadBytes;
+  let bad := match bs with
+    | .nil => (.nil : List Nat)
+    | .cons _ rest => .cons 0 rest
+  U.frame (List.length bs) (U.crc32 bs) U.ddrEntry bad
+
+-- one byte over the cap (0x00100000): the loader rejects it before the payload
+def U.badLen : List Nat := U.frame 1048577 0 U.ddrBase .nil
+
+def U.natsEq : List Nat → List Nat → Bool
+  | .nil, .nil => .true
+  | .cons a as, .cons b bs => Bool.and (Nat.beq a b) (U.natsEq as bs)
+  | _, _ => .false
+
+-- the UART receiver model: serial bits in, the bytes it framed out (newest first)
+structure U.Rx where
+  r : Rx HwTy.El
+  out : List Nat
+
+def U.rxGo : U.Rx → List Nat → U.Rx
+  | d, .nil => d
+  | d, .cons b bs =>
+    let rr : HwTy.El Rx.code × HwTy.El Byte.code := rxStep 4 d.r (BitVec.ofNat 1 b);
+    let ω ch := Byte.unpack rr.2;
+    U.rxGo (U.Rx.mk (Rx.unpack rr.1)
+      (if Nat.beq ch.valid.toNat 1 then .cons ch.data.toNat d.out else d.out)) bs
+
+def U.received (frame : List Nat) : List Nat :=
+  List.reverse (U.rxGo (U.Rx.mk Rx.init .nil) (U.stream frame)).out
+
+-- the ISA specification's input port: the DDR status byte (done), then each UART byte
+-- as a status byte (2: waiting) and the data byte, which is what `getb` reads
+def U.feed : List Nat → List Nat
+  | .nil => .nil
+  | .cons b bs => List.append (.cons 2 (.cons b .nil)) (U.feed bs)
+
+def U.runFrame (frame : List Nat) : Arch :=
+  let got := U.received frame;
+  Rv.run (Cfg.rv32im 14) 6000
+    (Rv.setInp (Arch.start (Cfg.rv32im 14) (Asm.assemble GLoad.boot)) (.cons 1 (U.feed got)))
+
+def U.text : List Nat → String
+  | .nil => ""
+  | .cons c cs => if Nat.beq c 13 then U.text cs
+    else String.mk (.cons (Char.mk c) (String.chars (U.text cs)))
+
+def U.out (a : Arch) : String := U.text (List.reverse a.out)
+
+-- one case's line; the nested `if`s keep the evaluator's heap small (a `Bool.and`
+-- over a string built from the run's output holds the whole `Arch` and is much heavier)
+def U.caseText (a : Arch) (want : String) : String :=
+  "trap " ++ Nat.repr a.trap ++ " out \"" ++ U.out a ++ "\" " ++
+  (if Nat.beq a.trap 2 then
+     (if String.contains (U.out a) "run" then (if String.contains (U.out a) want then "PASS" else "FAIL") else "FAIL")
+   else "FAIL")
+
+def U.badText (a : Arch) (want : String) : String :=
+  "trap " ++ Nat.repr a.trap ++ " out \"" ++ U.out a ++ "\" " ++
+  (if Nat.beq a.trap 0 then (if String.contains (U.out a) want then "PASS" else "FAIL") else "FAIL")
+
+def U.frameVerdict (frame : List Nat) : String :=
+  if U.natsEq (U.received frame) frame then "PASS" else "FAIL"
+
+def U.report : String :=
+  let words := Nat.div (List.length (Asm.assemble GLoad.boot)) 2;
+  let sizeV := if Nat.le words 256 then "PASS" else "FAIL";
+  "golem load: " ++ Nat.repr words ++ " words " ++ sizeV ++ ", frame "
+    ++ Nat.repr (List.length U.good) ++ " bytes through Rx " ++ U.frameVerdict U.good ++ "; run "
+    ++ U.caseText (U.runFrame U.good) "OK" ++ "; crc "
+    ++ U.badText (U.runFrame U.badCrc) "crc error" ++ "; length "
+    ++ U.badText (U.runFrame U.badLen) "length error"
+
+#eval U.report

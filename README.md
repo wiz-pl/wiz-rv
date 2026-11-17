@@ -254,11 +254,13 @@ Arty board flow.
 
 The simulation boots a small ROM (`src/Rv/Golem/Prog.wiz`) which prints on the UART,
 checks DDR and the timer, draws three pixels into the framebuffer, and calls a routine
-it copied into DDR. Four short kernel runs check it (as the lockstep tests do; the
-compiled netlist is over the build's memory cap): `tests/golem.wiz` the boot ROM as a program on
-the specification, `tests/golem_oled.wiz` the OLED's SPI stream,
-`tests/golem_bus.wiz` the bus/arbiter and DDR stub, and `tests/golem_board.wiz` the
-Arty configuration (75 pins, 55 top ports, the PLL's clocks, the reset domains).
+it copied into DDR. The short checks (as the lockstep tests do; the compiled netlist is
+over the build's memory cap) are `tests/golem.wiz` the boot ROM as a program on the
+specification, `tests/golem_oled.wiz` the OLED's SPI stream, `tests/golem_bus.wiz` the
+bus/arbiter and DDR stub, `tests/golem_board.wiz` the Arty configuration (75 pins, 55
+top ports, the PLL's clocks, the reset domains), and `tests/golem_load.wiz` the framed
+ROM loader (its frame through the UART receiver model, then the loader's program, with
+CRC and length failures).
 
 ```sh
 grail test golem     # or: wiz check tests/golem.wiz -I src -I ../wiz-ddr3/src …
@@ -275,10 +277,12 @@ input, 800 MHz VCO, 100 MHz `sys`, 400 MHz `sys4x`, 400 MHz `sys4xDqs` at 90°, 
 cycle (50 MHz effective). `golem_four` is the 4-hart AMP cut of
 [DESIGN.md](DESIGN.md#four-harts): four multi-cycle harts, one shared UART/OLED/timer/
 mailbox and DDR, behind the N-master arbiter (`--variant four`; `four_nol1` disables
-each hart's L1). The default boot image is `Prog.boot`, the UART loader that
-prints `wiz-rv boot` and `DDR ok`/`DDR fail` and accepts `rvload` records; `--boot rom`
-selects the self-contained `GProg` bring-up ROM. LD0/LD1 are calibration done/failed
-and MMIO `0x8000_0040` reports the same.
+each hart's L1). The default boot image is the framed loader
+(`src/Rv/Golem/Loader.wiz`): it prints `golem load 1`, reads one GLDR frame (magic,
+version, length, CRC32, entry) into DDR at 0x40000000, verifies it and jumps.
+`sw/golem-upload` sends it. `--boot loader` selects the older `rvload` records (and
+Doom's WAD); `--boot rom` the self-contained `GProg` bring-up ROM. LD0/LD1 are
+calibration done/failed and MMIO `0x8000_0040` reports the same.
 
 ```sh
 grail build
@@ -290,11 +294,17 @@ scripts/golem-board.sh bit        # nextpnr-xilinx + fasm2frames + xc7frames2bit
 scripts/golem-board.sh timing     # 100 MHz for golem/golemMc, 50 MHz for the four-hart builds
 ```
 
-`bit` writes `build/a35t/golem.bit` (and `golem.timing`, `golem.report`). The hardware
-step, not run here, is `openFPGALoader -b arty_a7_35t build/a35t/golem.bit`, then the
-UART at 1 Mbaud: the calibration line, then `rvload PORT prog.bin` (or
-`rvload PORT doom.bin doom1.wad`). [DESIGN.md](DESIGN.md) has the pin table and the
-full flow.
+`bit` writes `build/a35t/golem.bit` (and `golem.timing`, `golem.report`). The two
+hardware commands are, not run here:
+
+```sh
+openFPGALoader -b arty_a7_35t build/a35t/golem.bit   # the bitstream, into SRAM
+sw/golem-upload /dev/ttyUSB1 prog.bin                # the program, at 1 Mbaud
+```
+
+For the legacy `rvload` path use `--boot loader` when building, then
+`rvload PORT prog.bin` (or `rvload PORT doom.bin doom1.wad`). [DESIGN.md](DESIGN.md) has
+the frame format, the pin table and the full flow.
 
 ## Doom
 

@@ -446,7 +446,8 @@ src/Rv/Golem/Bus.wiz    GBus.route (decode), GBus.arb (two masters), GBus.arbN (
                         GBus.Atom (shared-point LR/SC/AMO), GBus.ramStep (sim DDR)
 src/Rv/Golem/Intc.wiz   the CLINT-like timer, the PLIC-style controller, the inter-hart
                         mailbox, `mip`/`mie` and the boot ABI's registers
-src/Rv/Golem/Prog.wiz   the boot ROM: banner, DDR/host/timer checks, three pixels, a DDR call
+src/Rv/Golem/Prog.wiz   the bring-up ROM: banner, DDR/host/timer checks, three pixels, a DDR call
+src/Rv/Golem/Loader.wiz the default boot ROM: the framed UART loader (the GLDR frame)
 src/Rv/Golem/Four.wiz   the four-hart SoC: G4.step (four cores, shared MMIO, GBus.arbN,
                         cache), the board-style and behavioural-DDR tops
 src/Rv/Golem/FourProg.wiz the four-hart boot/park loop and the mailbox ring program
@@ -471,7 +472,9 @@ tests/golem_four_plic.wiz the four-hart boot/wake: each hart's PLIC source claim
 tests/golem_plic_harts.wiz four real cores take MEI through their own PLIC contexts (docs/plic.md)
 tests/golem_litmus.wiz  the bus litmus: SC shapes, warm caches, LR/SC, AMO sum
 tests/golem_board.wiz   the `golem board` config/constraints check
-sw/golem.h              the memory map and MMIO for software
+tests/golem_load.wiz    the ROM loader: the frame through the UART model, CRC/length failures
+sw/golem.h              the memory map, MMIO and the loader frame for software
+sw/golem-upload         the host uploader: frame, progress, the loader's reply (Python, no SDK)
 sw/golem.c              a tiny C hello (banner, cycle counter, three rows)
 ```
 
@@ -486,12 +489,12 @@ are otherwise unchanged.
 The simulation top is `Golem.golemSim` (src/Rv/GolemSim.wiz): the slim machine
 (`Mini.machine`: the multi-cycle core, UART, cycle counter, framebuffer and OLED), the
 bus and the arbiter, and `GBus.ramStep` in place of the DDR cache, controller and PHY.
-The checks run these definitions in the kernel's evaluator (`#eval`), as the lockstep
-tests do. Compiling the machine with `Circuit.simFast` is over the 5 GB build cap
-(FINDINGS.md, S1 — the core's IR alone takes tens of minutes and gigabytes), so the
-executable checks use values and short runs.
+The value checks run these definitions in the kernel's evaluator (`#eval`), as the
+lockstep tests do. Compiling the whole machine with `Circuit.simFast` is over the 5 GB
+build cap (FINDINGS.md, S1 — the core's IR alone takes tens of minutes and gigabytes),
+so the `#eval` checks use values and short runs.
 
-There are six checks, one per piece, because each kernel run's state is large
+There are six checks, one per piece, because each `#eval` run's state is large
 (`tests/golem*.wiz`):
 
 | test | what it runs | checks |
@@ -503,6 +506,7 @@ There are six checks, one per piece, because each kernel run's state is large
 | `tests/golem_plic_harts.wiz` | `Intc` with four real multi-cycle cores | every hart sleeps in WFI with MEIE; hart 0 enables context h for source `mboxSrc h` and posts 100+h; each hart takes MEI (mcause 0x8000000b), claims its own source in its own context (via `mhartid`), reads its message, completes, MRETs and halts; nothing left pending |
 | `tests/golem_four_plic.wiz` | `Intc` with four hart state machines | hart 0 enables each context and posts a go message; harts 1/2/3 wake on MEIP and claim sources 3/5/6, take messages 101/202/303 and complete; harts 2/3 have no MEIP before the message |
 | `tests/golem_board.wiz` | `GBoard` (the Arty configuration) | 75 pins, 55 top ports, clocks 100/400/400/200 MHz, reset domains as the design |
+| `tests/golem_load.wiz` | the ROM loader's frame through the UART receiver model (`Rx`, 8N1 bits at 4 cycles a bit), then `Rv.run` on the ISA specification | the frame decodes byte for byte; the good frame: trap 2, `run`, `OK` from the entry; a bad CRC and an over-long length: their diagnostics, trap 0, no jump; the image is at most 256 words |
 
 The boot check is the program on the specification (the core is the multi-cycle one
 that `tests/lockstep.wiz` checks against the same specification; the whole machine with
@@ -532,6 +536,7 @@ wiz check tests/golem_intc.wiz -I src -I ../wiz-ddr3/src
 wiz check tests/golem_four_plic.wiz -I src -I ../wiz-ddr3/src
 wiz check tests/golem_plic_harts.wiz -I src -I ../wiz-ddr3/src
 wiz check tests/golem_board.wiz -I src -I ../wiz-ddr3/src
+wiz check tests/golem_load.wiz  -I src -I ../wiz-ddr3/src
 # or through grail (checks the library and runs the tests):
 grail build && grail test golem
 ```
@@ -550,6 +555,7 @@ golem intc: timer mtip at tick 100, taken 1, cause 7, rearmed 0, csr 0/3; uart c
 golem four plic: phases [13 5 5 5 ], sources [0 3 5 6 ], messages [0 101 202 303 ], before [0 0 ] — PASS
 golem plic harts: 144 cycles; hart 0 [2 2147483659 2 100 0 ] hart 1 [2 2147483659 3 101 1 ] hart 2 [2 2147483659 5 102 2 ] hart 3 [2 2147483659 6 103 3 ]; pending 0 — PASS
 golem board: 75 pins, 55 top ports, 3 reset domains, clocks 100/400/400/200 MHz, PASS
+golem load: 143 words PASS, frame 56 bytes through Rx PASS; run trap 2 out "golem load 1\nrun\nOK" PASS; crc trap 0 out "golem load 1\ncrc error\n" PASS; length trap 0 out "golem load 1\nlength error\n" PASS
 ```
 
 The boot ROM (`GProg.golem`) prints the banner; waits for the DDR status (the stub
@@ -637,15 +643,18 @@ heartbeat, LD3 the bus's (`GBoard.boardLed`).
 
 ### Boot image
 
-The default is the UART loader, `Prog.boot`, the image that is already proven on the
-Arty: it waits for the calibration, prints `wiz-rv boot` and `DDR ok` (or
-`DDR fail`), then accepts `rvload` records and jumps to the loaded program. That is
-the image to use for a C program (`sw/golem.c`, linked at `0x40000000`) or Doom.
-`--boot rom` selects `GProg.golem` instead, the self-contained bring-up ROM: banner,
-DDR status, timer, three framebuffer pixels and a routine copied into and called from
-DDR. The host-loader port of the arbiter is tied off on the board; the UART loader is
-the only way in. The choice is written to `build/golem.boot` so a bitstream's image is
-recorded next to it.
+The default is the framed UART loader, `GLoad.boot`
+(`src/Rv/Golem/Loader.wiz`): it waits for the calibration, prints `golem load 1`, reads
+one GLDR frame (magic, version, length, CRC32, entry), writes the payload to DDR at
+`0x40000000`, verifies it and jumps. `sw/golem-upload` sends the frame; see "The ROM
+loader" below. `--boot loader` selects `Prog.boot`, the older image that is already
+proven on the Arty: it prints `wiz-rv boot` and `DDR ok` (or `DDR fail`), then accepts
+`rvload` records and jumps; it is the one to use for Doom, which also needs a WAD.
+`--boot rom` selects `GProg.golem`, the self-contained bring-up ROM: banner, DDR
+status, timer, three framebuffer pixels and a routine copied into and called from DDR.
+The host-loader port of the arbiter is tied off on the board; the UART is the only way
+in. The choice is written to `build/golem.boot` so a bitstream's image is recorded
+next to it.
 
 ### Building
 
@@ -674,24 +683,113 @@ the Nix store (`GOLEM_YOSYS`, `GOLEM_NEXTPNR`, `GOLEM_FASM2FRAMES`,
 
 ### The hardware step
 
-The bitstream is loaded into SRAM (not flashed) with
+Build once, then two commands load a program without rebuilding the bitstream:
 
 ```sh
+# 1. the bitstream, into SRAM (not flashed)
 openFPGALoader -b arty_a7_35t build/a35t/golem.bit
+
+# 2. the program (the default `upload` boot image)
+sw/golem-upload /dev/ttyUSB1 prog.bin
 ```
 
-then the UART at 1 Mbaud (`stty -F /dev/serial/by-id/usb-Digilent_*-if01-port0 1000000 raw -echo`,
-`cat` the port): the default loader prints `wiz-rv boot` and, after the DDR3
-calibration, `DDR ok` or `DDR fail`; LD0/LD1 show the same. Then
-`rvload PORT prog.bin` (or `rvload PORT doom.bin doom1.wad`) loads a program into DDR
-and jumps to it. A failed calibration is visible on the UART and the LEDs, and the
-MMIO status register is readable by software.
+The port is the FT2232's second channel
+(`/dev/serial/by-id/usb-Digilent_*-if01-port0` is the stable name). The default loader
+prints `golem load 1` and, after the DDR3 calibration, waits for the frame; the tool
+waits for that banner, sends the image with progress, and prints the loader's reply
+(`run` on success, a diagnostic otherwise). LD0/LD1 show calibration done/failed. A
+failed calibration is visible on the UART and the LEDs, and the MMIO status register is
+readable by software.
+
+The older flow still works: `--boot loader` builds the rvload image, then
+`stty -F PORT 1000000 raw -echo` plus `rvload PORT prog.bin` (or
+`rvload PORT doom.bin doom1.wad`) loads records into DDR and jumps. Use it for Doom (the
+WAD is a second load) or any existing rvload session.
 
 What remains is the board run itself: place and route at 100 MHz, load the bitstream,
-capture the calibration line, and run the C image or Doom over `rvload`. None of the
+capture the calibration line, and run the C image or Doom over the UART. None of the
 logic is new: `golem` is the Doom machine's blocks with the bus decode and arbiter in
 front of the cache, and the Doom flow already ran this DDR3/OLED pairing on the same
 board.
+
+## The ROM loader
+
+`GLoad.boot` (`src/Rv/Golem/Loader.wiz`) is the default boot image and the whole
+protocol is one frame. It is deliberately small (143 words, 572 bytes, about 3.5% of
+the 16 KB on-chip RAM), so it is a plain BRAM initialisation like the other boot
+images, not a second design.
+
+The frame, little-endian, 20 bytes of header plus the payload:
+
+| offset | bytes | field | meaning |
+|---|---|---|---|
+| 0 | 4 | magic | `G` `L` `D` `R` |
+| 4 | 1 | version | 1; anything else is refused |
+| 5 | 1 | flags | 0 (reserved) |
+| 6 | 2 | reserved | 0 (ignored by this loader) |
+| 8 | 4 | length | payload bytes; **less than 1 MiB** (`0x0010_0000`) |
+| 12 | 4 | crc32 | of the payload only: reflected, polynomial `0xEDB88320`, initial and final xor `0xFFFF_FFFF` (zlib/Python's `crc32`) |
+| 16 | 4 | entry | absolute address of the first instruction, 4-byte aligned and inside the payload |
+| 20 | length | payload | loaded at the fixed base `0x40000000` (DDR) |
+
+The loader writes each payload byte to DDR as it arrives, folds it into the CRC, and
+compares the result with the header's CRC before it jumps. It never jumps on a frame it
+has not verified:
+
+* a CRC mismatch prints `crc error` and returns to waiting for the next frame;
+* a length of 1 MiB or more prints `length error` before reading the payload;
+* a wrong version prints `version error`;
+* an entry outside `[0x4000_0000, base + length)` or not 4-byte aligned prints
+  `entry error`;
+* a failed DDR3 calibration prints `ddr fail` and halts in the loader (there is nowhere
+  to load to).
+
+In every error case the machine stays in the loader: the host can correct the image
+and send it again. A bad frame does write its (unverified) payload bytes to DDR before
+the CRC check, so a partial or corrupt image can overwrite the target region; only the
+jump is refused. The loader waits for the DDR3 calibration first, so the core's reset
+policy (held until `calDone | calFail`) and the status check agree.
+
+Baud is **1 Mbaud, 8N1**, fixed by the board's UART divider (`Doom.baud`): the loader
+has no UART configuration of its own. The host must wait for the `golem load 1` banner
+before sending because the receiver holds one byte (printing the banner is slower than
+the line); `sw/golem-upload` does this, and `--no-wait` is for an already-running board.
+At 1 Mbaud the line carries 10 bits a byte, so the 1 MiB cap is about 10.5 s of
+transfer plus about 1 s of CRC (roughly 100 cycles a byte at 100 MHz).
+
+`sw/golem-upload` (`#!/usr/bin/env python3`, the standard library only: `termios`,
+`select`, `zlib`) checks the image size and entry, builds the frame, waits for the
+banner, sends it with a progress line, then prints the loader's and the program's UART
+output. It exits 0 on `run`, 2 when the loader refused the image, 3 when no reply came.
+`--frame FILE` writes the exact frame (useful for an inspection or a simulator) and
+`--dry-run` stops after building it.
+
+Limits, recorded rather than hidden:
+
+* one contiguous image at `0x40000000`, below 1 MiB: no load address in the frame, no
+  records, no second segment, no relocation, no `.bss` zeroing (the payload is flat);
+* the jump carries no ABI beyond the registers the loader leaves: no stack pointer is
+  set up (the C `_start` in `sw/crt0.S` sets its own and zeroes `.bss`), and the other
+  registers are the loader's scratch;
+* no WAD or data file: Doom's WAD is a second object and uses the `--boot loader`
+  image and `rvload`, which supports both. A future frame version can add a flag or a
+  load address;
+* the header's `flags`/`reserved` bytes are ignored, so a version-1 sender must keep
+  them 0 for a future loader to accept the same frames;
+* the CRC protects the payload, not the header. Magic, version, length and the entry's
+  range/alignment are checked separately; a corrupted header field is rejected rather
+  than silently obeyed.
+
+`tests/golem_load.wiz` is the simulation check. It streams the frame through the real
+UART receiver model (`Rx`, src/Rv/Uart.wiz, 8N1 bits at 4 cycles a bit), checks that the
+decoded bytes are the frame sent, and runs the loader on the ISA specification
+(`Rv.run`, as `tests/golem.wiz` does), because the full slim machine is over the
+`#eval` build cap (FINDINGS.md S1). The program at the entry prints `OK` and `ebreak`s,
+and the image's first word is an `ebreak`, so a loader that jumped to the base instead
+of the entry would stop at once with no `OK`. The three frames are the good one (trap 2,
+`run` and `OK`), one corrupted byte with the old CRC (`crc error`, trap 0) and an
+over-long length (`length error`, trap 0); it also checks that the loader image is at
+most 256 words.
 
 
 ## Doom

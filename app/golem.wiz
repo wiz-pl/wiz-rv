@@ -1,7 +1,7 @@
 import Rv.GolemBoard
 import Sys
 import Text
--- The golem board flow: `golem COMMAND [--boot rom|loader] [--variant golem|mc|four|four_nol1|both]`.
+-- The golem board flow: `golem COMMAND [--boot rom|loader|upload] [--variant golem|mc|four|four_nol1|both]`.
 -- grail builds this program (and checks the library); it writes the Verilog and the
 -- constraints and runs the openXC7 tools as child processes (yosys, nextpnr-xilinx,
 -- fasm2frames, xc7frames2bit). scripts/golem-board.sh finds those tools in PATH or in
@@ -18,10 +18,12 @@ import Text
 --   dry        board + gen only, and print the hardware step (no FPGA tools needed)
 --   all        board, gen, synth, bit
 --
--- There is no `flash`: the brief does not authorise hardware. The bitstream command is
+-- There is no `flash`: the brief does not authorise hardware. The two commands are
 --   openFPGALoader -b arty_a7_35t build/a35t/golem.bit
--- (SRAM only), then the UART's boot line: "wiz-rv boot" and "DDR ok" (the loader) or
--- "golem boot … ddr ok" (--boot rom). LD0 is calibration done, LD1 calibration failed.
+--   sw/golem-upload /dev/ttyUSB1 prog.bin
+-- (SRAM only): the default image prints "golem load 1" and waits for the frame;
+-- `--boot loader` prints "wiz-rv boot"/"DDR ok" for rvload, and `--boot rom` prints
+-- "golem boot … ddr ok". LD0 is calibration done, LD1 calibration failed.
 --
 -- Environment: GOLEM_YOSYS, GOLEM_NEXTPNR, GOLEM_FASM2FRAMES, GOLEM_XC7FRAMES2BIT,
 -- GOLEM_CHIPDB (the directory holding xc7a35tcsg324.bin), GOLEM_DB (the directory
@@ -97,7 +99,7 @@ def boardCheck : EIO Unit := do
     <+> Hdl.show (GBoard.clkoutHz 3 / 1000000) <+> " MHz");
   say ("  reset: sys = BTN0 or !(calDone | calFail); phy = 255 cycles after LOCKED; ddr = the"
     <+> " controller's rstN. LD0 calDone, LD1 calFail, LD2 core, LD3 bus");
-  say ("  boot: " <+> GBoard.Boot.name GBoard.defaultBoot <+> " (default; --boot rom for the self-test ROM)");
+  say ("  boot: " <+> GBoard.Boot.name GBoard.defaultBoot <+> " (default; upload = sw/golem-upload, loader = rvload, rom = GProg)");
   match GBoard.problems with
   | .nil => say "  ok: every port has its pin, the clocks are the PLL's, the resets are the design's"
   | es => EIO.fail ("golem board: FAIL: " <+> Hdl.sepBy "; " es)
@@ -135,8 +137,9 @@ def gen (vars : List GBoard.Variant) (boot : GBoard.Boot) : EIO Unit := do
   ensureDir "build";
   EIO.forEach (fun (v : GBoard.Variant) => genOne boot v) vars;
   FS.writeFile (build "golem.boot") ("boot image: " <+> GBoard.Boot.name boot <+> "\n"
-    <+> "default: loader (Prog.boot); rom = GProg.golem\n"
+    <+> "default: upload (GLoad.boot, sw/golem-upload); loader = rvload (Prog.boot); rom = GProg.golem\n"
     <+> "calibration: the core is held until calDone | calFail; LD0 done, LD1 failed\n"
+    <+> "upload: print \"golem load 1\", wait for one GLDR frame, verify its CRC32, jump\n"
     <+> "loader: rvload the C image or Doom after \"DDR ok\"\n")
 
 ------------------------------------------------------------------------------------
@@ -285,7 +288,7 @@ partial def parse : List String → Opt → Opt
     else parse ws (Opt.mk (.cons w o.words) o.boot o.variant)
 
 def usage : String :=
-  "usage: golem board | check | gen | synth | bit | timing | dry | all [--boot rom|loader] [--variant golem|mc|four|four_nol1|both]"
+  "usage: golem board | check | gen | synth | bit | timing | dry | all [--boot rom|loader|upload] [--variant golem|mc|four|four_nol1|both]"
 
 def variants (o : Opt) : List GBoard.Variant :=
   match GBoard.variantsOf o.variant with
@@ -302,7 +305,8 @@ def run (o : Opt) : EIO Unit := match o.words with
   | .cons "timing" _ => EIO.forEach (fun (v : GBoard.Variant) => timingReport v) (variants o)
   | .cons "dry" _ => EIO.bind boardCheck (fun u => EIO.bind (gen (variants o) o.boot) (fun u => do
       say "dry run: no synthesis or place-and-route (the Verilog and XDC are written)";
-      say ("hardware step: openFPGALoader -b arty_a7_35t " <+> dev "golem.bit")))
+      say ("hardware step: openFPGALoader -b arty_a7_35t " <+> dev "golem.bit");
+      say "then: sw/golem-upload /dev/ttyUSB1 prog.bin  (the default boot image)"))
   | .cons "all" _ => EIO.bind boardCheck (fun u => EIO.bind (gen (variants o) o.boot) (fun u =>
       EIO.bind (EIO.forEach (fun (v : GBoard.Variant) => synth (GBoard.Variant.name v)) (variants o))
         (fun u => bit (variants o) o.boot)))
