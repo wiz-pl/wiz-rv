@@ -12,6 +12,7 @@
 1 instructions, 5 cycles, trap 3, out agrees
 21 instructions, 35 cycles, trap 2, out agrees
 20 instructions, 33 cycles, trap 2, out 165 0 9 9 9 9 0 agrees
+EXPECTED-FAIL (pipeline CSR gap, docs/csr.md): 2 instructions, 7 cycles, trap 0, out DISAGREES; after 2 instructions; mscratch: core 1, spec 0; mscratch: core 1, spec 0
 69 instructions, 341 cycles, trap 2, out 11 1 7 128 11 7 8 agrees
 347 instructions, 770 cycles, trap 2, out 104 1 28 agrees
 47 instructions, 154 cycles, trap 2, out 33 135 33 67 33 34 agrees

@@ -47,6 +47,25 @@ def csrE : String := report 4 Prog.csr 400
 -- the immediate forms at uimm = 0: CSRRWI writes, CSRRSI/CSRRCI do not (issue #11);
 -- the output bytes are fixed by the ISA manual, so a bug both models share shows here
 def csrImmE : String := report 4 Prog.csrImm 100
+-- THE PIPELINE CSR TEST, restored at full strength as an EXPECTED-FAIL. `csrE` above is
+-- the test as it has run since d9f1bb6: the CSRs are not compared while a SYSTEM
+-- instruction is in M or R (`PLs.compare`'s `ahead`), so the CSR write made in E is never
+-- observed until the specification has stepped the instruction too. `csrStrictE` compares
+-- every CSR at every retirement (`PLs.runStrict`); it DISAGREES by exactly that gap, at
+-- the retirement of the first CSRRW: "mscratch: core 1, spec 0" (the line appears twice:
+-- the retirement comparison and `PLs.finish`'s comparison of the final state). This is
+-- not a new bug: in PR #3, 8b1177c removed the CSR case from this list (masking a
+-- pipeline CSR path that stopped every program at cycle 3, docs/csr.md) and d9f1bb6
+-- restored it with the suppression. The expected-fail keeps the missing coverage
+-- visible: if the pipeline ever compares CSRs at retirement, the line turns into
+-- "agrees" and the case must be promoted, not deleted.
+def csrStrictE : String :=
+  (fun (r : Ls.Result) => "EXPECTED-FAIL (pipeline CSR gap, docs/csr.md): "
+    ++ Nat.repr r.instrs ++ " instructions, " ++ Nat.repr r.cycles ++ " cycles, trap "
+    ++ Nat.repr r.trap ++ ", out " ++ showBytes r.out
+    ++ (match r.problems with
+      | .nil => "agrees"
+      | ps => "DISAGREES" ++ lines ps)) (PLs.runStrict 4 8 .false (Asm.assemble Prog.csr) 400)
 -- traps and interrupts with handlers (vectored mtvec): ECALL handled and returned past,
 -- the timer interrupt in a loop, WFI waiting for MEIP with MIE off, the external
 -- interrupt once MIE is set; then interrupts at arbitrary points of a load/store/branch
@@ -94,7 +113,7 @@ def say : List String → IO Unit
 def all : List String :=
   List.append (sumE :: aluE :: shiftE :: memE :: branchE :: sortE :: .nil)
     (List.append trapsE
-      (List.append (csrE :: csrImmE :: irqE :: irqStressE :: ddrE :: ioE :: sbvBrE :: x16I :: aluI :: mulI :: mulIM :: .nil)
+      (List.append (csrE :: csrImmE :: csrStrictE :: irqE :: irqStressE :: ddrE :: ioE :: sbvBrE :: x16I :: aluI :: mulI :: mulIM :: .nil)
         (List.append (cE :: cUE :: .nil)
           (List.append cBadE (bootE :: ctestE :: .nil)))))
 
