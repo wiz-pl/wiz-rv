@@ -6,6 +6,7 @@
 #   oracle/scripts/run-oracle.sh build
 #   oracle/scripts/run-oracle.sh selftest
 #   oracle/scripts/run-oracle.sh run
+#   oracle/scripts/run-oracle.sh rvfi --pipe --fixture hazard
 #   oracle/scripts/run-oracle.sh --nix run
 #   oracle/scripts/run-oracle.sh --nix run --backends sail,spike
 set -eu

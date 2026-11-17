@@ -1,0 +1,63 @@
+// riscv-formal adapter for the pipelined core's rvfi retirement port (Rv.Pipe).
+//
+// This file is a template: oracle/scripts/mkrvfi_pipe.py fills in the instance of the
+// emitted module (`oracle_rvfi`, from oracle/wiz/emit_pipe.wiz).  Do not edit the
+// generated copy.
+//
+// The emitted module *is* the rvfi port: its outputs are `Pp.rvfi` in src/Rv/Pipe.wiz,
+// one beat per retired instruction (`rv_valid && !rr_miss`, the PLockstep retirement).
+// It reads only registers — `rr_ins`, `rr_pc`, `rr_pcw`, `rr_we`, `rr_rd`, `rr_val`,
+// `rr_trap`, `rr_addr`, `rr_ldw` and the architectural register file at R — so the
+// formal harness needs no hierarchical memory references and no debug read ports.
+//
+// This adapter only
+//   * ties the core's bus/I/O inputs (the formal programs are on-chip and idle), and
+//   * adds the three rvfi signals that are not properties of the core:
+//     `rvfi_order` (a free-running retirement counter), `rvfi_mode` (machine mode) and
+//     `rvfi_ixl` (32-bit).
+//
+// riscv-formal's `rvfi_wrapper` instantiates this module as `rvfi` and connects
+// `clock`, `reset` and the `RVFI_CONN` nets by name.
+
+module rvfi(
+  input  clk,
+  input  rst,
+
+  output        rvfi_valid,
+  output [63:0] rvfi_order,
+  output [31:0] rvfi_insn,
+  output        rvfi_trap,
+  output        rvfi_halt,
+  output        rvfi_intr,
+  output [1:0]  rvfi_mode,
+  output [1:0]  rvfi_ixl,
+
+  output [4:0]  rvfi_rs1_addr,
+  output [4:0]  rvfi_rs2_addr,
+  output [31:0] rvfi_rs1_rdata,
+  output [31:0] rvfi_rs2_rdata,
+
+  output [4:0]  rvfi_rd_addr,
+  output [31:0] rvfi_rd_wdata,
+
+  output [31:0] rvfi_pc_rdata,
+  output [31:0] rvfi_pc_wdata,
+
+  output [31:0] rvfi_mem_addr,
+  output [3:0]  rvfi_mem_rmask,
+  output [3:0]  rvfi_mem_wmask,
+  output [31:0] rvfi_mem_rdata,
+  output [31:0] rvfi_mem_wdata
+);
+
+${INSTANCE}
+
+  reg [63:0] order_q = 64'd0;
+  always @(posedge clk) begin
+    if (rvfi_valid) order_q <= order_q + 64'd1;
+  end
+
+  assign rvfi_order = order_q;
+  assign rvfi_mode  = 2'b11;   // machine mode
+  assign rvfi_ixl   = 2'b01;   // 32-bit
+endmodule

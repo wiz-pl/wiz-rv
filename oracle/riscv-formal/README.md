@@ -157,12 +157,55 @@ read-only and pinned by commit as above; the counts and log summary are in
 `../README.md`.
 
 
+## The pipeline (Rv.Pipe)
+
+The pipelined core has a real rvfi port, so it does not use `formal_core.py` or
+`mkrvfi.py`: `oracle/wiz/emit_pipe.wiz` emits `pipeRvfiCore` (module `oracle_rvfi`),
+whose outputs are `Pp.rvfi` in `src/Rv/Pipe.wiz`. `mkrvfi_pipe.py` turns that into
+the `rvfi` module the wrapper wants: it ties the core's bus/I/O inputs and adds
+`rvfi_order`, `rvfi_mode` and `rvfi_ixl`. There are no hierarchical memory
+references, so no debug read ports are needed.
+
+`Pp.rvfi` reads only the retiring stage's own registers — `rr_ins`, `rr_pc`,
+`rr_pcw` (the core's next PC, latched from E), `rr_we`/`rr_rd`/`rr_val`, `rr_trap`,
+`rr_addr`, `rr_ldw` (the word a load read) — and the architectural register file at
+R (`ms.rfa[rs1]`, `ms.rfb[rs2]`). The three `rr_*` fields did not exist: R had no
+instruction word, no next-PC and no raw load word, which is why the previous
+retirement shim had to decode the ISA. They are now carried E → M → R
+(FINDINGS.md, H15).
+
+The check cycle is **4**: an instruction fetched at cycle 1 is in E at 2, M at 3 and
+R (retiring) at 4. Every base-I class has its first beat at 4 (a taken branch
+redirects in E, so its beats are three cycles apart, but the first is still 4). The
+config is `checks-pipe.cfg` (`insn 4`); only the `insn` checks are configured.
+
+```sh
+nix shell nixpkgs#yosys nixpkgs#sby nixpkgs#boolector nixpkgs#iverilog -c \
+  oracle/scripts/run-rvfi.sh --pipe --instruction add --sby
+nix shell nixpkgs#yosys nixpkgs#sby nixpkgs#boolector nixpkgs#iverilog -c \
+  oracle/scripts/run-rvfi.sh --pipe --all-insns
+```
+
+Results at the pinned revision (`c992aa6`, yosys 0.70, sby 0.70, boolector 3.2.4):
+
+* `insn_add_ch0` PASS, `insn_beq_ch0` PASS (the branch class), `insn_lw_ch0` PASS.
+* `--pipe --all-insns`: **37/37 PASS** (every base-I name in `insns/isa_rv32i.txt`).
+  Each is a BMC to cycle 4 with `--presat`, so the assumptions were satisfiable
+  (the instruction under test is the one retiring) and the assertions held.
+
+A `--pipe --fixture <f> --sby` is a clean SKIP: a fixture is a sequence trace, and
+the instruction under test would not be the one at the check cycle. `--pipe
+--fixture <f>` alone generates and lints the adapter; `oracle.py rvfi --pipe` runs
+the sequence trace.
+
 ## What is not covered
 
 * No checker for traps/interrupts/CSRs is configured; the core has no privileged
   architecture.
 * The M extension would need `rvfi_muldiv` and a configuration with `M`; the
-  wrapper exposes the multiplier's result but this has not been run.
-* The pipelined core (`Rv.Pipe`) retires at R, not at the multi-cycle E/M/S/X/V
-  completion points; it needs a separate wrapper (latent `rr` stage) and has not
-  been written.
+  wrapper exposes the multiplier's result but this has not been run. The pipeline
+  is emitted with `mx = .false`, so `insn_m*` are not among its checks.
+* The pipeline's consistency checks (`reg`, `pc_fwd`, `pc_bwd`, `causal`,
+  `causal_mem`, `unique`, `liveness`) need their own cycle plan and are not run.
+  `rvfi_mem_wdata` is the architectural `rs2` (`rvfi_rs2_rdata << 8*addr[1:0]`), so
+  the store *data path* is not independently checked.

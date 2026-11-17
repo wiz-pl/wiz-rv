@@ -1,0 +1,99 @@
+// Testbench for the pipeline's rvfi port: run the emitted pipeline through the
+// rvfi adapter and print one trace line per retirement, in the oracle's line format.
+//
+//   iverilog -g2005 -o sim pipe.v rvfi_pipe.v tb_rvfi_pipe.v \
+//       -Ptb_rvfi_pipe.STEPS=32 -Ptb_rvfi_pipe.MBASE=8192 -Ptb_rvfi_pipe.MCOUNT=256
+//   vvp sim
+//
+// The beat is a retirement (R), so the line is the architectural *pre-state* of
+// the retiring instruction: it corresponds to the Python trace's line `step`
+// (0-based), not `step + 1`.  PC and registers are read from the core instance
+// `dut` inside the adapter.  Memory is the on-chip data memory of the *previous*
+// cycle, because a store's write lands at the edge the store enters R (see
+// oracle/wiz/pipe_trace.wiz); `prev_mem` is sampled at every edge for that.
+`timescale 1ns/1ps
+
+module tb_rvfi_pipe;
+  parameter integer STEPS  = 32;
+  parameter integer MBASE  = 8192;
+  parameter integer MCOUNT = 256;
+
+  reg clk = 1'b0;
+  always #5 clk = ~clk;
+
+  wire        rvfi_valid;
+  wire [63:0] rvfi_order;
+  wire [31:0] rvfi_insn;
+  wire        rvfi_trap;
+  wire        rvfi_halt;
+  wire        rvfi_intr;
+  wire [1:0]  rvfi_mode;
+  wire [1:0]  rvfi_ixl;
+  wire [4:0]  rvfi_rs1_addr;
+  wire [4:0]  rvfi_rs2_addr;
+  wire [31:0] rvfi_rs1_rdata;
+  wire [31:0] rvfi_rs2_rdata;
+  wire [4:0]  rvfi_rd_addr;
+  wire [31:0] rvfi_rd_wdata;
+  wire [31:0] rvfi_pc_rdata;
+  wire [31:0] rvfi_pc_wdata;
+  wire [31:0] rvfi_mem_addr;
+  wire [3:0]  rvfi_mem_rmask;
+  wire [3:0]  rvfi_mem_wmask;
+  wire [31:0] rvfi_mem_rdata;
+  wire [31:0] rvfi_mem_wdata;
+
+  rvfi u(
+    .clk(clk), .rst(1'b0),
+    .rvfi_valid(rvfi_valid), .rvfi_order(rvfi_order), .rvfi_insn(rvfi_insn),
+    .rvfi_trap(rvfi_trap), .rvfi_halt(rvfi_halt), .rvfi_intr(rvfi_intr),
+    .rvfi_mode(rvfi_mode), .rvfi_ixl(rvfi_ixl),
+    .rvfi_rs1_addr(rvfi_rs1_addr), .rvfi_rs2_addr(rvfi_rs2_addr),
+    .rvfi_rs1_rdata(rvfi_rs1_rdata), .rvfi_rs2_rdata(rvfi_rs2_rdata),
+    .rvfi_rd_addr(rvfi_rd_addr), .rvfi_rd_wdata(rvfi_rd_wdata),
+    .rvfi_pc_rdata(rvfi_pc_rdata), .rvfi_pc_wdata(rvfi_pc_wdata),
+    .rvfi_mem_addr(rvfi_mem_addr), .rvfi_mem_rmask(rvfi_mem_rmask),
+    .rvfi_mem_wmask(rvfi_mem_wmask), .rvfi_mem_rdata(rvfi_mem_rdata),
+    .rvfi_mem_wdata(rvfi_mem_wdata));
+
+  integer beats = 0;
+  integer i, j, wa;
+  reg [31:0] b;
+  reg [31:0] regv;
+  reg [7:0] prev_mem [0:MCOUNT-1];
+
+  always @(posedge clk) begin
+    if (rvfi_valid) begin
+      $write("S %0d %08x %08x", beats, u.dut.rr_pc, u.dut.rr_trap);
+      for (i = 0; i < 32; i = i + 1) begin
+        if (i == 0) regv = 32'd0;
+        else regv = u.dut.ms_rfa[i];
+        $write(" %08x", regv);
+      end
+      for (j = 0; j < MCOUNT; j = j + 1) begin
+        $write(" %02x", prev_mem[j]);
+      end
+      $write("\n");
+      beats = beats + 1;
+      if (beats > STEPS) $finish;
+    end
+    // Sample the *old* memory every edge (non-blocking: the read below sees the
+    // value from the previous edge), i.e. the pre-state of the next retirement.
+    for (j = 0; j < MCOUNT; j = j + 1) begin
+      wa = (MBASE + j) >> 2;
+      case ((MBASE + j) & 3)
+        0: b = u.dut.ms_md0[wa];
+        1: b = u.dut.ms_md1[wa];
+        2: b = u.dut.ms_md2[wa];
+        default: b = u.dut.ms_md3[wa];
+      endcase
+      prev_mem[j] <= b[7:0];
+    end
+  end
+
+  initial begin
+    #(100000);
+    $display("# rvfi: timeout after %0d beats", beats);
+    $finish;
+  end
+endmodule

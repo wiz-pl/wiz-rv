@@ -162,16 +162,20 @@ the other instructions.
 ## Independent oracle
 
 `oracle/` is verification infrastructure, not part of the core. It compares the
-executable specification (`Rv.Isa`), the multi-cycle core, an independent Python RV32I
-reference, `sail-riscv` and Spike on one architectural trace per instruction (PC, trap
-cause, all 32 registers and the data memory), on ALU, branch, load/store, shift and
-mixed fixtures. The Wiz sides also emit the rest of the trap state (`tval`, `epc`) on a
-`T` line; six `trap_*` fixtures stop the machine on each trap cause and compare it
+executable specification (`Rv.Isa`), the multi-cycle core, the 5-stage pipeline at
+retirement (`Rv.Pipe`, R), an independent Python RV32I reference, `sail-riscv` and
+Spike on one architectural trace per instruction (PC, trap cause, all 32 registers and
+the data memory), on ALU, branch, hazard/forwarding, load/store, shift, stall, redirect
+and mixed fixtures. The Wiz sides also emit the rest of the trap state (`tval`, `epc`)
+on a `T` line; six `trap_*` fixtures stop the machine on each trap cause and compare it
 between `isa`, `core` and `py` (Sail/Spike enter a handler and are reported as skips,
 not passes). The recorded run (sail-riscv 0.12, Spike 1.1.1-dev) has 31 passing
 comparisons, 0 failures and 2 documented skips (Spike cannot load at 0, so the two
 AUIPC fixtures are Sail/Python-only); the trap set adds 33 `isa`/`core`/`py`
-comparisons, all passing.
+comparisons, all passing; the pipeline extension (branch `agent/rv-pipeline-oracle`)
+brings the base-I set to 87 passing, 0 failed and 3 skipped over eight fixtures, and
+adds a retirement sequence trace through the pipeline's rvfi port (8/0/0). See
+[oracle/README.md](oracle/README.md).
 
 The same directory has an `rvfi` (RISC-V Formal Interface) wrapper for the emitted
 core. It is generated from the flat Verilog by `oracle/scripts/mkrvfi.py`, linted with
@@ -181,7 +185,15 @@ five fixtures. The riscv-formal checks were then run against the pinned revision
 boolector 3.2.4, Icarus 13.0): **37/37 `insn_*_ch0` checks pass** (every base-I
 instruction), `causal_mem_ch0` passes on the mixed load/store program, and the
 `reg`/`pc_fwd`/`pc_bwd`/`causal`/`unique`/`liveness` consistency checks pass on the
-load program. No assertion failed. See [oracle/README.md](oracle/README.md) and
+load program. No assertion failed.
+
+The pipeline has a real rvfi port too (branch `agent/rv-pipeline-formal`, based on
+`agent/rv-pipeline-oracle`): three registers (`ins`, `pcw`, `ldw`) now carry the
+instruction, the core's next PC and the raw load word into R, and `Pp.rvfi` exposes
+them (with the register file read at R) as the emitted circuit's outputs. Against the
+same pinned riscv-formal, `insn_add`, `insn_beq` and `insn_lw` pass, and the full
+base-I sweep is **37/37 PASS** at the pipeline's retirement cycle. See
+[oracle/README.md](oracle/README.md) and
 [oracle/riscv-formal/README.md](oracle/riscv-formal/README.md).
 
 ## Toolchain

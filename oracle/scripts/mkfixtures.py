@@ -275,6 +275,103 @@ def mixed_program():
     ]
 
 
+def hazard():
+    """Forwarding: a dependent chain through M and R, a load-use pair and a branch
+    whose operands are produced by the previous instruction."""
+    return [
+        addi(x1, x0, 5),
+        addi(x2, x0, 7),
+        add(x3, x1, x2),        # forward both operands
+        add(x4, x3, x1),        # from the previous instruction (M -> E)
+        add(x5, x4, x3),        # from M and R at once
+        sub(x6, x5, x4),
+        xor(x7, x6, x3),
+        orr(x8, x7, x6),
+        andr(x9, x8, x7),
+        addi(x10, x0, -1),
+        add(x11, x10, x1),
+        slt(x12, x11, x1),
+        lui(x13, 0x12345),
+        add(x14, x13, x13),     # 0x2468a000, aligned
+        lui(x16, 2),            # DATA
+        sw(x14, x16, 0),
+        lw(x17, x16, 0),        # store -> load
+        add(x18, x17, x14),     # load-use: E stalls one cycle
+        add(x19, x18, x17),
+        xori(x20, x19, -1),
+        addi(x21, x0, 1),
+        add(x22, x21, x20),
+        beq(x22, x22, 8),       # branch on the previous instruction's result
+        addi(x23, x0, 99),      # skipped
+        addi(x24, x0, 1),
+        SPIN,
+    ]
+
+
+def stall():
+    """Load-use stalls and a store/load back to back, with byte and half widths."""
+    return [
+        lui(x1, 2),             # DATA
+        addi(x2, x0, 0x55),
+        sw(x2, x1, 0),
+        lw(x3, x1, 0),
+        add(x4, x3, x3),        # load-use
+        lw(x5, x1, 4),
+        add(x6, x5, x4),        # load-use
+        lw(x7, x1, 8),
+        sub(x8, x7, x6),        # load-use
+        addi(x9, x0, 7),
+        sw(x9, x1, 12),
+        lw(x10, x1, 12),
+        add(x11, x10, x9),      # load-use
+        sb(x11, x1, 16),
+        lbu(x12, x1, 16),
+        add(x13, x12, x11),     # load-use after a byte load
+        sh(x13, x1, 18),
+        lhu(x14, x1, 18),
+        add(x15, x14, x13),     # load-use after a half load
+        addi(x16, x0, -1),
+        add(x17, x16, x15),
+        SPIN,
+    ]
+
+
+def redirect():
+    """Taken and not-taken branches, a loop with back-to-back targets, JAL and JALR,
+    and a branch whose operands are written the instruction before it."""
+    return [
+        addi(x1, x0, 0),        # sum
+        addi(x2, x0, 1),        # i
+        addi(x3, x0, 8),
+        # loop: x1 = 1 + 2 + … + 7; the branch target is the next instruction
+        # to retire after the branch (a redirect while younger instructions are
+        # in D and E)
+        add(x1, x1, x2),
+        addi(x2, x2, 1),
+        blt(x2, x3, -8),
+        addi(x4, x0, 1),
+        beq(x4, x4, 8),         # taken; x4 from the previous instruction
+        addi(x5, x0, 2),        # skipped
+        addi(x6, x0, 3),
+        bne(x6, x6, 8),         # not taken
+        addi(x7, x0, 4),
+        jal(x8, 8),             # taken, skips one
+        addi(x9, x0, 5),        # skipped
+        addi(x10, x0, 6),
+        auipc(x11, 0),
+        addi(x11, x11, 16),
+        jalr(x12, x11, 0),      # -> the instruction after the next 4
+        addi(x13, x0, 7),       # skipped
+        addi(x14, x0, 8),
+        addi(x15, x0, 9),
+        addi(x16, x0, 10),
+        bge(x16, x15, 8),       # taken
+        addi(x17, x0, 11),      # skipped
+        addi(x18, x0, 12),
+        SPIN,
+    ]
+
+
 def trap_ecall():
     """ECALL: the machine stops, cause 1, tval 0, epc the ECALL's address."""
     return [addi(x1, x0, 7), 0x00000073, 0x00100073, SPIN]
@@ -303,9 +400,12 @@ def trap_store():
 FIXTURES = {
     "alu": ("rv32i", 14, 32, DATA, 256, alu()),
     "branch": ("rv32i", 14, 40, DATA, 256, branch()),
+    "hazard": ("rv32i", 14, 32, DATA, 256, hazard()),
     "mem": ("rv32i", 14, 32, DATA, 256, mem()),
-    "shift": ("rv32i", 14, 32, DATA, 256, shift()),
     "mixed": ("rv32i", 14, 40, DATA, 256, mixed_program()),
+    "redirect": ("rv32i", 14, 40, DATA, 256, redirect()),
+    "shift": ("rv32i", 14, 32, DATA, 256, shift()),
+    "stall": ("rv32i", 14, 32, DATA, 256, stall()),
     # traps: the Wiz machine stops (cause/tval/epc); the trace pads with stutters to
     # `steps + 1` states. Sail/Spike are skipped for these (they enter a handler).
     "trap_ecall": ("rv32i", 14, 6, DATA, 256, trap_ecall()),

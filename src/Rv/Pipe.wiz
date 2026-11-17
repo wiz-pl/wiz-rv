@@ -180,6 +180,15 @@ structure PpM (r : HwTy → Type) where
   shAmt : r B5
   shL : r W1
   shF : r W1
+  ins : r B32     -- the instruction word: E keeps it, but R had none, and the rvfi port
+                  -- (`Pp.rvfi`) reports the retiring instruction (riscv-formal `insn_*`).
+                  -- It is E's `raw`, the encoding as fetched (a C instruction's 16 bits,
+                  -- zero-extended), not the expanded `ins`: rvfi_insn is the raw encoding
+  pcw : r B32     -- the architectural next PC, as E computed it (pc + 2/4, pc + imm, jalr)
+                  -- (R had no next-PC register; `Pp.rvfi` reports the core's own value,
+                  -- not a decode of the instruction)
+  ldw : r B32     -- the word a load read in M, before sign/zero extension (`Pp.rvfi`'s
+                  -- `rvfi_mem_rdata`: `rr.val` is already extracted)
   deriving Bundle
 
 structure PpR (r : HwTy → Type) where
@@ -197,6 +206,9 @@ structure PpR (r : HwTy → Type) where
   c : r W1        -- a 16-bit instruction (the smc refetch adds 2, not 4)
   kill : r W1     -- this one kills the younger instructions (a trap, a miss, smc): decided
                   -- as it enters R, so that the kill is a register
+  ins : r B32     -- the retiring instruction word (see PpM.ins)
+  pcw : r B32     -- its architectural next PC (see PpM.pcw)
+  ldw : r B32     -- the word a load read (see PpM.ldw)
   deriving Bundle
 
 structure PpDiv (r : HwTy → Type) where
@@ -609,13 +621,15 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
     (mk1 m.mul isMul)
     (mk32 m.p0 (Hw.mul aL bL)) (mk32 m.p1 (Hw.mul aL bH)) (mk32 m.p2 (Hw.mul aH bL)) (mk32 m.p3 (Hw.mul aH bH))
     (mk32 m.corr corr)
-    (mk1 m.sh shiftE) (mk32 m.shA a) (Hw.mux mHold m.shAmt (Hw.slice 0 5 b : r B5)) (mk1 m.shL (isK f3 1)) (mk1 m.shF (Hw.and alt (bitOf 31 a)));
+    (mk1 m.sh shiftE) (mk32 m.shA a) (Hw.mux mHold m.shAmt (Hw.slice 0 5 b : r B5)) (mk1 m.shL (isK f3 1)) (mk1 m.shF (Hw.and alt (bitOf 31 a)))
+    (mk32 m.ins e.raw) (mk32 m.pcw (Hw.mux jump target pcInc)) (mk32 m.ldw (Hw.mux m.io x.ioIn w));
   let rV := gate rTake m.v;
   let rIm := gate rTake m.imiss;
   let rMiss := gate rTake dmiss;
   let ω rN := PpR.mk rV rIm rMiss smc m.pc m.rd
     (gate rTake (gate m.we (gate (isK m.trap 0) (Hw.not dmiss)))) mval m.trap m.tval m.addr m.c
-    (Hw.or rIm (gate rV (Hw.or (Hw.not (isK m.trap 0)) (Hw.or rMiss smc))));
+    (Hw.or rIm (gate rV (Hw.or (Hw.not (isK m.trap 0)) (Hw.or rMiss smc))))
+    m.ins m.pcw m.ldw;
   let ω dvN := PpDiv.mk
     (Hw.mux kill (Hw.lit 1 0) (Hw.mux dStart (Hw.lit 1 1) (Hw.mux (gate dDone advE) (Hw.lit 1 0) dv.on)))
     (Hw.mux dStart (Hw.lit 5 31) (Hw.mux dStep (Hw.sub dv.cnt (Hw.lit 5 1)) dv.cnt))
@@ -693,8 +707,9 @@ def Pp.reset {r : HwTy → Type} [Hw r] (ab wb : Nat) (rst : r W1) (c : PpSt ab 
       e.legal e.ecall e.ebreak e.u1 e.u2 e.f1M e.f1R e.f2M e.f2R e.lu
       e.rsel e.kSub e.csr e.csrAddr e.csrWrite e.mret e.wfi)
     (PpM.mk (z m.v) (z m.imiss) m.pc m.rd (z m.we) (z m.late) m.res m.addr m.sd m.f3 m.c m.load m.store m.io m.ddr m.trap m.tval m.mul
-      m.p0 m.p1 m.p2 m.p3 m.corr (z m.sh) m.shA m.shAmt m.shL m.shF)
-    (PpR.mk (z rr.v) (z rr.imiss) (z rr.miss) (z rr.smc) rr.pc rr.rd (z rr.we) rr.val rr.trap rr.tval rr.addr (z rr.c) (z rr.kill))
+      m.p0 m.p1 m.p2 m.p3 m.corr (z m.sh) m.shA m.shAmt m.shL m.shF m.ins m.pcw m.ldw)
+    (PpR.mk (z rr.v) (z rr.imiss) (z rr.miss) (z rr.smc) rr.pc rr.rd (z rr.we) rr.val rr.trap rr.tval rr.addr (z rr.c) (z rr.kill)
+      rr.ins rr.pcw rr.ldw)
     (PpDiv.mk (z dv.on) dv.cnt dv.acc dv.dvs dv.rm (z dv.fin))
     (PpBus.mk (z bu.sbv) bu.sba bu.sbd bu.sbs (z bu.act) bu.we bu.addr bu.wd bu.strb (z bu.sent) (Hw.mux rst (Hw.lit 2 0) bu.gap) bu.k bu.buf
       (z bu.freq) bu.fI bu.faddr)
@@ -733,8 +748,10 @@ def PpSt.init (ab wb : Nat) (prog : List Nat) : PpSt ab wb HwTy.El :=
       (Pp.z 4) (Pp.z 1) (Pp.z 1) (Pp.z 12) (Pp.z 1) (Pp.z 1) (Pp.z 1))
     (PpM.mk (Pp.z 1) (Pp.z 1) (Pp.z 32) (Pp.z 5) (Pp.z 1) (Pp.z 1) (Pp.z 32) (Pp.z 32) (Pp.z 32) (Pp.z 3)
       (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 3) (Pp.z 32) (Pp.z 1) (Pp.z 32) (Pp.z 32) (Pp.z 32) (Pp.z 32) (Pp.z 32)
-      (Pp.z 1) (Pp.z 32) (Pp.z 5) (Pp.z 1) (Pp.z 1))
-    (PpR.mk (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 32) (Pp.z 5) (Pp.z 1) (Pp.z 32) (Pp.z 3) (Pp.z 32) (Pp.z 32) (Pp.z 1) (Pp.z 1))
+      (Pp.z 1) (Pp.z 32) (Pp.z 5) (Pp.z 1) (Pp.z 1)
+      (Pp.z 32) (Pp.z 32) (Pp.z 32))
+    (PpR.mk (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 1) (Pp.z 32) (Pp.z 5) (Pp.z 1) (Pp.z 32) (Pp.z 3) (Pp.z 32) (Pp.z 32) (Pp.z 1) (Pp.z 1)
+      (Pp.z 32) (Pp.z 32) (Pp.z 32))
     (PpDiv.mk (Pp.z 1) (Pp.z 5) (Pp.z 32) (Pp.z 32) (Pp.z 32) (Pp.z 1))
     (PpBus.mk (Pp.z 1) (Pp.z 32) (Pp.z 32) (Pp.z 4) (Pp.z 1) (Pp.z 1) (Pp.z 32) (Pp.z 32) (Pp.z 4) (Pp.z 1) (Pp.z 2)
       (Pp.z 2) (Pp.z 128) (Pp.z 1) (Pp.z 1) (Pp.z 32))
@@ -743,3 +760,90 @@ def PpSt.init (ab wb : Nat) (prog : List Nat) : PpSt ab wb HwTy.El :=
 def pipeCore (ab wb : Nat) (mx : Bool) (prog : List Nat) : Circuit In.code Out.code :=
   Circuit.mk (PpSt.code ab wb) (Bundle.toEl (PpSt.bundle ab wb) (PpSt.init ab wb prog))
     (fun s x => pipeStep ab wb mx (PpSt.unpack ab wb s) (In.unpack x))
+
+------------------------------------------------------------------------------------
+-- The rvfi retirement port (RISC-V Formal Interface)
+
+-- One beat per retired instruction, as riscv-formal's `insn_*` checks read it. The
+-- values are the core's own, taken from R (`rr`), except for the two register-operand
+-- values, which are read from the architectural register file at R (as the D stage
+-- reads it): by the time an instruction is in R, every older instruction has written,
+-- so `rfa[rs1]`/`rfb[rs2]` are exactly the values it read (its own write has not
+-- landed yet). `rvfi_pc_wdata` is the core's next-PC register (`rr.pcw`, latched from
+-- E's jump/target logic), not a decode of the instruction word, so a wrong redirect is
+-- caught by the check rather than reproduced by the port.
+--
+-- `rvfi_order`, `rvfi_mode` and `rvfi_ixl` are not here: they are constants or a
+-- free-running counter and the Verilog adapter adds them (`oracle/rtl/rvfi_pipe.v.in`).
+--
+-- `rvfi_valid` is a retirement in the PLockstep sense: `rr.v && !rr.miss` (a cache
+-- miss is replayed, so its R marker is not a retirement). Memory is on-chip only for
+-- the formal programs; a DDR load's word is not in the on-chip copies, but `rr.ldw`
+-- carries the word the load actually read (`x.ioIn` for an I/O load), so the port
+-- reports it either way. A store's data path is not observed here (`rvfi_mem_wdata` is
+-- the architectural `rs2`, as in the multi-cycle port), so the `insn_sw`/`sb`/`sh`
+-- checks cover the address and byte masks, not the store merge.
+structure PpRv (r : HwTy → Type) where
+  rvfi_valid : r W1
+  rvfi_insn : r B32
+  rvfi_trap : r W1
+  rvfi_halt : r W1
+  rvfi_intr : r W1
+  rvfi_rs1_addr : r B5
+  rvfi_rs2_addr : r B5
+  rvfi_rs1_rdata : r B32
+  rvfi_rs2_rdata : r B32
+  rvfi_rd_addr : r B5
+  rvfi_rd_wdata : r B32
+  rvfi_pc_rdata : r B32
+  rvfi_pc_wdata : r B32
+  rvfi_mem_addr : r B32
+  rvfi_mem_rmask : r B4
+  rvfi_mem_wmask : r B4
+  rvfi_mem_rdata : r B32
+  rvfi_mem_wdata : r B32
+  deriving Bundle
+
+-- a 4-bit mask `m` shifted left by `n` (0 … 3) byte lanes, as data
+def Pp.maskL {r : HwTy → Type} [Hw r] (m : r B4) (n : r B2) : r B4 :=
+  Hw.mux (isK n 0) m (Hw.mux (isK n 1) (Hw.cat (Hw.slice 0 3 m : r (HwTy.bits 3)) (Hw.lit 1 0))
+    (Hw.mux (isK n 2) (Hw.cat (Hw.slice 0 2 m : r (HwTy.bits 2)) (Hw.lit 2 0))
+      (Hw.cat (Hw.slice 0 1 m : r (HwTy.bits 1)) (Hw.lit 3 0))))
+
+def Pp.rvfi {r : HwTy → Type} [Hw r] (ab : Nat) {wb : Nat} (s : PpSt ab wb r) : PpRv r :=
+  let ω rr := s.rr;
+  let insn := rr.ins;
+  let rs1 : r B5 := Hw.slice 15 5 insn;
+  let rs2 : r B5 := Hw.slice 20 5 insn;
+  let f3 : r B3 := Hw.slice 12 3 insn;
+  let opc : r B7 := Hw.slice 0 7 insn;
+  let load := isK opc 3;
+  let store := isK opc 35;
+  let size : r B4 := Hw.mux (isK (Hw.slice 0 2 f3 : r B2) 0) (Hw.lit 4 1)
+    (Hw.mux (isK (Hw.slice 0 2 f3 : r B2) 1) (Hw.lit 4 3) (Hw.lit 4 15));
+  let off : r B2 := Hw.slice 0 2 rr.addr;
+  let mask : r B4 := Pp.maskL size off;
+  let a1 : r B32 := Hw.memRead s.ms.rfa (regIx ab rs1);
+  let a2 : r B32 := Hw.memRead s.ms.rfb (regIx ab rs2);
+  let wd : r B32 := Hw.mux (isK off 0) a2 (Hw.mux (isK off 1) (Hw.cat (Hw.slice 0 24 a2 : r (HwTy.bits 24)) (Hw.lit 8 0))
+    (Hw.mux (isK off 2) (Hw.cat (Hw.slice 0 16 a2 : r (HwTy.bits 16)) (Hw.lit 16 0))
+      (Hw.cat (Hw.slice 0 8 a2 : r (HwTy.bits 8)) (Hw.lit 24 0))));
+  PpRv.mk
+    (Hw.and rr.v (Hw.not rr.miss)) insn
+    (Hw.not (isK rr.trap 0)) (Hw.not (isK rr.trap 0)) (Hw.lit 1 0)
+    rs1 rs2 a1 a2
+    (Hw.mux rr.we rr.rd (Hw.lit 5 0)) (Hw.mux rr.we rr.val (Hw.lit 32 0))
+    rr.pc rr.pcw
+    (Hw.mux (Hw.or load store) (Hw.cat (Hw.slice 2 30 rr.addr : r (HwTy.bits 30)) (Hw.lit 2 0)) (Hw.lit 32 0))
+    (Hw.mux load mask (Hw.lit 4 0)) (Hw.mux store mask (Hw.lit 4 0))
+    (Hw.mux load rr.ldw (Hw.lit 32 0)) (Hw.mux store wd (Hw.lit 32 0))
+
+-- The pipelined core with the rvfi port as its output (the state, reset and step are
+-- `pipeCore`'s). The oracle emits this (`oracle/wiz/emit_pipe.wiz`) and wraps it in a
+-- module named `rvfi`; the core's own `Out` is unchanged.
+def pipeRvfiCore (ab wb : Nat) (mx : Bool) (prog : List Nat) : Circuit In.code PpRv.code :=
+  Circuit.mk (PpSt.code ab wb) (Bundle.toEl (PpSt.bundle ab wb) (PpSt.init ab wb prog))
+    (fun s x =>
+      let ω sp := PpSt.unpack ab wb s;
+      let ω nx := Hw.fst (pipeStep ab wb mx sp (In.unpack x));
+      Hw.pair nx (PpRv.pack (Pp.rvfi ab sp)))

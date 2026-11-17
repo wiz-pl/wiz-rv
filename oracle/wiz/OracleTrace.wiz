@@ -8,7 +8,11 @@ import Text
 -- *before* instruction `step`, and the memory bytes are
 -- `[mem_base, mem_base + mem_count)`.  A line `# …` is a comment.  An ISA trace has
 -- `steps + 1` state lines (one initial state and one after each instruction); a core
--- trace is projected from the core at its E phase, one line per instruction.
+-- trace is projected from the multi-cycle core at its E phase, and a pipeline trace
+-- from `Rv.Pipe` at retirement (R), one line per instruction.  Both are the same
+-- pre-state: for a store the pipeline's R sample already contains the store's own
+-- write, so `pipe_trace.wiz` emits the memory of the *previous* cycle (documented
+-- there); that is still the core's state, not a re-implementation.
 --
 -- The fixtures are plain text (see oracle/fixtures/README.md):
 --

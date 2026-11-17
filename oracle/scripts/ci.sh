@@ -21,6 +21,7 @@ else
   echo "SKIP oracle selftest: oracle/.build/{isa,core}_trace not built"
   echo "     light wiz build oracle/wiz/isa_trace.wiz  -I oracle/wiz -I src -o oracle/.build/isa_trace"
   echo "     light wiz build oracle/wiz/core_trace.wiz -I oracle/wiz -I src -o oracle/.build/core_trace"
+  echo "     light wiz build oracle/wiz/pipe_trace.wiz -I oracle/wiz -I src -o oracle/.build/pipe_trace"
 fi
 
 if [ -x oracle/.build/emit_core ]; then
@@ -32,4 +33,16 @@ if [ -x oracle/.build/emit_core ]; then
 else
   echo "SKIP oracle rvfi: oracle/.build/emit_core not built"
   echo "     light wiz build oracle/wiz/emit_core.wiz -I oracle/wiz -I src -o oracle/.build/emit_core"
+fi
+
+if [ -x oracle/.build/emit_pipe ]; then
+  oracle/scripts/run-rvfi.sh --pipe --fixture hazard || exit 1
+  python3 oracle/scripts/oracle.py rvfi --pipe --fixture hazard || exit 1
+  if [ "$formal" = 1 ]; then
+    # the pipeline's rvfi port at the retirement cycle (a repeated-instruction core)
+    oracle/scripts/run-rvfi.sh --pipe --instruction add --sby || exit 1
+  fi
+else
+  echo "SKIP oracle pipe rvfi: oracle/.build/emit_pipe not built"
+  echo "     light wiz build oracle/wiz/emit_pipe.wiz -I oracle/wiz -I src -o oracle/.build/emit_pipe"
 fi
