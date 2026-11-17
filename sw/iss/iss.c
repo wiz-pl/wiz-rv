@@ -4,18 +4,21 @@
    (UART on stdout / from a key script, a cycle counter, the audio FIFO, written to a
    WAV file, the OLED framebuffer, written out as PPM images).
 
-   iss PROGRAM.bin WAD [-n INSTRUCTIONS] [-maxframes N] [-frames DIR] [-wav FILE]
-       [-keys "TIME:KEY,..."] [-screen ADDR] [-lenient]
-   The program is loaded at 0x40000000 and started there; the WAD at 0x48000000.
+   iss PROGRAM.bin [WAD] [-n INSTRUCTIONS] [-maxframes N] [-frames DIR]
+       [-wav FILE] [-keys "TIME:KEY,..."] [-screen HEX] [-lenient]
+   The program is loaded at 0x40000000 and started there; the WAD (optional: the
+   benchmark does not need it) at 0x48000000 and its length at 0x47fffff0. That is
+   the memory rvload (app/rvload.wiz) leaves behind on the board.
 
    The performance counters at 0x80000050 (sw/hw.h) are implemented so that the
    program's own perf line measures the simulation: instructions retired, DDR
    accesses (the ISS has no caches, so every DDR fetch or data access is counted as
    one), load cycles, long (shift/multiply/divide) cycles, fetches from DDR,
-   framebuffer writes and refreshes. Cycle counts follow the multi-cycle core's model
-   (two cycles an instruction, one more for a load or store, the shift amount, 32 for
-   a divide); they are not the 100 MHz pipeline's. A frame boundary is the write of
-   pixel 96 x 64 - 1; each one prints its instructions and cycles on stderr. */
+   framebuffer writes and refreshes; the cache counters read 0. Cycle counts follow
+   the multi-cycle core's model (two cycles an instruction, one more for a load or
+   store, the shift amount + 1, 32 for a divide); they are not measurements of the
+   100 MHz pipeline or of hardware. A frame boundary is the write of pixel
+   96 x 64 - 1; each one prints its instructions and cycles on stderr. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -95,6 +98,7 @@ static void dump_frame(void) {
 static uint64_t snd_written;
 static FILE *wav;
 static uint32_t wav_n;
+static uint32_t fbw_pc[16]; static int fbw_n;
 
 static uint32_t io_read(uint32_t a) {
   uint32_t ms = (uint32_t)(cycles / 50000);
@@ -126,7 +130,6 @@ static uint32_t io_read(uint32_t a) {
   }
 }
 
-static uint32_t fbw_pc[16]; static int fbw_n;
 static void io_write(uint32_t a, uint32_t v, int size) {
   if ((a >> 24) == 0x81) {
     fbw_total++;
@@ -263,27 +266,48 @@ static long load(const char *path, uint32_t at) {
   return n;
 }
 
+static void usage(void) {
+  fprintf(stderr,
+    "usage: iss PROGRAM.bin [WAD] [options]\n"
+    "  -n N            stop after N instructions (default 2000000000)\n"
+    "  -maxframes N    stop when N frames have been written\n"
+    "  -frames DIR     write each frame as DIR/frameNNNNN.ppm (and fullNNNNN.ppm with -screen)\n"
+    "  -screen HEX     the address of Doom's DG_ScreenBuffer pointer, for the full frame\n"
+    "  -wav FILE       write the sound FIFO to FILE (8-bit mono, 11025 Hz)\n"
+    "  -keys K         a key script, \"milliseconds:key,...\" (\\n and \\e are escapes)\n"
+    "  -lenient        do misaligned accesses instead of trapping, and report them\n");
+}
+
 int main(int argc, char **argv) {
-  if (argc < 3) { fprintf(stderr, "usage: iss PROGRAM.bin WAD [-n N] [-frames DIR] [-keys K]\n"); return 2; }
+  const char *prog = 0, *wadPath = 0;
   uint64_t limit = 2000000000ull;
-  for (int i = 3; i + 1 < argc; i += 2) {
-    if (!strcmp(argv[i], "-n")) limit = strtoull(argv[i + 1], 0, 10);
-    else if (!strcmp(argv[i], "-frames")) frames = argv[i + 1];
-    else if (!strcmp(argv[i], "-keys")) keys = argv[i + 1];
-    else if (!strcmp(argv[i], "-lenient")) { lenient = 1; i--; }
-    else if (!strcmp(argv[i], "-maxframes")) maxframes = strtoull(argv[i + 1], 0, 10);
-    else if (!strcmp(argv[i], "-screen")) screen_ptr = (uint32_t)strtoul(argv[i + 1], 0, 16);
-    else if (!strcmp(argv[i], "-wav")) { wav = fopen(argv[i + 1], "wb"); fseek(wav, 44, SEEK_SET); }
+  for (int i = 1; i < argc; i++) {
+    const char *a = argv[i];
+    if (!strcmp(a, "-n") && i + 1 < argc) limit = strtoull(argv[++i], 0, 10);
+    else if (!strcmp(a, "-maxframes") && i + 1 < argc) maxframes = strtoull(argv[++i], 0, 10);
+    else if (!strcmp(a, "-frames") && i + 1 < argc) frames = argv[++i];
+    else if (!strcmp(a, "-keys") && i + 1 < argc) keys = argv[++i];
+    else if (!strcmp(a, "-screen") && i + 1 < argc) screen_ptr = (uint32_t)strtoul(argv[++i], 0, 16);
+    else if (!strcmp(a, "-wav") && i + 1 < argc) { wav = fopen(argv[++i], "wb"); if (wav) fseek(wav, 44, SEEK_SET); }
+    else if (!strcmp(a, "-lenient")) lenient = 1;
+    else if (a[0] == '-') { usage(); return 2; }
+    else if (!prog) prog = a;
+    else if (!wadPath) wadPath = a;
+    else { usage(); return 2; }
   }
+  if (!prog) { usage(); return 2; }
   ddr = calloc(DDR_SIZE, 1);
-  load(argv[1], 0x40000000u);
-  uint32_t n = (uint32_t)load(argv[2], 0x48000000u);
+  if (!ddr) { perror("calloc"); return 1; }
+  load(prog, 0x40000000u);
+  uint32_t n = wadPath ? (uint32_t)load(wadPath, 0x48000000u) : 0;
   memcpy(byte_at(0x47fffff0u), &n, 4);
   pc = 0x40000000u;
   int t = 0;
   while (instret < limit && !(t = step()) && (maxframes == 0 || frames_done < maxframes)) {}
+  int frameStop = maxframes && frames_done >= maxframes && !t;
   fprintf(stderr, "\n[iss] %s after %llu instructions, %llu cycles (%.1f s at 50 MHz), pc %08x, %llu frames (%.2f fps average)\n",
-          t ? "trap" : "stopped", (unsigned long long)instret, (unsigned long long)cycles, cycles / 50e6, pc,
+          t ? "trap" : frameStop ? "frame limit" : "stopped", (unsigned long long)instret,
+          (unsigned long long)cycles, cycles / 50e6, pc,
           (unsigned long long)frames_done, frames_done ? 50e6 * (double)frames_done / (double)cycles : 0.0);
   if (t) {
     fprintf(stderr, "[iss] trap %d\n", t);
