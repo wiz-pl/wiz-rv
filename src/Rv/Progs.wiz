@@ -96,6 +96,19 @@ def Prog.csr : List Asm :=
   A.li 14 8 :: A.csrrc 0 Csr.aMstatus 14 :: A.csrrs 15 Csr.aMstatus 0 ::
   A.ebreak :: .nil
 
+-- the immediate CSR forms at uimm = 0 (issue #11): CSRRWI always writes (mscratch
+-- becomes 0); CSRRSI/CSRRCI with uimm 0 do not write. Output, by the ISA manual (not
+-- by either model): 165 (the old mscratch, from CSRRWI), 0 (mscratch after CSRRWI 0),
+-- 9, 9, 9 (CSRRSI 0 and CSRRCI 0 read 9 and leave it), 9 (CSRRWI x11 reads 9), 0
+def Prog.csrImm : List Asm :=
+  P.port :: A.li 5 165 :: A.csrrw 0 Csr.aMscratch 5 ::
+  A.csrrwi 6 Csr.aMscratch 0 :: A.csrrs 7 Csr.aMscratch 0 :: P.out 6 :: P.out 7 ::
+  A.csrrwi 0 Csr.aMscratch 9 ::
+  A.csrrsi 8 Csr.aMscratch 0 :: A.csrrci 9 Csr.aMscratch 0 :: A.csrrs 10 Csr.aMscratch 0 ::
+  P.out 8 :: P.out 9 :: P.out 10 ::
+  A.csrrwi 11 Csr.aMscratch 0 :: A.csrrs 12 Csr.aMscratch 0 :: P.out 11 :: P.out 12 ::
+  A.ebreak :: .nil
+
 -- traps and interrupts with handlers (docs/csr.md): mtvec in vectored mode (base 4,
 -- bit 0 set), so an exception goes to 4 and interrupt `c` to 4 + 4c. ECALL is handled
 -- and returned past (mepc + 4); the timer interrupt (MTIP, from `Prog.irqAt`) is taken

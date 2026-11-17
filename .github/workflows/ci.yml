@@ -1,0 +1,193 @@
+# wiz-rv CI. See "Continuous integration" in README.md.
+#
+# Every job uses the toolchain `wiz-toolchain` pins (wiz and grail from the wiz flake at
+# that commit, substituted from the badlydrawnwizards Cachix cache, else built once by
+# the `toolchain` job and kept in the Actions cache), and wiz-ddr3's master checked out
+# next to this repository, where grail.wiz looks for it (../wiz-ddr3/src).
+#
+# No synthesis, place and route or hardware here: the Artix-7 flow needs nextpnr-xilinx
+# and an xc7a35t chip database that are not in nixpkgs or Cachix.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+# a newer push to the same branch or pull request supersedes the older run
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash -eo pipefail {0}
+    working-directory: wiz-rv
+
+jobs:
+  # wiz and grail at the pin. A Cachix hit takes seconds; a miss builds wiz from source
+  # (Lean) once and saves the store paths to the Actions cache for the other jobs and
+  # later runs (keyed on the pin).
+  toolchain:
+    name: toolchain
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: wiz-rv
+      - uses: ./wiz-rv/.github/actions/toolchain
+        with:
+          save: "true"
+
+  # 1. `wiz check` on every module: src/ (with the multi-cycle core's proofs,
+  # src/Rv/Proofs.wiz and src/Rv/TrapProofs/*.wiz) and app/. The pipelined core's
+  # proofs (proofs/PipeProofs, about 20 minutes each) are not run here.
+  check:
+    name: wiz check
+    needs: toolchain
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: wiz-rv
+      - uses: actions/checkout@v5
+        with:
+          repository: wiz-pl/wiz-ddr3
+          path: wiz-ddr3
+      - uses: ./wiz-rv/.github/actions/toolchain
+        id: toolchain
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/wiz
+          key: wiz-elab-check-${{ steps.toolchain.outputs.ref }}-${{ github.sha }}
+          restore-keys: wiz-elab-check-${{ steps.toolchain.outputs.ref }}-
+      - name: wiz check (src, app, the proofs)
+        run: JOBS=4 scripts/ci-check.sh
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: wiz-check-logs
+          path: wiz-rv/.grail/ci-check
+          retention-days: 7
+
+  # 2. The independent oracle (oracle/README.md): build the three trace programs with
+  # wiz, then isa/core against the Python reference on every fixture (selftest), the
+  # rvfi wrapper's lint, and its beats simulated with Icarus against the Python
+  # reference. Sail, Spike and riscv-formal (sby) are not run.
+  oracle:
+    name: oracle
+    needs: toolchain
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: wiz-rv
+      - uses: ./wiz-rv/.github/actions/toolchain
+        id: toolchain
+        with:
+          packages: iverilog
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/wiz
+          key: wiz-elab-oracle-${{ steps.toolchain.outputs.ref }}-${{ github.sha }}
+          restore-keys: wiz-elab-oracle-${{ steps.toolchain.outputs.ref }}-
+      - name: oracle.py build
+        run: python3 oracle/scripts/oracle.py build
+      - name: selftest and the rvfi wrapper lint (oracle/scripts/ci.sh)
+        run: |
+          # ci.sh reports a missing trace binary as SKIP; here everything must run (its
+          # "SKIP riscv-formal checks" is expected: no --sby)
+          oracle/scripts/ci.sh | tee "$RUNNER_TEMP/oracle.log"
+          if grep -q '^SKIP oracle' "$RUNNER_TEMP/oracle.log"; then exit 1; fi
+      - name: rvfi beats against the Python reference (Icarus)
+        run: |
+          for fx in alu branch mem mixed shift; do
+            python3 oracle/scripts/oracle.py rvfi --fixture "$fx" | tee "$RUNNER_TEMP/rvfi.log"
+            if grep -q '^SKIP' "$RUNNER_TEMP/rvfi.log"; then exit 1; fi
+          done
+
+  # 3. The cores against the specification: tests/lockstep.wiz (multi-cycle core),
+  # tests/plockstep.wiz (pipelined core) and tests/spec.wiz (the ISA, the C expansion).
+  lockstep:
+    name: grail test (lockstep, plockstep, spec)
+    needs: toolchain
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: wiz-rv
+      - uses: actions/checkout@v5
+        with:
+          repository: wiz-pl/wiz-ddr3
+          path: wiz-ddr3
+      - uses: ./wiz-rv/.github/actions/toolchain
+        id: toolchain
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/wiz
+          key: wiz-elab-lockstep-${{ steps.toolchain.outputs.ref }}-${{ github.sha }}
+          restore-keys: wiz-elab-lockstep-${{ steps.toolchain.outputs.ref }}-
+      - name: grail test
+        run: grail test tests/lockstep.wiz tests/plockstep.wiz tests/spec.wiz
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: lockstep-logs
+          path: wiz-rv/.grail/log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # 4. The rest of `grail test`: the golem SoC tests (tests/golem*.wiz).
+  #
+  # MEMORY: tests/golem_intc.wiz's `#eval` needs about 4.5 GB and 3 minutes on a cold
+  # elaboration cache (on a warm one, 0.5 GB and 5 s). GitHub's runners have 16 GB, so
+  # it fits; a smaller (self-hosted) runner needs at least 6 GB for this job.
+  #
+  # TIMEOUTS: --test-timeout 600 for golem_intc (186 s cold) until the pin has per-test
+  # `timeout` lines (wiz agent/grail-test-timeout); then golem_intc.wiz gets
+  # `-- test: check timeout 600` and the flag goes.
+  #
+  # NOT RUN: tests/long.wiz (it cannot pass at this pin: the program limit is a fixed
+  # 60 s); add it here with `-- test: run timeout 900` after the pin bump.
+  golem:
+    name: grail test (golem)
+    needs: toolchain
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: wiz-rv
+      - uses: actions/checkout@v5
+        with:
+          repository: wiz-pl/wiz-ddr3
+          path: wiz-ddr3
+      - uses: ./wiz-rv/.github/actions/toolchain
+        id: toolchain
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/wiz
+          key: wiz-elab-golem-${{ steps.toolchain.outputs.ref }}-${{ github.sha }}
+          restore-keys: wiz-elab-golem-${{ steps.toolchain.outputs.ref }}-
+      - name: grail test
+        run: |
+          # every tests/golem*.wiz (the filter is a path substring); GNU time, when the
+          # image has it, reports the peak (the 4.5 GB above, on a cold cache)
+          t=; [ -x /usr/bin/time ] && t="/usr/bin/time -v"
+          $t grail test --test-timeout 600 tests/golem
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: golem-logs
+          path: wiz-rv/.grail/log
+          if-no-files-found: ignore
+          retention-days: 7
