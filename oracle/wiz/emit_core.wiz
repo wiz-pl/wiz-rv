@@ -23,7 +23,7 @@ def Emit.main (path : String) (mbitsArg : Nat) : IO Unit :=
       let ab := 5;
       let mbits := if Nat.beq mbitsArg 0 then fx.mbits else mbitsArg;
       let wb := Nat.sub mbits 2;
-      let n := Circuit.netlist "oracle_core" (board ab wb .false fx.words);
+      let n := Circuit.netlist "oracle_core" (board ab wb (Fx.m fx) fx.words);
       IO.print (Verilog.emit n))
 
 def Emit.parseMbits : List String → Nat

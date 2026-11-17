@@ -75,6 +75,29 @@ check cycle with a store). The per-instruction depths are chosen by class;
 A cycle mismatch is reported by sby as `PREUNSAT`; `run-rvfi.sh` treats that as
 `FAIL <check> (ERROR 16 …)`, never as a pass.
 
+## The M extension ("rvfi muldiv")
+
+At the pinned revision there is no check literally named `rvfi_muldiv`. M is
+checked by the same `rvfi_insn_check`: with `isa rv32im`, `genchecks.py` generates
+`insn_mul_ch0`, `insn_mulh_ch0`, `insn_mulhsu_ch0`, `insn_mulhu_ch0`,
+`insn_div_ch0`, `insn_divu_ch0`, `insn_rem_ch0` and `insn_remu_ch0` from the
+Sail-derived models in `insns/isa_rv32im.txt`. `run-rvfi.sh --muldiv` runs exactly
+those eight; `--instruction <m-op>` selects `checks-muldiv.cfg` automatically and
+emits the core with `mx` set (the `rv32im` fixture cfg). The check cycles follow
+the core's phase timing:
+
+| class | phases after E | check cycle |
+|---|---|---|
+| `mul`, `mulh`, `mulhsu`, `mulhu` | X (product written), D | 4 |
+| `div`, `divu`, `rem`, `remu` | 32 × V (one quotient bit per cycle), D | 35 |
+
+With the whole lane memory one repeated instruction, the operands are whatever
+the preceding copies leave behind (x2 = x3 = 0). For the divide class that means
+the formal checks cover the divide-by-zero result (`0xffffffff` for DIV/DIVU, the
+dividend for REM/REMU); the non-zero, signed-edge and overflow cases are covered
+by the trace oracle (`oracle.py run`, the `mul`…`remu` fixtures), which compares
+`Rv.Isa`, the core, Python, Sail and Spike.
+
 ## Generate, lint and run
 
 ```sh
@@ -84,9 +107,11 @@ light wiz build oracle/wiz/emit_core.wiz -I oracle/wiz -I src -o oracle/.build/e
 # generate the checks (and lint the wrapper + core) without running them
 oracle/scripts/run-rvfi.sh --instruction add --list
 
-# one instruction check, all 37 base-I instruction checks, or a subset
+# one instruction check, all 45 instruction checks, the 8 M checks, or a subset
 oracle/scripts/run-rvfi.sh --instruction add --sby
 oracle/scripts/run-rvfi.sh --all-insns
+oracle/scripts/run-rvfi.sh --muldiv
+oracle/scripts/run-rvfi.sh --instruction mul --sby
 oracle/scripts/run-rvfi.sh --instruction lw --sby --checks 'reg_ch0 pc_fwd_ch0 pc_bwd_ch0'
 oracle/scripts/run-rvfi.sh --fixture mixed --cfg oracle/riscv-formal/checks-causal-mem.cfg \
   --sby --checks causal_mem_ch0
@@ -135,9 +160,14 @@ nix shell nixpkgs#yosys nixpkgs#sby nixpkgs#boolector nixpkgs#iverilog -c \
   oracle/scripts/run-rvfi.sh --all-insns
 ```
 
-* **37/37 `insn_*_ch0` checks PASS** (every base-I instruction in
+* **37/37 base-I `insn_*_ch0` checks PASS** (every instruction in
   `insns/isa_rv32i.txt`: add…xori). Each is a bounded proof at the retirement
   cycle, not a test vector.
+* **8/8 M-extension checks PASS** (2026-11-14, agent `rv-muldiv`):
+  `insn_mul_ch0`, `insn_mulh_ch0`, `insn_mulhsu_ch0`, `insn_mulhu_ch0` at cycle 4
+  and `insn_div_ch0`, `insn_divu_ch0`, `insn_rem_ch0`, `insn_remu_ch0` at cycle 35,
+  each on an `rv32im` core emitted from the repeated-instruction fixture. The
+  combined sweep (`--all-insns`) is **45/45 PASS, 0 FAIL, 0 SKIP**.
 * **`causal_mem_ch0` PASS** on the `mixed` fixture (a store and a load of the
   same word; check cycle 21, a store retirement) — this is the memory-causality
   check; this riscv-formal revision has no check literally named `rvfi_mem`.
@@ -161,8 +191,10 @@ read-only and pinned by commit as above; the counts and log summary are in
 
 * No checker for traps/interrupts/CSRs is configured; the core has no privileged
   architecture.
-* The M extension would need `rvfi_muldiv` and a configuration with `M`; the
-  wrapper exposes the multiplier's result but this has not been run.
+* The M checks use a fixed program of one repeated instruction, so the formal
+  proof sees only the zero-operand (for division: divide-by-zero) path; the
+  arithmetic corners are tested by the trace oracle, not proved.
 * The pipelined core (`Rv.Pipe`) retires at R, not at the multi-cycle E/M/S/X/V
   completion points; it needs a separate wrapper (latent `rr` stage) and has not
-  been written.
+  been written here (see §12b of `wiz-notes/rv-core-proofs.md`).
+* The Doom SoC (DDR/cache/bus and the frame loop) is not in this formal harness.

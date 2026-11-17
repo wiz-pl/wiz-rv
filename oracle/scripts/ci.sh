@@ -2,7 +2,8 @@
 # CI / test entry point for the independent oracle.
 #
 #   oracle/scripts/ci.sh              # selftest + rvfi wrapper lint/simulation
-#   oracle/scripts/ci.sh --formal     # also run the riscv-formal checks
+#   oracle/scripts/ci.sh --formal     # also run sample riscv-formal checks
+#                                     # (add: base-I, mul and div: M extension)
 #
 # A missing build (the Wiz trace binaries) or missing external tools (iverilog,
 # sby, yosys, boolector) is a clean SKIP with exit 0; a real comparison failure
@@ -26,6 +27,8 @@ fi
 if [ -x oracle/.build/emit_core ]; then
   if [ "$formal" = 1 ]; then
     oracle/scripts/run-rvfi.sh --instruction add --sby || exit 1
+    oracle/scripts/run-rvfi.sh --instruction mul --sby || exit 1
+    oracle/scripts/run-rvfi.sh --instruction div --sby || exit 1
   else
     oracle/scripts/run-rvfi.sh --fixture alu || exit 1
   fi

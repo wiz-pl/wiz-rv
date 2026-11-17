@@ -196,6 +196,7 @@ class Fixture:
                 self.halves.append(v & 0xFFFF)
                 self.halves.append((v >> 16) & 0xFFFF)
         self.words = self.halves          # the legacy name (oracle.py)
+        self.mx = self.cfg == "rv32im"
         self.path = path
 
 
@@ -204,7 +205,7 @@ class Machine:
         self.cfg = fx.cfg
         self.rbits = 5
         self.mbits = fx.mbits
-        self.mx = False
+        self.mx = (fx.cfg == "rv32im")
         self.pc = 0
         self.regs = [0] * (1 << self.rbits)
         self.mem = bytearray(1 << self.mbits)
@@ -437,7 +438,12 @@ class Machine:
 
 
 def muldiv(f3, a, b):
-    """The M extension, for completeness (fixtures are RV32I only)."""
+    """The M extension: MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU.
+
+    Signed division truncates toward zero and the remainder takes the dividend's
+    sign.  Division by zero returns all ones (the dividend for REM/REMU) and
+    INT_MIN / -1 returns INT_MIN (remainder 0), as the ISA specifies.
+    """
     au, bu = a & MASK32, b & MASK32
     as_, bs = s32(au), s32(bu)
     if f3 == 0:
