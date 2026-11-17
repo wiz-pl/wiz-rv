@@ -25,7 +25,9 @@ tests/*.wiz          grail tests
 
 ## The machine
 
-RV32I (32 registers) or RV32E (16), the unprivileged base ISA v2.1 without CSRs:
+RV32I (32 registers) or RV32E (16), the unprivileged base ISA v2.1, with the machine
+CSRs, Zicsr, MRET and WFI of docs/csr.md (the riscv-arch-test Zicsr programs in
+oracle/arch-test use `mscratch`). Without a handler (`mtvec` 0):
 ECALL, EBREAK, an illegal instruction, a misaligned load, store or jump target stop the
 machine instead of trapping into a handler. The stopped machine records the RISC-V trap
 state: the cause (`mcause`; `src/Rv/Isa.wiz` has the list), `tval` (`mtval`: the
