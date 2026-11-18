@@ -72,9 +72,8 @@ structure G4.HSt (wb : Nat) (r : HwTy → Type) where
 -- the shared peripherals, all at 100 MHz
 structure G4.Sh (fl : Nat) (r : HwTy → Type) where
   intc : Intc.Ctl r
-  sync : Sync r
-  rx : Rx r
-  tx : UTx r
+  rx : Uart.Rx 10 r
+  tx : Uart.Tx 10 r
   full : r W1
   byte : r W8
   cyc : r B64
@@ -90,7 +89,7 @@ structure G4.Sh (fl : Nat) (r : HwTy → Type) where
   deriving Bundle
 
 def G4.Sh.init (fl : Nat) : G4.Sh fl HwTy.El :=
-  G4.Sh.mk Intc.init Sync.init Rx.init UTx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0)
+  G4.Sh.mk Intc.init (Uart.Rx.init 10) (Uart.Tx.init 10) (BitVec.ofNat 1 0) (BitVec.ofNat 8 0)
     (BitVec.ofNat 64 0) (fun (a : BitVec 13) => BitVec.ofNat 16 0) (BitVec.ofNat 16 0)
     (BitVec.ofNat 1 0) (BitVec.ofNat 13 0) (BitVec.ofNat 16 0)
     (RCtl.mk (RSeq.mk (BitVec.ofNat 7 0) (BitVec.ofNat 1 0) (BitVec.ofNat 21 0))
@@ -258,8 +257,8 @@ def G4.step (cfg : G4.Cfg) (wb : Nat) {r : HwTy → Type} [Hw r] (s : G4.St wb G
   let wioff : r B16 := GMap.mmioOff wioa;
   let uartRd := Hw.and rdAny (Hw.and (Hw.not rfbA) (isK rioff GMap.uart));
   let uartWr := Hw.and wrAny (Hw.and (Hw.not wfbA) (isK wioff GMap.uart));
-  let rr := rxStep (Doom.baudK .true) sh.rx sh.sync.ff2;
-  let ω got := Byte.unpack (Hw.snd rr);
+  let rr := Uart.rxStep 10 (Doom.baudK .true) sh.rx (Uart.RxIn.mk uart_rx);
+  let ω got := Uart.RxOut.unpack (Hw.snd rr);
   let fw := Hw.and wrAny wfbA;
   let ω ol := sh.oled;
   let y13 : r (HwTy.bits 13) := Hw.cat (Hw.lit 7 0) ol.gen.y;
@@ -281,9 +280,8 @@ def G4.step (cfg : G4.Cfg) (wb : Nat) {r : HwTy → Type} [Hw r] (s : G4.St wb G
   let h3 := G4.HSt.mk (CoreSt.held G4.ab wb rst en (Hw.fst n3) (G4.hart s 3).cpu)
     (BusA.unpack (Hw.mux rst (BusA.pack (BusA.zero (r := r))) (Hw.fst b3)));
   let shN := G4.Sh.mk (Intc.Ctl.unpack intcNext)
-    (Sync.unpack (syncStep sh.sync uart_rx))
-    (Rx.unpack (Hw.fst rr))
-    (UTx.unpack (txStep (Doom.baudK .true) sh.tx sh.txGo sh.txB))
+    (Uart.Rx.unpack 10 (Hw.fst rr))
+    (Uart.Tx.unpack 10 (Hw.fst (Uart.txStep 10 (Doom.baudK .true) sh.tx (Uart.TxIn.mk sh.txGo sh.txB))))
     (Hw.mux got.valid hi (Hw.mux uartRd lo sh.full))
     (Hw.mux got.valid got.data sh.byte)
     (inc sh.cyc)

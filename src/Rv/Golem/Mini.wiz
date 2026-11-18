@@ -43,9 +43,8 @@ def MB64 : HwTy := HwTy.bits 64
 
 structure MSt (fl : Nat) (r : HwTy → Type) where
   cpu : CoreSt 5 12 r
-  sync : Sync r
-  rx : Rx r
-  tx : UTx r
+  rx : Uart.Rx 10 r
+  tx : Uart.Tx 10 r
   full : r W1
   byte : r W8
   cyc : r MB64
@@ -62,8 +61,8 @@ structure MSt (fl : Nat) (r : HwTy → Type) where
 
 def Mini.step (cfg : RgbCfg) (n : Nat) {r : HwTy → Type} [Hw r] (s : MSt cfg.frameLog r) (x : MIn r) :
     r (HwTy.prod (MSt.code cfg.frameLog) MOut.code) :=
-  let rr := rxStep n s.rx s.sync.ff2;
-  let ω got := Byte.unpack (Hw.snd rr);
+  let rr := Uart.rxStep 10 n s.rx (Uart.RxIn.mk x.uart_rx);
+  let ω got := Uart.RxOut.unpack (Hw.snd rr);
   let rst := bitOf 0 x.btn;
   -- the core with no answer first: its request's address and the I/O decode
   let ω o0 := Out.unpack (Hw.snd (coreStep 5 12 .true s.cpu In.quiet));
@@ -102,9 +101,8 @@ def Mini.step (cfg : RgbCfg) (n : Nat) {r : HwTy → Type} [Hw r] (s : MSt cfg.f
   let oledNext := rctlStep cfg RProg.tree ol s.col;
   Hw.pair
     (MSt.pack cfg.frameLog (MSt.mk c2
-      (Sync.unpack (syncStep s.sync x.uart_rx))
-      (Rx.unpack (Hw.fst rr))
-      (UTx.unpack (txStep n s.tx s.txGo s.txB))
+      (Uart.Rx.unpack 10 (Hw.fst rr))
+      (Uart.Tx.unpack 10 (Hw.fst (Uart.txStep 10 n s.tx (Uart.TxIn.mk s.txGo s.txB))))
       (Hw.mux got.valid hi (Hw.mux (Hw.and o.rd uartA) lo s.full))
       (Hw.mux got.valid got.data s.byte)
       (inc s.cyc)
@@ -136,7 +134,7 @@ def Mini.oledPixels (cfg : RgbCfg) : RCtl cfg.frameLog HwTy.El :=
     Spi.init
 
 def MSt.initWith (cfg : RgbCfg) (prog : List Nat) (startPix : Bool) (pixels : List Nat) : MSt cfg.frameLog HwTy.El :=
-  MSt.mk (CoreSt.init 5 12 prog) Sync.init Rx.init UTx.init
+  MSt.mk (CoreSt.init 5 12 prog) (Uart.Rx.init 10) (Uart.Tx.init 10)
     (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 64 0) Intc.init
     (Mini.pix0 pixels) (BitVec.ofNat 16 (Hdl.nthD 0 pixels 0))
     (BitVec.ofNat 1 0) (BitVec.ofNat 13 0) (BitVec.ofNat 16 0)

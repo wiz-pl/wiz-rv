@@ -172,9 +172,8 @@ structure Perf (r : HwTy → Type) where
 structure DSys (fl : Nat) (h : HwTy) (r : HwTy → Type) where
   edge : Edge r
   cpu : r h
-  sync : Sync r
-  rx : Rx r
-  tx : UTx r
+  rx : Uart.Rx 10 r
+  tx : Uart.Tx 10 r
   full : r W1
   byte : r W8
   cyc : r B65     -- (the low bit is a prescaler at the full rate)
@@ -191,8 +190,8 @@ structure DSys (fl : Nat) (h : HwTy) (r : HwTy → Type) where
 def dSys (full : Bool) (cfg : RgbCfg) (ediv : Nat) (cc : Circuit CIn.code COut.code) {r : HwTy → Type} [Hw r] (s : DSys cfg.frameLog cc.st r) (x : DIn r) :
     r (HwTy.prod (DSys.code cfg.frameLog cc.st) DOut.code) :=
   let lob := Doom.lo full;
-  let rr := rxStep (Doom.baudK full) s.rx s.sync.ff2;
-  let ω got := Byte.unpack (Hw.snd rr);
+  let rr := Uart.rxStep 10 (Doom.baudK full) s.rx (Uart.RxIn.mk x.uart_rx);
+  let ω got := Uart.RxOut.unpack (Hw.snd rr);
   let rst := bitOf 0 x.btn;
   let ω o0 := (COut.unpack (Hw.snd (Circuit.inst cc s.cpu (CIn.pack (CIn.mk In.quiet rst))))).o;
   let off : r B16 := GMap.mmioOff o0.ioa;
@@ -252,9 +251,8 @@ def dSys (full : Bool) (cfg : RgbCfg) (ediv : Nat) (cc : Circuit CIn.code COut.c
       -- never sees the last one's: there is always a cycle outside P between two)
       (Edge.mk (Hw.and x.ready o0.pend) (Hw.and x.rvalid o0.pend) x.rdata o.valid o.pend x.hits x.misses)
       (Hw.fst cr)
-      (Sync.unpack (syncStep s.sync x.uart_rx))
-      (Rx.unpack (Hw.fst rr))
-      (UTx.unpack (txStep (Doom.baudK full) s.tx s.txGo s.txB))
+      (Uart.Rx.unpack 10 (Hw.fst rr))
+      (Uart.Tx.unpack 10 (Hw.fst (Uart.txStep 10 (Doom.baudK full) s.tx (Uart.TxIn.mk s.txGo s.txB))))
       (Hw.mux got.valid hi (Hw.mux (Hw.and o.rd uartA) lo s.full))
       (Hw.mux got.valid got.data s.byte)
       (inc s.cyc)
@@ -303,7 +301,7 @@ def dSys (full : Bool) (cfg : RgbCfg) (ediv : Nat) (cc : Circuit CIn.code COut.c
 def DSys.init (cfg : RgbCfg) (cc : Circuit CIn.code COut.code) : DSys cfg.frameLog cc.st HwTy.El :=
   DSys.mk (Edge.mk (BitVec.ofNat 1 0) (BitVec.ofNat 1 0) (BitVec.ofNat 32 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0)
       (BitVec.ofNat 32 0) (BitVec.ofNat 32 0))
-    cc.init Sync.init Rx.init UTx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 65 0) Intc.init
+    cc.init (Uart.Rx.init 10) (Uart.Tx.init 10) (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 65 0) Intc.init
     (Snd.mk (fun (a : BitVec 12) => BitVec.ofNat 8 128) (BitVec.ofNat 13 0) (BitVec.ofNat 13 0) (BitVec.ofNat 8 128)
       (BitVec.ofNat 8 128) (BitVec.ofNat 14 0) (BitVec.ofNat 9 0) (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 32 4096))
     (Fb.mk (fun (a : BitVec 13) => BitVec.ofNat 16 0) (BitVec.ofNat 16 0) (BitVec.ofNat 4 0) (BitVec.ofNat 1 0) (BitVec.ofNat 16 0)

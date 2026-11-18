@@ -58,9 +58,8 @@ structure ABoard (r : HwTy → Type) where
 
 structure ASys (ab wb : Nat) (r : HwTy → Type) where
   cpu : CoreSt ab wb r
-  sync : Sync r
-  rx : Rx r
-  tx : UTx r
+  rx : Uart.Rx 10 r
+  tx : Uart.Tx 10 r
   full : r W1
   byte : r W8
   beat : r B26
@@ -70,8 +69,8 @@ structure ASys (ab wb : Nat) (r : HwTy → Type) where
 
 def aStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (n : Nat)
     (s : ASys ab wb r) (x : APins r) : r (HwTy.prod (ASys.code ab wb) ABoard.code) :=
-  let rr := rxStep n s.rx s.sync.ff2;
-  let ω got := Byte.unpack (Hw.snd rr);
+  let rr := Uart.rxStep 10 n s.rx (Uart.RxIn.mk x.uart_rx);
+  let ω got := Uart.RxOut.unpack (Hw.snd rr);
   let ω o0 := Out.unpack (Hw.snd (coreStep ab wb mx s.cpu In.quiet));
   -- the UART at offset 0: an input byte or -1; a store waits for the transmitter
   let uartA := isK (Hw.slice 0 8 o0.ioa : r W8) 0;
@@ -91,9 +90,8 @@ def aStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (n : Nat)
   Hw.pair
     (ASys.pack ab wb (ASys.mk
       c2
-      (Sync.unpack (syncStep s.sync x.uart_rx))
-      (Rx.unpack (Hw.fst rr))
-      (UTx.unpack (txStep n s.tx (Hw.and o.wr uartA) o.byte))
+      (Uart.Rx.unpack 10 (Hw.fst rr))
+      (Uart.Tx.unpack 10 (Hw.fst (Uart.txStep 10 n s.tx (Uart.TxIn.mk (Hw.and o.wr uartA) o.byte))))
       (Hw.mux got.valid hi (Hw.mux take lo s.full))
       (Hw.mux got.valid got.data s.byte)
       (inc s.beat)
@@ -105,7 +103,7 @@ def aStep {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (n : Nat)
 
 def arty (ab wb : Nat) (mx : Bool) (n : Nat) (prog : List Nat) : Circuit APins.code ABoard.code :=
   Circuit.bundled (ASys.bundle ab wb) APins.bundle ABoard.bundle
-    (ASys.mk (CoreSt.init ab wb prog) Sync.init Rx.init UTx.init (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 26 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0))
+    (ASys.mk (CoreSt.init ab wb prog) (Uart.Rx.init 10) (Uart.Tx.init 10) (BitVec.ofNat 1 0) (BitVec.ofNat 8 0) (BitVec.ofNat 26 0) (BitVec.ofNat 1 0) (BitVec.ofNat 1 0))
     (aStep ab wb mx n)
 
 -- Half rate: every register of `c` (and every memory write) is enabled in every other
