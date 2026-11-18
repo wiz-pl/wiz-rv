@@ -138,13 +138,14 @@ def GBoard.checkBoard : XBoard :=
 -- The ports the PLL wrapper drives (Clocking.inDecls drops them from the top): the
 -- netlist keeps them, the board's pin table does not have them.
 def GBoard.driven (p : NetPort) : Bool :=
-  List.any (fun (q : String × String) => Hdl.strEq p.name q.1)
-    (List.append Board.clocking.clocks Board.clocking.signals)
+  Hdl.member p.name
+    (List.append (Hdl.map (fun (q : String × ClockSource) => q.1) Board.clocking.domains)
+      (Hdl.map (fun (q : String × String) => q.1) Board.clocking.signals))
 
 def GBoard.topNetlist (n : Netlist) : Netlist :=
   Netlist.mk n.name n.nodes n.regs
     (List.filter (fun (p : NetPort) => Bool.not (GBoard.driven p)) n.inputs)
-    n.outputs n.hints n.mems n.errors
+    n.outputs n.hints n.mems n.clocks n.errors
 
 def GBoard.ddrPorts : List (String × Nat) :=
   Hdl.map (fun (p : XPin) => (XPin.port p, XPin.width p)) GBoard.ddrPins
@@ -160,7 +161,7 @@ def GBoard.portsCount : Nat := List.length GBoard.topPorts
 -- the netlist's port count: the board's ports less `clk` (the wrapper adds it), plus
 -- the four inputs the PLL wrapper drives
 def GBoard.corePorts : Nat :=
-  (GBoard.portsCount - 1) + List.length (List.append Board.clocking.clocks Board.clocking.signals)
+  (GBoard.portsCount - 1) + List.length Board.clocking.domains + List.length Board.clocking.signals
 
 -- the pin lines in the XDC (one `set_property … PACKAGE_PIN` per pin)
 def GBoard.xdcPinCount : Nat :=

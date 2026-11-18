@@ -9,8 +9,8 @@ rough: one run each on a shared machine), **papercut** (works, but costs time).
 Toolchain: the states below were recorded with wiz master 50cd3e7 (2026-11-12) + PR #166
 (agent/cohesion-hw-mem, memories) + PR #199 (agent/hdl-sim-perf, the fast simulator),
 merged locally (one trivial conflict in Tests/ElabFix.lean). Both PRs are in master now,
-and `wiz-toolchain` pins `master@071a033a…`, the first snapshot release with both; see
-README.md, "Toolchain".
+and `wiz-toolchain` pins `master@4ad29792…` (the `flake.lock` `wiz` input is the same
+commit); see README.md, "Toolchain".
 
 ## Language and elaborator
 

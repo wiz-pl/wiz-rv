@@ -188,8 +188,9 @@ load program. No assertion failed. See [oracle/README.md](oracle/README.md) and
 
 The HDL memories (PR #166) and the fast netlist simulator (PR #199) were unmerged when
 this was written, so the original toolchain was wiz master 50cd3e7 with both branches
-merged locally. They are in master now: `wiz-toolchain` pins `master@071a033a…`, the
-first snapshot release that has both, instead of a local-merge description. `flake.nix`
+merged locally. They are in master now: `wiz-toolchain` pins `master@4ad29792…`, a
+master snapshot that has both, instead of a local-merge description, and `flake.lock`
+locks the `wiz` input to the same commit (`nix develop` therefore uses it). `flake.nix`
 gives yosys, nextpnr-ice40, icestorm and Icarus Verilog.
 
 ```sh
