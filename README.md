@@ -112,7 +112,7 @@ mem; DDR code does not pay this.
 
 ## Results
 
-| design | part | logic | block RAM | Fmax (nextpnr) |
+| design | part | logic | block RAM | Fmax (nextpnr, reported) |
 |---|---|---|---|---|
 | RV32E, 2 KB, LEDs (`rv32e_hx1k`) | iCE40-HX1K (tq144, iCEstick pins) | 1036 / 1280 LCs (80 %) | 8 / 16 | 37 MHz |
 | RV32IM, 16 KB, UART (`rv32im_arty_uart`) | Artix-7 XC7A35T (Arty A7-35T) | about 970 LUTs, 300 FFs, 10 DSP48E1 | 4 RAMB36E1 + 12 RAM32M (the register file) | 78.9 MHz: run at half rate, 50 MHz (FINDINGS.md, H5) |
@@ -121,6 +121,15 @@ mem; DDR code does not pay this.
 | golem, pipelined (`golem`, board flow) | XC7A35T | 5063 LUTs, 3815 FFs, 4 DSP48E1 (DDR3, UART, OLED, the bus) | 23 RAMB36E1 + 4 RAMB18E1 + 12 RAM32M | 107.3 MHz (nextpnr), run at 100 |
 
 (The Arty build is artix-target's openXC7 flow: yosys, nextpnr-xilinx, Project X-Ray.)
+
+The Fmax column is **reported, not committed**: no nextpnr timing report or utilisation
+log is in this tree (`build/` is ignored, and the Arty flow needs an external chip
+database, `GOLEM_CHIPDB`), so these figures come from local runs and cannot be re-derived
+from the tree. The newest figure recorded in the project notes is **97.5 MHz** for the
+Doom machine (2026-11-16), below the 100 MHz it runs at on the board: treat 100 MHz as
+the board's operating point, not as a verified post-route Fmax. To make one
+reproducible, run `scripts/golem-board.sh timing` and commit `build/a35t/*.timing` with
+the nextpnr and chip-database revisions.
 
 ## The Arty demo
 
@@ -334,7 +343,8 @@ On the board (2026-11-12, with wiz-ddr3 f99ab70): the boot loader printed "wiz-r
 start-up on the console, as in the simulator). `scripts/arty-load.sh` is what was run
 (SRAM load, then rvload when the board says "DDR ok").
 
-With the pipelined core at 100 MHz (2026-11-12, doom_top at 100.12 MHz in nextpnr): Doom's
+With the pipelined core at 100 MHz (2026-11-12; doom_top reported at 100.12 MHz in
+nextpnr, no report committed): Doom's
 demo loop at about 15 frames a second (69 to 83 frames per 5 s), about 278 M instructions
 per 500 M cycles, so CPI about 1.8. (The perf line's "CPI x100" divides the 50 MHz cycle
 counter by the instruction count: 89 there is 1.78.) The multi-cycle core at half rate

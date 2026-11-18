@@ -270,8 +270,14 @@ than four Doom-class harts.
 
 ### Counts
 
-Yosys `synth_xilinx -flatten -abc9 -arch xc7` for the checked-in netlists, and
-nextpnr-xilinx 1.0.0 on the Arty chip database:
+Yosys `synth_xilinx -flatten -abc9 -arch xc7` for the generated netlists (`build/`, not
+checked in), and nextpnr-xilinx 1.0.0 on the Arty chip database:
+
+**These are reported results, not committed artifacts.** No timing report or nextpnr log
+is in the tree, and `GOLEM_CHIPDB` is external, so the table cannot be re-derived here.
+The newest Fmax recorded in the project notes is 97.5 MHz for the Doom machine
+(2026-11-16), below the 100 MHz these designs run at on the board; the 107.30 MHz below
+is from an earlier revision and is unverified. See the note in `README.md`.
 
 | variant | LUT | FF | RAMB36 | RAMB18 | DSP48 | nextpnr |
 |---|---:|---:|---:|---:|---:|---|

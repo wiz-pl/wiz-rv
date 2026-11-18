@@ -23,30 +23,57 @@ def PLs.regDiff (ab wb : Nat) (s : PpSt ab wb HwTy.El) (a : Arch) : Nat → List
       else .cons ("x" ++ Nat.repr i ++ ": core " ++ Nat.repr hwA ++ "/" ++ Nat.repr hwB ++ ", spec " ++ Nat.repr sp) .nil;
     List.append (PLs.regDiff ab wb s a k) here
 
+-- The CSR comparison. `skip` is the CSR a SYSTEM instruction that has already written
+-- (one in M or R) is ahead on: that one is left out, every other one is still compared.
+def PLs.csrDiffSkip {ab wb : Nat} (s : PpSt ab wb HwTy.El) (a : Arch) (skip : Nat → Bool) : List String :=
+  List.append (if skip Csr.aMstatus then .nil else Ls.one "mstatus" s.csr.mstatus.toNat a.csr.mstatus.toNat)
+    (List.append (if skip Csr.aMie then .nil else Ls.one "mie" s.csr.mie.toNat a.csr.mie.toNat)
+      (List.append (if skip Csr.aMtvec then .nil else Ls.one "mtvec" s.csr.mtvec.toNat a.csr.mtvec.toNat)
+        (List.append (if skip Csr.aMscratch then .nil else Ls.one "mscratch" s.csr.mscratch.toNat a.csr.mscratch.toNat)
+          (List.append (if skip Csr.aMepc then .nil else Ls.one "mepc" s.csr.mepc.toNat a.epc.toNat)
+            (List.append (if skip Csr.aMcause then .nil else Ls.one "mcause" s.csr.mcause.toNat a.csr.mcause.toNat)
+              (if skip Csr.aMtval then .nil else Ls.one "mtval" s.tval.toNat a.tval.toNat))))))
+
 def PLs.csrDiff {ab wb : Nat} (s : PpSt ab wb HwTy.El) (a : Arch) : List String :=
-  List.append (Ls.one "mstatus" s.csr.mstatus.toNat a.csr.mstatus.toNat)
-    (List.append (Ls.one "mie" s.csr.mie.toNat a.csr.mie.toNat)
-      (List.append (Ls.one "mtvec" s.csr.mtvec.toNat a.csr.mtvec.toNat)
-        (List.append (Ls.one "mscratch" s.csr.mscratch.toNat a.csr.mscratch.toNat)
-          (List.append (Ls.one "mepc" s.csr.mepc.toNat a.epc.toNat)
-            (List.append (Ls.one "mcause" s.csr.mcause.toNat a.csr.mcause.toNat)
-              (Ls.one "mtval" s.tval.toNat a.tval.toNat))))))
+  PLs.csrDiffSkip s a (fun _ => .false)
 
 -- is the word at `pc` (in the specification's memory) a SYSTEM instruction (a CSR
 -- instruction, MRET, WFI, ECALL, EBREAK)?
 def PLs.isSys (c : Cfg) (a : Arch) (pc : BitVec 32) : Bool := Nat.beq (Ins.opcode (Rv.load 4 c a pc)) Op.system
 
+-- The CSR a SYSTEM instruction writes, decoded from its word at `pc`: its `csrAddr`
+-- (CSRRS/CSRRC/CSRRSI/CSRRCI with rs1/uimm = x0 do not write), or `mstatus` for MRET
+-- (MIE = MPIE). `none` for anything else (WFI, ECALL, EBREAK, a non-SYSTEM word). An
+-- illegal CSR access traps instead of writing, so skipping its address as well is
+-- harmless: the next comparison covers it.
+def PLs.aheadCsr (c : Cfg) (a : Arch) (pc : BitVec 32) : Option Nat :=
+  let ω w := Rv.load 4 c a pc;
+  if Bool.not (Nat.beq (Ins.opcode w) Op.system) then .none
+  else if Nat.beq w 807403635 then .some Csr.aMstatus   -- MRET (0x3020_0073)
+  else
+    let ω f3 := Ins.f3 w;
+    let ω rs := Rv.bits w 15 5;
+    if Bool.or (Nat.beq f3 1) (Nat.beq f3 5) then .some (Rv.bits w 20 12)
+    else if Bool.and
+        (Bool.or (Nat.beq f3 2) (Bool.or (Nat.beq f3 3) (Bool.or (Nat.beq f3 6) (Nat.beq f3 7))))
+        (Bool.not (Nat.beq rs 0)) then .some (Rv.bits w 20 12)
+    else .none
+
 -- The CSRs are written in E (src/Rv/Pipe.wiz, `serial`), two stages before the
--- instruction retires, so while a SYSTEM instruction is in M or R the core's CSRs are
--- already past the specification's: they are compared at every other retirement, and
--- when the core stops.
+-- instruction retires, so while a SYSTEM instruction is in M or R the core's CSR file is
+-- already past the specification's by exactly that instruction's write. Compare every
+-- CSR except that one: a back-to-back SYSTEM pair therefore still checks every CSR the
+-- pair does not write (before 2026-11-17 all seven were skipped while either was ahead).
 def PLs.compare (ab wb : Nat) (mx : Bool) (s : PpSt ab wb HwTy.El) (a : Arch) : List String :=
   let ω c := Ls.cfgM ab wb mx;
-  let ω ahead := Bool.or (Bool.and (BitVec.isTrue s.rr.v) (PLs.isSys c a s.rr.pc))
-    (Bool.and (BitVec.isTrue s.m.v) (PLs.isSys c a s.m.pc));
+  let ω skipped : Nat → Bool := fun (k : Nat) =>
+    Bool.or (Bool.and (BitVec.isTrue s.m.v) (match PLs.aheadCsr c a s.m.pc with
+        | .some x => Nat.beq k x | .none => .false))
+      (Bool.and (BitVec.isTrue s.rr.v) (match PLs.aheadCsr c a s.rr.pc with
+        | .some x => Nat.beq k x | .none => .false));
   List.append (if Nat.beq s.rr.pc.toNat a.pc.toNat then .nil
       else .cons ("pc: core " ++ Nat.repr s.rr.pc.toNat ++ ", spec " ++ Nat.repr a.pc.toNat) .nil)
-    (List.append (if ahead then .nil else PLs.csrDiff s a) (PLs.regDiff ab wb s a (Rv.pow2 ab - 1)))
+    (List.append (PLs.csrDiffSkip s a skipped) (PLs.regDiff ab wb s a (Rv.pow2 ab - 1)))
 
 -- the core's byte at address `x`: the data copy, the fetch copy
 def PLs.byteD (ab wb : Nat) (s : PpSt ab wb HwTy.El) (x : Nat) : Nat :=

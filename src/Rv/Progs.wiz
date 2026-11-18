@@ -109,6 +109,24 @@ def Prog.csrImm : List Asm :=
   A.csrrwi 11 Csr.aMscratch 0 :: A.csrrs 12 Csr.aMscratch 0 :: P.out 11 :: P.out 12 ::
   A.ebreak :: .nil
 
+-- back-to-back SYSTEM instructions: four CSRs written with no instruction between them,
+-- read back in a row, then MPIE set, mepc written and MRET taken. A CSR is written in E,
+-- so while one of these is in M or R the core is ahead of the specification by exactly
+-- that instruction's write; PLs.compare leaves that one out and compares every other
+-- CSR at that retirement, which is what makes a wrong intermediate value visible before
+-- it is read back. (Before 2026-11-17 it skipped all seven CSRs while either was ahead.)
+def Prog.csrPair : List Asm :=
+  A.li 1 5 :: A.csrrw 2 Csr.aMscratch 1 ::
+  A.li 3 136 :: A.csrrw 4 Csr.aMie 3 ::
+  A.li 5 16 :: A.csrrw 6 Csr.aMtvec 5 ::
+  A.csrrs 7 Csr.aMscratch 0 :: A.csrrs 8 Csr.aMie 0 :: A.csrrs 9 Csr.aMtvec 0 ::
+  A.li 10 128 :: A.csrrw 0 Csr.aMstatus 10 ::
+  A.la 11 "back" :: A.csrrw 0 Csr.aMepc 11 ::
+  A.mret ::
+  A.label "back" :: A.csrrs 12 Csr.aMstatus 0 ::
+  A.csrrs 13 Csr.aMscratch 0 :: A.csrrs 14 Csr.aMie 0 :: A.csrrs 15 Csr.aMtvec 0 ::
+  A.ebreak :: .nil
+
 -- traps and interrupts with handlers (docs/csr.md): mtvec in vectored mode (base 4,
 -- bit 0 set), so an exception goes to 4 and interrupt `c` to 4 + 4c. ECALL is handled
 -- and returned past (mepc + 4); the timer interrupt (MTIP, from `Prog.irqAt`) is taken

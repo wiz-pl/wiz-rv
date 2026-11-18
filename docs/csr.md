@@ -110,9 +110,22 @@ specification at every comparison point.
   enabled and take it at the same instruction with the same CSR effects; a retiring
   WFI is given `mie` as pending; a CSR read of `mip` is given the value the core read in
   E. What this checks is the architectural effect of every interrupt, not its latency.
-  Because CSRs are written in E, they are not compared while a SYSTEM instruction is in
-  M or R (they are already ahead), and are compared at every other retirement and at
-  the end.
+  Because CSRs are written in E, while a SYSTEM instruction is in M or R the core's CSR
+  file is ahead of the specification's by exactly that instruction's write. `PLs.compare`
+  therefore omits that one CSR (the instruction's `csrAddr`, or `mstatus` for MRET) and
+  compares the other six at every retirement and at the end. Before 2026-11-17 it
+  omitted all seven while either instruction was ahead, so a wrong value that was
+  consumed and overwritten inside a back-to-back SYSTEM pair was never compared;
+  `Prog.csrPair` is that pair.
+
+`mhartid` and `misa` are not compared because they are not state: both read 0 here
+(`mhartid` is the hart's number only in golem's four-hart SoC), and `misa` takes writes
+and keeps none. `mip` is not compared because it is not a CSR in either model: it is the
+interrupt input (`In.irqM/T/E`, the specification's `a.irq`), and the specification is
+given the pending bit the core acted on (`PLs.irqFor`), so a comparison would compare the
+test bench with itself. `PLs.csrDiff` in `finish` has the same seven fields; the
+multi-cycle `Ls.csrDiff` has the same list and no "ahead" window, so it compares the
+whole CSR file at the core's every E cycle.
 
 ## The trap-entry theorem
 
