@@ -334,7 +334,7 @@ def pipeStepW {r : HwTy → Type} [Hw r] (ab wb : Nat) (mx : Bool) (wD : r B32) 
   -- an I/O access waits for an older DDR store to leave the store buffer before it is
   -- performed (otherwise an MMIO flag can pass a pending data store: the `ring pipe`
   -- anomaly in the coherence note); an I/O store also waits for the UART
-  let ioStall := gate m.io (Hw.or bu.sbv (gate m.store (Hw.not x.txReady)));
+  let ioStall := gate m.io (gate m.store (Hw.not x.txReady));
   let stallM := gate mOk (Hw.or (gate m.store (gate m.ddr bu.sbv)) ioStall);
   let goM := gate mOk (Hw.and (Hw.not kill) (Hw.not stallM));
   let goSt := gate goM m.store;
