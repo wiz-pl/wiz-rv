@@ -114,6 +114,28 @@ specification at every comparison point.
   M or R (they are already ahead), and are compared at every other retirement and at
   the end.
 
+### The pipeline CSR test, expected-fail
+
+The suppression above is the pipeline's known CSR gap: at any retirement boundary while a
+SYSTEM instruction is in M or R, the CSR file on the core already holds that
+instruction's write (it is made in E) while the specification has not stepped it, so no
+CSR is compared there. A value that is written and then consumed or overwritten before
+its instruction retires is never checked. It is invisible to `csrE`, which is the case
+8b1177c removed from `tests/plockstep.wiz` in PR #3 (the pipeline then stopped every
+program at cycle 3); d9f1bb6 restored `csrE` together with the suppression.
+
+`csrStrictE` (same file) is the test at full strength: `PLs.runStrict` compares every
+CSR at every retirement, with no suppression. It DISAGREES, and that disagreement is in
+`tests/plockstep.expected` as an expected-fail:
+
+```
+EXPECTED-FAIL (pipeline CSR gap, docs/csr.md): ... DISAGREES; after N instructions; mscratch: core 1, spec 0
+```
+
+so the case still runs and the missing coverage stays visible instead of being deleted.
+If the pipeline ever compares CSRs at retirement (or the comparison point moves), the
+line becomes `agrees` and the case is promoted, not removed.
+
 ## The trap-entry theorem
 
 Stated for the multi-cycle core, RV32E, 2 KB (the configuration of `src/Rv/Proofs.wiz`),
