@@ -1,4 +1,4 @@
--- test: run
+-- test: run timeout 900
 import Rv.Lockstep
 import Rv.Progs
 import Rv.Board
@@ -55,7 +55,7 @@ def L.uart (n : Nat) : Nat → List Nat → List Nat
 def L.board (n cycles steps : Nat) : IO Unit :=
   let prog := Asm.assemble (Prog.demo 16368);
   let ins := L.rep (Bundle.toEl APins.bundle (APins.mk (BitVec.ofNat 1 1) (BitVec.ofNat 4 0))) cycles .nil;
-  let tx := Hdl.map (fun (o : List Nat) => Hdl.nthD 1 o 0) (Circuit.simFast (arty 5 12 .true n prog) ins);
+  let tx := Hdl.map (fun (o : List Nat) => Hdl.nthD 0 o 0) (Circuit.simFast (arty 5 12 .true n prog) ins);
   let got := L.uart n cycles tx;
   let sp := List.reverse (Rv.run (Cfg.rv32im 14) steps (Arch.start (Cfg.rv32im 14) prog)).out;
   IO.println ("demo on the Arty design (" ++ Nat.repr (List.length got) ++ " bytes): \""

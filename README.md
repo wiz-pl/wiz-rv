@@ -223,7 +223,10 @@ out next to the repository, where `grail.wiz` expects it. The jobs are:
 * **oracle**: `oracle.py build`, then the selftest (`isa` and `core` against the
   Python reference on every fixture) and the rvfi wrapper (Icarus lint, and its beats
   against the Python reference on the five base fixtures).
-* **grail test (lockstep, plockstep, spec)**: both cores against the specification.
+* **grail test (lockstep, plockstep, spec, long)**: both cores against the
+  specification, including the long compiled runs (`tests/long.wiz`: the sieves, the M
+  self-test and the Arty design's UART on the fast simulator, with its own
+  `-- test: run timeout 900`).
 * **grail test (golem)**: every tests/golem*.wiz, with `--test-timeout 600`. On a
   cold elaboration cache, golem_intc needs about 4.5 GB. GitHub's 16 GB runners hold
   that; a smaller runner needs at least 6 GB for this job.
@@ -232,7 +235,6 @@ CI does not cover these:
 
 * the pipelined core's proofs (proofs/PipeProofs, `scripts/pipe-proofs.sh`, about 20
   minutes each);
-* tests/long.wiz, which cannot pass at this pin because of the fixed 60 s program limit;
 * Sail, Spike and riscv-formal (`run-oracle.sh run`, `run-rvfi.sh --sby`);
 * any synthesis, place and route or Fmax. The Artix-7 flow needs nextpnr-xilinx and an
   xc7a35t chip database, and neither is in nixpkgs or Cachix;

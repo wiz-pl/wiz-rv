@@ -115,9 +115,12 @@ jobs:
           done
 
   # 3. The cores against the specification: tests/lockstep.wiz (multi-cycle core),
-  # tests/plockstep.wiz (pipelined core) and tests/spec.wiz (the ISA, the C expansion).
+  # tests/plockstep.wiz (pipelined core), tests/spec.wiz (the ISA, the C expansion) and
+  # tests/long.wiz (the long compiled runs: the sieves and the M self-test against the
+  # specification, and the Arty design's UART at 4 cycles a bit; its `-- test: run
+  # timeout 900` is the limit it needs).
   lockstep:
-    name: grail test (lockstep, plockstep, spec)
+    name: grail test (lockstep, plockstep, spec, long)
     needs: toolchain
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -137,7 +140,7 @@ jobs:
           key: wiz-elab-lockstep-${{ steps.toolchain.outputs.ref }}-${{ github.sha }}
           restore-keys: wiz-elab-lockstep-${{ steps.toolchain.outputs.ref }}-
       - name: grail test
-        run: grail test tests/lockstep.wiz tests/plockstep.wiz tests/spec.wiz
+        run: grail test tests/lockstep.wiz tests/plockstep.wiz tests/spec.wiz tests/long.wiz
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
@@ -152,12 +155,9 @@ jobs:
   # elaboration cache (on a warm one, 0.5 GB and 5 s). GitHub's runners have 16 GB, so
   # it fits; a smaller (self-hosted) runner needs at least 6 GB for this job.
   #
-  # TIMEOUTS: --test-timeout 600 for golem_intc (186 s cold) until the pin has per-test
-  # `timeout` lines (wiz agent/grail-test-timeout); then golem_intc.wiz gets
-  # `-- test: check timeout 600` and the flag goes.
-  #
-  # NOT RUN: tests/long.wiz (it cannot pass at this pin: the program limit is a fixed
-  # 60 s); add it here with `-- test: run timeout 900` after the pin bump.
+  # TIMEOUTS: --test-timeout 600 gives golem_intc (186 s cold) room. A test can also
+  # raise its own limit with `-- test: check|run timeout SECS` (grail 23f);
+  # golem_intc.wiz has not needed one since.
   golem:
     name: grail test (golem)
     needs: toolchain
